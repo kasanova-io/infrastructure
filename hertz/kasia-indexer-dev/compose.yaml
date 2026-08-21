@@ -1,0 +1,34 @@
+name: kasia_indexer_dev
+
+services:
+  kasia_indexer_dev:
+    image: kkluster/kasia-indexer@sha256:1fbc2a670a643a155b9c2e6243afa409bceea79e8d577e51bb5d5d1f4fbf2468
+    container_name: kasia_indexer_dev
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      KASIA_INDEXER_DB_ROOT: /app/data
+      KASPA_NODE_WBORSH_URL: ws://kaspad-testnet10:17210
+      NETWORK_TYPE: testnet
+      RUST_BACKTRACE: "1"
+      RUST_LOG: info
+    expose:
+      - "8080"
+    volumes:
+      - kasia_indexer_dev_data:/app/data
+    networks:
+      - caddy_caddy_net
+    labels:
+      io.kasanova.environment: dev
+      io.kasanova.issue: KSNV-304
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?DEPLOYMENT_REVISION is required}
+    mem_limit: 2g
+    cpus: 4
+
+volumes:
+  kasia_indexer_dev_data:
+    name: kasia_indexer_dev_data
+
+networks:
+  caddy_caddy_net:
+    external: true
