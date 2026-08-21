@@ -1,5 +1,5 @@
 # BEGIN KSNV-304 DEV KASIA INDEXER
-dev-indexer.kasia.fyi {
+dev-indexer.kasanova.io {
     handle /healthz {
         rewrite * /metrics
         reverse_proxy kasia_indexer_dev:8080

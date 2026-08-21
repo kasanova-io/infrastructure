@@ -10,8 +10,8 @@ K-Kluster GitOps deployment.
 - Compose project: `kasia_indexer_dev`
 - Container: `kasia_indexer_dev`
 - Kaspa source: `ws://kaspad-testnet10:17210` on `caddy_caddy_net`
-- Public route: `https://dev-indexer.kasia.fyi`
-- Health path: `https://dev-indexer.kasia.fyi/healthz`
+- Public route: `https://dev-indexer.kasanova.io`
+- Health path: `https://dev-indexer.kasanova.io/healthz`
 - Persistent volume: `kasia_indexer_dev_data`
 - Indexer image: immutable digest in `compose.yaml`
 
