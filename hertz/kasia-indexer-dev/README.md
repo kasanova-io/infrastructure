@@ -1,19 +1,25 @@
 # Hertz DEV Kasia indexer
 
 This Compose project runs the Kasanova-owned TN10 Kasia indexer used by
-KSNV-304 end-to-end recovery testing. It is independent of the external
+Chats end-to-end testing. It is independent of the external
 K-Kluster GitOps deployment.
 
 ## Runtime contract
 
 - Host: `hertz`
-- Compose project: `kasia_indexer_dev`
-- Container: `kasia_indexer_dev`
+- Compose project: `chats_indexer_dev`
+- Container: `chats_indexer_dev`
 - Kaspa source: `ws://kaspad-testnet10:17210` on `caddy_caddy_net`
 - Public route: `https://dev-indexer.kasanova.io`
 - Health path: `https://dev-indexer.kasanova.io/healthz`
-- Persistent volume: `kasia_indexer_dev_data`
+- Persistent volume: the existing, verified migrated volume supplied as
+  `CHATS_INDEXER_DB_VOLUME` (`chats_indexer_dev_preserved_20260915` on Hertz)
 - Indexer image: tested immutable image ID supplied as `CHATS_INDEXER_IMAGE`
+
+The replacement has its own project and container name. Starting it must not
+recreate the original `kasia_indexer_dev` service or modify its original volume.
+The external volume declaration fails if the named migrated database is absent;
+it cannot silently start with an empty history.
 
 Set `DEPLOYMENT_REVISION` to the exact infrastructure commit before rendering
 or starting the Compose project. The container label
@@ -45,30 +51,40 @@ needs the image transferred or published by digest before deployment.
 
 ## DEV migration and cutover
 
-1. Start `compose.candidate.yaml` against its separate empty volume. Its HTTP
-   port is bound only to Hertz loopback at `18080`. Verify node connection,
-   increasing metrics, and real TN10 ingestion under both prefixes.
-2. Capture existing message API pages and transaction IDs as the history
-   baseline. Record the running image ID and deployment configuration.
-3. Take a consistent backup with the old writer stopped gracefully. Do not
-   copy the Fjall directory while it is being written. Preserve the original
-   volume and the existing recovery backup. Never attach two indexer processes
-   to the same writable database.
-4. Restore the backup into a separate candidate volume, then run the new image
-   there. The upstream v0-to-v1 migration changes DAA header keys; the original
-   backup must remain untouched. Verify all baseline message pages and IDs,
-   chain catch-up, restart persistence, and ingestion under both prefixes.
-5. Apply the managed Caddy block and validate the complete Caddy configuration.
-   Verify maintenance and internal-push routes return 404 at public ingress.
-   Export/import, purge, and garbage collection are private maintenance APIs.
-6. Deploy the reviewed infrastructure revision only after migration and real
-   DEV/TN10 acceptance pass. Stop writers before the final consistent copy and
-   switch; verify public health, both-prefix reads, and preserved history.
+Hertz already has a consistent copy, completed upstream migration, verified
+history, and a running dual-prefix writer. Do not repeat the original DEV
+snapshot or stop the original public writer for this rollout.
 
-For rollback, stop the new writer before restoring the saved original DB and
-image. Do not run the old image against a database migrated by the new image.
-Preserve any new records written since cutover for reconciliation before
-rollback; a stale snapshot alone does not preserve those messages.
+1. Use `chats_indexer_dev_preserved_20260915` as `CHATS_INDEXER_DB_VOLUME`.
+   Check the running writer's volume and image against `VERIFICATION.md`.
+   The disposable empty-volume `compose.candidate.yaml` is only a build smoke
+   test; it is not the public replacement and does not contain the history.
+2. After review, stop only `chats_indexer_dev_cursor_v2` gracefully, then start
+   this Compose project with the same migrated volume and tested image. Keep
+   its stopped predecessors stopped: one writer per database. Original public
+   DEV continues serving throughout replacement startup and catch-up.
+3. Wait for `/metrics` on the replacement, advancing chain processing, and
+   preserved history. Compare the original and replacement APIs again. Verify
+   native and `kchat:1` transactions on the replacement before routing traffic.
+4. Apply this directory's managed Caddy block to the existing full configuration,
+   validate it, and reload Caddy. It targets `chats_indexer_dev:8080`. Verify
+   public health, both-prefix reads, complete history, and Flutter decryption.
+   Verify maintenance and internal-push routes return 404 at public ingress.
+5. Record the exact infrastructure revision, image ID, volume, comparison,
+   transaction IDs, and device evidence. The old service remains running during
+   acceptance so a route rollback does not require its long cold startup.
+   Retire it only after accepted cutover and a separately authorized cleanup.
+
+For a first deployment on another host, create a consistent backup with its
+writer gracefully stopped, restore into a separate volume, run the migration,
+and verify complete history and restart persistence before step 2. Never copy a
+live Fjall directory or attach two writers to one volume.
+
+For routing rollback, validate and reload Caddy with the saved original upstream.
+The original indexer does not read `kchat:1`; returning traffic to it temporarily
+loses visibility of those messages. Preserve the upgraded volume and reconcile
+all new records before any subsequent database restoration. Never run the old
+image on the migrated database or overwrite either database with a stale copy.
 
 The candidate, manifests, or image build alone do not constitute deployed DEV
 acceptance or authorize a wallet release.

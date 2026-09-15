@@ -7,10 +7,10 @@ dev-indexer.kasanova.io {
 
     handle /healthz {
         rewrite * /metrics
-        reverse_proxy kasia_indexer_dev:8080
+        reverse_proxy chats_indexer_dev:8080
     }
 
-    reverse_proxy kasia_indexer_dev:8080 {
+    reverse_proxy chats_indexer_dev:8080 {
         health_uri /metrics
         health_interval 30s
         health_timeout 5s

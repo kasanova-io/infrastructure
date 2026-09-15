@@ -120,3 +120,32 @@ Final public recovery evidence is on Hertz under
 `/home/ren/Kasanova/staging/chats-history-20260915/final-public-verification.log`.
 The personal cursor image still needs reviewed deployment. No full Flutter
 release gate or wallet promotion is established by these backend checks.
+
+## Live upstream-prefix transaction and safe replacement configuration
+
+Current KaChat Android production `MessageProtocol`, `KasiaCipher`, and
+`Secp256k1` source at `13e6fc248ec558ed9234c4d2e959f8950a077b00` generated a
+`kchat:1:comm` packet encrypted to the dedicated Dave TN10 wallet. The dedicated
+Eve wallet signed and submitted it using the running Flutter app's production
+`WalletNotifier.sendTransaction` after real device authentication. No signing
+key was exported and no alternate transaction builder was used.
+
+- Accepted TN10 transaction:
+  `802b19afb451c4892423d948d9e9e2c15972f73c361ac98c15a3332d06c04b12`.
+- Accepting block:
+  `73852f69c4b44fcaed07b6cb17f04ce638f83443f4b2119e3d9dc106a53a5210`.
+- Archive payload equals the generated packet byte for byte; resolved input
+  address equals the controlled Eve wallet.
+- Upgraded private DEV API returns this transaction alongside Eve's existing
+  native `ciph_msg:1` reply. Original public DEV returns only the native reply.
+  This verifies the upgrade is necessary; public dual-prefix acceptance remains
+  incomplete until routing cutover and receiving-device decryption are verified.
+- Evidence: `/private/tmp/kachat-android-current/live-archive.json`,
+  `live-submission-attempt.json`, `candidate-indexer.json`, and
+  `public-indexer.json` on the implementation host.
+
+The DEV Compose configuration now uses the separate `chats_indexer_dev` project
+and container and requires an existing external migrated volume. Caddy targets
+that new container. It cannot recreate the original writer or silently create
+an empty replacement database. Hertz `docker compose config` rendering passed
+with the verified image and preserved volume. No live cutover was performed.
