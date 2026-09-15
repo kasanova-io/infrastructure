@@ -1,22 +1,22 @@
-name: chats_indexer_dev
+name: kasia_indexer_prod
 
 services:
-  chats_indexer_dev:
+  kasia_indexer_prod:
     image: ${CHATS_INDEXER_IMAGE:?CHATS_INDEXER_IMAGE must be the tested immutable image ID}
-    container_name: chats_indexer_dev
-    restart: unless-stopped
+    container_name: kasia_indexer_prod
     pull_policy: never
+    restart: unless-stopped
     environment:
       KASIA_INDEXER_DB_ROOT: /app/data
-      KASPA_NODE_WBORSH_URL: ws://kaspad-testnet10:17210
-      NETWORK_TYPE: testnet
+      KASPA_NODE_WBORSH_URL: ws://kaspad_mainnet:17110
+      NETWORK_TYPE: mainnet
       KASIA_API_BIND: 0.0.0.0:8080
       RUST_BACKTRACE: "1"
       RUST_LOG: info
     expose:
       - "8080"
     volumes:
-      - chats_indexer_dev_data:/app/data
+      - kasia_indexer_prod_data:/app/data
     networks:
       - caddy_caddy_net
     stop_signal: SIGINT
@@ -28,16 +28,14 @@ services:
       retries: 3
       start_period: 90s
     labels:
-      io.kasanova.environment: dev
-      io.kasanova.component: chats
+      io.kasanova.environment: prod
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?DEPLOYMENT_REVISION is required}
     mem_limit: 2g
-    cpus: 1
+    cpus: 2
 
 volumes:
-  chats_indexer_dev_data:
-    external: true
-    name: ${CHATS_INDEXER_DB_VOLUME:?CHATS_INDEXER_DB_VOLUME must name the verified migrated volume}
+  kasia_indexer_prod_data:
+    name: kasia_indexer_prod_data
 
 networks:
   caddy_caddy_net:
