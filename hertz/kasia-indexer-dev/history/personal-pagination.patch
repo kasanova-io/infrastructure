@@ -1,0 +1,442 @@
+--- a/indexer/src/api/v1/handshakes.rs
++++ b/indexer/src/api/v1/handshakes.rs
+@@ -1,3 +1,6 @@
++use indexer_db::messages::handshake::{HandshakeKeyBySender, HandshakeKeyByReceiver};
++use super::pagination::{decode_cursor, encode_cursor};
++use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+ use anyhow::{Context, bail};
+@@ -62,11 +65,14 @@
+ pub struct HandshakePaginationParams {
+     pub limit: Option<usize>,
+     pub block_time: Option<u64>,
++    /// Exclusive continuation token returned on each row; do not combine with block_time.
++    pub cursor: Option<String>,
+     pub address: String,
+ }
+ 
+ #[derive(Debug, Serialize, ToSchema)]
+ pub struct HandshakeResponse {
++    pub cursor: String,
+     pub tx_id: String,
+     pub sender: String,
+     pub receiver: String,
+@@ -91,12 +97,12 @@
+         (status = 500, description = "Internal server error", body = ErrorResponse)
+     )
+ )]
+-async fn get_handshakes_by_sender(
++pub(super) async fn get_handshakes_by_sender(
+     State(state): State<HandshakeApi>,
+     Query(params): Query<HandshakePaginationParams>,
+ ) -> impl IntoResponse {
+     let limit = params.limit.unwrap_or(10).min(50);
+-    let cursor = params.block_time.unwrap_or(0);
++    let from_block_time = params.block_time.unwrap_or(0);
+ 
+     let sender_rpc = match RpcAddress::try_from(params.address) {
+         Ok(addr) => addr,
+@@ -121,6 +127,14 @@
+         }
+     };
+ 
++    let cursor_key = match decode_cursor::<HandshakeKeyBySender>(
++        params.cursor.as_deref(), params.block_time, "handshake-sender",
++        |key| key.sender == sender,
++    ) {
++        Ok(key) => key,
++        Err(error) => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))),
++    };
++
+     let metrics = state.metrics.clone();
+     let db_read_started = std::time::Instant::now();
+     let result = spawn_blocking(move || {
+@@ -130,9 +144,14 @@
+ 
+         state
+             .handshake_by_sender_partition
+-            .iter_by_sender_from_block_time_rtx(&rtx, sender, cursor)
++            .iter_by_sender_from_block_time_rtx(&rtx, sender, 0)
+             .process_results(|iter| {
+-                iter.filter(|hs| seen_tx_ids.insert(hs.tx_id))
++                iter.filter(|hs| {
++                    // Include prior-page sightings in deduplication before applying the cursor.
++                    seen_tx_ids.insert(hs.tx_id)
++                        && hs.block_time.get() >= from_block_time
++                        && cursor_key.as_ref().is_none_or(|cursor| hs.as_bytes() > cursor.as_bytes())
++                })
+                     .take(limit)
+                     .map(|handshake| {
+                         let block_time = handshake.block_time.into();
+@@ -180,6 +199,7 @@
+                         let message_payload = faster_hex::hex_string(payload_bytes.as_ref());
+ 
+                         Ok(HandshakeResponse {
++                            cursor: encode_cursor("handshake-sender", handshake.as_bytes()),
+                             tx_id: faster_hex::hex_string(&handshake.tx_id),
+                             sender: sender_str,
+                             receiver: receiver_str,
+@@ -229,12 +249,12 @@
+         (status = 500, description = "Internal server error", body = ErrorResponse)
+     )
+ )]
+-async fn get_handshakes_by_receiver(
++pub(super) async fn get_handshakes_by_receiver(
+     State(state): State<HandshakeApi>,
+     Query(params): Query<HandshakePaginationParams>,
+ ) -> impl IntoResponse {
+     let limit = params.limit.unwrap_or(10).min(50);
+-    let cursor = params.block_time.unwrap_or(0);
++    let from_block_time = params.block_time.unwrap_or(0);
+ 
+     let receiver_rpc = match RpcAddress::try_from(params.address.clone()) {
+         Ok(addr) => addr,
+@@ -259,6 +279,14 @@
+         }
+     };
+ 
++    let cursor_key = match decode_cursor::<HandshakeKeyByReceiver>(
++        params.cursor.as_deref(), params.block_time, "handshake-receiver",
++        |key| key.receiver == receiver,
++    ) {
++        Ok(key) => key,
++        Err(error) => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))),
++    };
++
+     let metrics = state.metrics.clone();
+     let db_read_started = std::time::Instant::now();
+     let result = spawn_blocking(move || {
+@@ -268,9 +296,14 @@
+ 
+         state
+             .handshake_by_receiver_partition
+-            .iter_by_receiver_from_block_time_rtx(&rtx, &receiver, cursor)
++            .iter_by_receiver_from_block_time_rtx(&rtx, &receiver, 0)
+             .process_results(|iter| {
+-                iter.filter(|hs_key_payload_tuple| seen_tx_ids.insert(hs_key_payload_tuple.0.tx_id))
++                iter.filter(|hs_key_payload_tuple| {
++                    // Include prior-page sightings in deduplication before applying the cursor.
++                    seen_tx_ids.insert(hs_key_payload_tuple.0.tx_id)
++                        && hs_key_payload_tuple.0.block_time.get() >= from_block_time
++                        && cursor_key.as_ref().is_none_or(|cursor| hs_key_payload_tuple.0.as_bytes() > cursor.as_bytes())
++                })
+                     .take(limit)
+                     .map(|handshake_key_payload_tuple| {
+                         let (handshake, sender_payload) = handshake_key_payload_tuple;
+@@ -321,6 +354,7 @@
+                             };
+ 
+                         Ok(HandshakeResponse {
++                            cursor: encode_cursor("handshake-receiver", handshake.as_bytes()),
+                             tx_id: faster_hex::hex_string(&handshake.tx_id),
+                             sender: sender_str,
+                             receiver: receiver_str,
+--- a/indexer/src/api/v1/payments.rs
++++ b/indexer/src/api/v1/payments.rs
+@@ -1,3 +1,6 @@
++use indexer_db::messages::payment::{PaymentKeyBySender, PaymentKeyByReceiver};
++use super::pagination::{decode_cursor, encode_cursor};
++use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+ use anyhow::bail;
+@@ -60,11 +63,14 @@
+ pub struct PaymentPaginationParams {
+     pub limit: Option<usize>,
+     pub block_time: Option<u64>,
++    /// Exclusive continuation token returned on each row; do not combine with block_time.
++    pub cursor: Option<String>,
+     pub address: String,
+ }
+ 
+ #[derive(Debug, Serialize, ToSchema)]
+ pub struct PaymentResponse {
++    pub cursor: String,
+     pub tx_id: String,
+     pub sender: Option<String>,
+     pub receiver: String,
+@@ -90,12 +96,12 @@
+         (status = 500, description = "Internal server error", body = ErrorResponse)
+     )
+ )]
+-async fn get_payments_by_sender(
++pub(super) async fn get_payments_by_sender(
+     State(state): State<PaymentApi>,
+     Query(params): Query<PaymentPaginationParams>,
+ ) -> impl IntoResponse {
+     let limit = params.limit.unwrap_or(10).min(50);
+-    let cursor = params.block_time.unwrap_or(0);
++    let from_block_time = params.block_time.unwrap_or(0);
+ 
+     let sender_rpc = match kaspa_rpc_core::RpcAddress::try_from(params.address.as_str()) {
+         Ok(addr) => addr,
+@@ -122,6 +128,14 @@
+ 
+     let address_clone = params.address.clone();
+ 
++    let cursor_key = match decode_cursor::<PaymentKeyBySender>(
++        params.cursor.as_deref(), params.block_time, "payment-sender",
++        |key| key.sender == sender,
++    ) {
++        Ok(key) => key,
++        Err(error) => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))),
++    };
++
+     let metrics = state.metrics.clone();
+     let db_read_started = std::time::Instant::now();
+     let result = spawn_blocking(move || {
+@@ -131,8 +145,13 @@
+ 
+         state
+             .payment_by_sender_partition
+-            .get_by_sender_from_block_time(&rtx, &sender, cursor)
+-            .process_results(|iter| iter.filter(|payment| seen_tx_ids.insert(payment.tx_id)).take(limit).map(|key| {
++            .get_by_sender_from_block_time(&rtx, &sender, 0)
++            .process_results(|iter| iter.filter(|payment| {
++                    // Include prior-page sightings in deduplication before applying the cursor.
++                    seen_tx_ids.insert(payment.tx_id)
++                        && payment.block_time.get() >= from_block_time
++                        && cursor_key.as_ref().is_none_or(|cursor| payment.as_bytes() > cursor.as_bytes())
++                }).take(limit).map(|key| {
+                 let payment_data = match state.tx_id_to_payment_partition.get_rtx(&rtx, &key.tx_id) {
+                     Ok(Some(data)) => data,
+                     Ok(None) => bail!("Payment data inconsistency: tx_id {} found in payment_by_sender but not in tx_id_to_payment", faster_hex::hex_string(&key.tx_id)),
+@@ -159,6 +178,7 @@
+                 };
+ 
+                 Ok(PaymentResponse {
++                            cursor: encode_cursor("payment-sender", key.as_bytes()),
+                     tx_id: faster_hex::hex_string(&key.tx_id),
+                     sender: Some(address_clone.clone()),
+                     receiver: receiver_address,
+@@ -206,12 +226,12 @@
+         (status = 500, description = "Internal server error", body = ErrorResponse)
+     )
+ )]
+-async fn get_payments_by_receiver(
++pub(super) async fn get_payments_by_receiver(
+     State(state): State<PaymentApi>,
+     Query(params): Query<PaymentPaginationParams>,
+ ) -> impl IntoResponse {
+     let limit = params.limit.unwrap_or(10).min(50);
+-    let cursor = params.block_time.unwrap_or(0);
++    let from_block_time = params.block_time.unwrap_or(0);
+ 
+     let receiver_rpc = match kaspa_rpc_core::RpcAddress::try_from(params.address) {
+         Ok(addr) => addr,
+@@ -236,6 +256,14 @@
+         }
+     };
+ 
++    let cursor_key = match decode_cursor::<PaymentKeyByReceiver>(
++        params.cursor.as_deref(), params.block_time, "payment-receiver",
++        |key| key.receiver == receiver,
++    ) {
++        Ok(key) => key,
++        Err(error) => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))),
++    };
++
+     let metrics = state.metrics.clone();
+     let db_read_started = std::time::Instant::now();
+     let result = spawn_blocking(move || {
+@@ -245,8 +273,13 @@
+ 
+         state
+             .payment_by_receiver_partition
+-            .get_by_receiver_from_block_time(&rtx, &receiver, cursor)
+-            .process_results(|iter| iter.filter(|payment| seen_tx_ids.insert(payment.0.tx_id)).take(limit).map(|(key, sender_payload)| {
++            .get_by_receiver_from_block_time(&rtx, &receiver, 0)
++            .process_results(|iter| iter.filter(|payment| {
++                    // Include prior-page sightings in deduplication before applying the cursor.
++                    seen_tx_ids.insert(payment.0.tx_id)
++                        && payment.0.block_time.get() >= from_block_time
++                        && cursor_key.as_ref().is_none_or(|cursor| payment.0.as_bytes() > cursor.as_bytes())
++                }).take(limit).map(|(key, sender_payload)| {
+ 
+                 let payment_data = match state.tx_id_to_payment_partition.get_rtx(&rtx, &key.tx_id) {
+                     Ok(Some(data)) => data,
+@@ -279,6 +312,7 @@
+                 };
+ 
+                 Ok(PaymentResponse {
++                            cursor: encode_cursor("payment-receiver", key.as_bytes()),
+                     tx_id: faster_hex::hex_string(&key.tx_id),
+                     sender: sender_address,
+                     receiver: receiver_address,
+--- a/indexer/src/api/v1/contextual_messages.rs
++++ b/indexer/src/api/v1/contextual_messages.rs
+@@ -1,3 +1,5 @@
++use super::pagination::{decode_cursor, encode_cursor};
++use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+ use anyhow::bail;
+@@ -164,12 +166,15 @@
+ pub struct ContextualMessagePaginationParams {
+     pub limit: Option<usize>,
+     pub block_time: Option<u64>,
++    /// Exclusive continuation token returned on each row; do not combine with block_time.
++    pub cursor: Option<String>,
+     pub address: String,
+     pub alias: String,
+ }
+ 
+ #[derive(Debug, Serialize, ToSchema)]
+ pub struct ContextualMessageResponse {
++    pub cursor: String,
+     pub tx_id: String,
+     pub sender: String,
+     pub alias: String,
+@@ -194,12 +199,12 @@
+         (status = 500, description = "Internal server error", body = ErrorResponse)
+     )
+ )]
+-async fn get_contextual_messages_by_sender(
++pub(super) async fn get_contextual_messages_by_sender(
+     State(state): State<ContextualMessageApi>,
+     Query(params): Query<ContextualMessagePaginationParams>,
+ ) -> impl IntoResponse {
+     let limit = params.limit.unwrap_or(10).min(50);
+-    let cursor = params.block_time.unwrap_or(0);
++    let from_block_time = params.block_time.unwrap_or(0);
+ 
+     let sender_rpc = match kaspa_rpc_core::RpcAddress::try_from(params.address) {
+         Ok(addr) => addr,
+@@ -252,6 +257,14 @@
+ 
+     let alias = params.alias;
+ 
++    let cursor_key = match decode_cursor::<ContextualMessageBySenderKey>(
++        params.cursor.as_deref(), params.block_time, "contextual-sender",
++        |key| key.sender == sender && key.alias == alias_bytes,
++    ) {
++        Ok(key) => key,
++        Err(error) => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))),
++    };
++
+     let metrics = state.metrics.clone();
+     let db_read_started = std::time::Instant::now();
+     let result = spawn_blocking(move || {
+@@ -261,9 +274,14 @@
+ 
+         state
+             .contextual_message_by_sender_partition
+-            .get_by_sender_alias_from_block_time(&rtx, &sender, &alias_bytes, cursor)
++            .get_by_sender_alias_from_block_time(&rtx, &sender, &alias_bytes, 0)
+             .process_results(|iter| {
+-                iter.filter(|message| seen_tx_ids.insert(message.tx_id))
++                iter.filter(|message| {
++                    // Include prior-page sightings in deduplication before applying the cursor.
++                    seen_tx_ids.insert(message.tx_id)
++                        && message.block_time.get() >= from_block_time
++                        && cursor_key.as_ref().is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
++                })
+                     .take(limit)
+                     .map(|message_key| {
+                         let block_time = message_key.block_time.into();
+@@ -293,10 +311,11 @@
+                         let sealed_hex = state
+                             .tx_id_to_contextual_message_partition
+                             .get_rtx(&rtx, &message_key.tx_id)?
+-                            .expect("Message not found");
++                            .ok_or_else(|| anyhow::anyhow!("Missing contextual message payload"))?;
+                         let message_payload = faster_hex::hex_string(sealed_hex.as_ref());
+ 
+                         Ok(ContextualMessageResponse {
++                            cursor: encode_cursor("contextual-sender", message_key.as_bytes()),
+                             tx_id: faster_hex::hex_string(&message_key.tx_id),
+                             sender: sender_str,
+                             alias: alias.clone(), // todo use byteview
+--- a/indexer/src/api/v1/self_stash.rs
++++ b/indexer/src/api/v1/self_stash.rs
+@@ -1,3 +1,6 @@
++use indexer_db::messages::self_stash::{SelfStashKeyByOwner};
++use super::pagination::{decode_cursor, encode_cursor};
++use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+ use anyhow::Context;
+@@ -54,12 +57,15 @@
+ pub struct SelfStashPaginationParams {
+     pub limit: Option<usize>,
+     pub block_time: Option<u64>,
++    /// Exclusive continuation token returned on each row; do not combine with block_time.
++    pub cursor: Option<String>,
+     pub scope: String,
+     pub owner: String,
+ }
+ 
+ #[derive(Debug, Serialize, ToSchema)]
+ pub struct SelfStashResponse {
++    pub cursor: String,
+     pub tx_id: String,
+     pub owner: Option<String>,
+     pub scope: String,
+@@ -84,12 +90,12 @@
+         (status = 500, description = "Internal server error", body = ErrorResponse)
+     )
+ )]
+-async fn get_self_stash_by_owner(
++pub(super) async fn get_self_stash_by_owner(
+     State(state): State<SelfStashApi>,
+     Query(params): Query<SelfStashPaginationParams>,
+ ) -> impl IntoResponse {
+     let limit = params.limit.unwrap_or(10).min(50);
+-    let cursor = params.block_time.unwrap_or(0);
++    let from_block_time = params.block_time.unwrap_or(0);
+ 
+     let owner_rpc = match kaspa_rpc_core::RpcAddress::try_from(params.owner) {
+         Ok(addr) => addr,
+@@ -139,6 +145,14 @@
+         }
+     };
+ 
++    let cursor_key = match decode_cursor::<SelfStashKeyByOwner>(
++        params.cursor.as_deref(), params.block_time, "stash-owner",
++        |key| key.owner == owner && key.scope.as_bytes() == scope_bytes,
++    ) {
++        Ok(key) => key,
++        Err(error) => return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))),
++    };
++
+     let metrics = state.metrics.clone();
+     let db_read_started = std::time::Instant::now();
+     let result = spawn_blocking(move || {
+@@ -147,9 +161,14 @@
+ 
+         state
+             .self_stash_by_owner_partition
+-            .iter_by_owner_and_scope_from_block_time_rtx(&rtx, &scope_bytes, owner, cursor)
++            .iter_by_owner_and_scope_from_block_time_rtx(&rtx, &scope_bytes, owner, 0)
+             .process_results(|iter| {
+-                iter.filter(|self_stash_key| seen_tx_ids.insert(self_stash_key.tx_id))
++                iter.filter(|self_stash_key| {
++                    // Include prior-page sightings in deduplication before applying the cursor.
++                    seen_tx_ids.insert(self_stash_key.tx_id)
++                        && self_stash_key.block_time.get() >= from_block_time
++                        && cursor_key.as_ref().is_none_or(|cursor| self_stash_key.as_bytes() > cursor.as_bytes())
++                })
+                     // Resolve the payload FIRST and skip orphaned index entries (index key present,
+                     // payload row missing) with a warning, instead of failing the whole page with a
+                     // 500. Orphans arise because the by-owner index and the payload are written on
+@@ -205,6 +224,7 @@
+                         let stashed_data_str = faster_hex::hex_string(stash.as_ref());
+ 
+                         Some(Ok(SelfStashResponse {
++                            cursor: encode_cursor("stash-owner", self_stash_key.as_bytes()),
+                             tx_id: faster_hex::hex_string(&self_stash_key.tx_id),
+                             owner,
+                             scope: params.scope.clone(),
+--- a/indexer/src/api/v1.rs
++++ b/indexer/src/api/v1.rs
+@@ -39,6 +39,9 @@
+ pub mod group_messages;
+ pub mod handshakes;
+ pub mod payments;
++mod pagination;
++#[cfg(test)]
++mod personal_pagination_tests;
+ mod prometheus;
+ pub mod push;
+ pub mod self_stash;
