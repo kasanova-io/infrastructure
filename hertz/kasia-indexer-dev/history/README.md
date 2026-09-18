@@ -79,6 +79,17 @@ Every batch commits its records and deduplication ledger together. Malformed
 records or conflicts abort the whole batch; the runner then isolates failures.
 Historical import never changes chain synchronization cursors or emits pushes.
 
+All cursor-aware history routes use an exact lookahead row and expose their
+continuation contract without changing the JSON list body:
+
+- `X-Kasia-Has-More` is always `true` or `false`.
+- `X-Kasia-Next-Cursor` is present only when another page exists, and matches
+  the cursor on the last returned row.
+
+The cursor is opaque, exclusive, versioned, and bound to its route and query.
+Clients must fail the history load if these headers are absent, malformed, or
+contradict the returned rows; a partial page must never be reported as complete.
+
 The route is disabled by default. It requires both `NETWORK_TYPE=mainnet` and
 `KASANOVA_HISTORY_IMPORT_ENABLED=true`. The temporary production Compose
 migration override enables it on Hertz loopback port 18082. Public Caddy

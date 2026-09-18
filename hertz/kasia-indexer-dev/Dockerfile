@@ -22,6 +22,8 @@ COPY history/pagination.rs /src/indexer/src/api/v1/pagination.rs
 COPY history/personal_pagination_tests.rs /src/indexer/src/api/v1/personal_pagination_tests.rs
 COPY history/personal-pagination.patch /tmp/personal-pagination.patch
 RUN patch -p1 < /tmp/personal-pagination.patch
+COPY history/explicit-pagination.patch /tmp/explicit-pagination.patch
+RUN patch -p1 < /tmp/explicit-pagination.patch
 RUN cargo test --locked --release --workspace
 RUN cargo build --locked --release -p indexer
 
