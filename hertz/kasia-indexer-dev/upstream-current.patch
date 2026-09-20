@@ -1,0 +1,13 @@
+diff --git a/indexer/src/push.rs b/indexer/src/push.rs
+index 89667fb..1c80f41 100644
+--- a/indexer/src/push.rs
++++ b/indexer/src/push.rs
+@@ -3854,6 +3854,8 @@ mod tests {
+             kaposts_pubkey: None,
+             kaposts_notify: None,
+             watch_only_addresses: vec![],
++            apns_environment: None,
++            voip_token: None,
+             app_attest_key_id: None,
+             app_attest_public_key_spki_b64: None,
+             app_attest_sign_count: None,

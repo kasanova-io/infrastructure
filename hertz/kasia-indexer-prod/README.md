@@ -19,6 +19,9 @@ Set `CHATS_INDEXER_IMAGE` to the exact tested image ID and
 `DEPLOYMENT_REVISION` to the reviewed infrastructure commit. The manifest
 does not publish a host port. Public traffic enters through the managed Caddy
 block, which excludes upstream maintenance and internal-push endpoints.
+Set `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_HOST_PATH` to the Kasanova
+Firebase project and its read-only service-account file. Push registration and
+unregister mutations run in strict wallet-authenticated mode.
 
 ## Live activation: 2026-09-15
 
