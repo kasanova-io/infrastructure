@@ -10,12 +10,16 @@ services:
       KASPA_NODE_WBORSH_URL: ws://kaspad-testnet10:17210
       NETWORK_TYPE: testnet
       KASIA_API_BIND: 0.0.0.0:8080
+      PUSH_AUTH_MODE: strict
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:?FCM_PROJECT_ID is required}
+      FCM_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
       RUST_LOG: info
     # Candidate is only accessible over SSH/loopback, never the public route.
     ports:
       - "127.0.0.1:18080:8080"
     volumes:
       - candidate_data:/app/data
+      - ${FCM_SERVICE_ACCOUNT_HOST_PATH:?FCM_SERVICE_ACCOUNT_HOST_PATH is required}:/run/secrets/firebase-service-account.json:ro
     networks:
       - caddy_caddy_net
     stop_signal: SIGINT

@@ -11,12 +11,16 @@ services:
       KASPA_NODE_WBORSH_URL: ws://kaspad_mainnet:17110
       NETWORK_TYPE: mainnet
       KASIA_API_BIND: 0.0.0.0:8080
+      PUSH_AUTH_MODE: strict
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:?FCM_PROJECT_ID is required}
+      FCM_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
       RUST_BACKTRACE: "1"
       RUST_LOG: info
     expose:
       - "8080"
     volumes:
       - kasia_indexer_prod_data:/app/data
+      - ${FCM_SERVICE_ACCOUNT_HOST_PATH:?FCM_SERVICE_ACCOUNT_HOST_PATH is required}:/run/secrets/firebase-service-account.json:ro
     networks:
       - caddy_caddy_net
     stop_signal: SIGINT

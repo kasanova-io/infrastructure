@@ -31,17 +31,23 @@ The active Hertz Caddyfile must contain the exact managed block from
 ## Shared Chats image
 
 The Dockerfile builds only the chat service from
-[KaspaSilver/KaChat-Indexer](https://github.com/KaspaSilver/KaChat-Indexer/tree/018882c448d248ca96d51dac107a8b0ed44fb101/kasia-indexer),
-pinned to `018882c448d248ca96d51dac107a8b0ed44fb101`. Its locked Rust workspace
+[KaspaSilver/KaChat-Indexer](https://github.com/KaspaSilver/KaChat-Indexer/tree/879d34a0840c3af0117bc6de7f0ffeeda53c9338/kasia-indexer),
+pinned to `879d34a0840c3af0117bc6de7f0ffeeda53c9338`. Its locked Rust workspace
 tests run during the image build. Both `ciph_msg:1` and `kchat:1` enter the same
 parser. Kasanova continues writing `ciph_msg:1`.
+
+Push mutations require the current wallet-signed contract
+(`PUSH_AUTH_MODE=strict`). Both deployments mount the Kasanova Firebase service
+account read-only and route Android data messages through FCM. Set
+`FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_HOST_PATH` in the private deployment
+environment; never store the service-account JSON in this repository.
 
 Build on Hertz, then record the resulting image ID, test output, upstream
 revision, and infrastructure revision in the deployment evidence:
 
 ```sh
-docker build --progress=plain -t kasanova/chats-indexer:018882c448d2 .
-docker image inspect kasanova/chats-indexer:018882c448d2 --format '{{.Id}}'
+docker build --progress=plain -t kasanova/chats-indexer:879d34a0840c .
+docker image inspect kasanova/chats-indexer:879d34a0840c --format '{{.Id}}'
 ```
 
 Set `CHATS_INDEXER_IMAGE` to that exact `sha256:...` ID in the deployment
