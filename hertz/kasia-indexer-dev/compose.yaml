@@ -12,7 +12,9 @@ services:
       NETWORK_TYPE: testnet
       KASIA_API_BIND: 0.0.0.0:8080
       PUSH_AUTH_MODE: strict
-      FCM_PROJECT_ID: ${FCM_PROJECT_ID:?FCM_PROJECT_ID is required}
+      # Native Android FCM registration is owned by the wallet's Firebase app.
+      # Chain environment does not select a different Firebase sender project.
+      FCM_PROJECT_ID: kasanova-io
       FCM_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
       RUST_BACKTRACE: "1"
       RUST_LOG: info
