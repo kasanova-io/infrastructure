@@ -38,9 +38,13 @@ parser. Kasanova continues writing `ciph_msg:1`.
 
 Push mutations require the current wallet-signed contract
 (`PUSH_AUTH_MODE=strict`). Both deployments mount the Kasanova Firebase service
-account read-only and route Android data messages through FCM. Set
-`FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_HOST_PATH` in the private deployment
-environment; never store the service-account JSON in this repository.
+account read-only and route Android data messages through FCM. The sender
+project is fixed to `kasanova-io`, matching the native Firebase app that issues
+the installed wallet's Android registration tokens. DEV and PROD chain
+environments use that same sender project; a testnet deployment must not change
+it to `kasanova-io-dev`. Set only `FCM_SERVICE_ACCOUNT_HOST_PATH` in the private
+deployment environment, and never store the service-account JSON in this
+repository.
 
 Build on Hertz, then record the resulting image ID, test output, upstream
 revision, and infrastructure revision in the deployment evidence:
