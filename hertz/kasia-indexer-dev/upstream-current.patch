@@ -2,7 +2,91 @@ diff --git a/indexer/src/push.rs b/indexer/src/push.rs
 index 89667fb..1c80f41 100644
 --- a/indexer/src/push.rs
 +++ b/indexer/src/push.rs
-@@ -3854,6 +3854,8 @@ mod tests {
+@@ -2645,6 +2645,13 @@
+             PushEventKind::GroupMessage => "group_message",
+             PushEventKind::GroupControl => "group_control",
+         };
++        let recipient = match event.kind {
++            PushEventKind::Contextual | PushEventKind::Payment | PushEventKind::Handshake => {
++                to_rpc_address(&event.receiver, self.network_type)?
++                    .map(|address| address.to_string())
++            }
++            _ => None,
++        };
+         let watched_addr = to_rpc_address(&event.watched_address, self.network_type)?
+             .map(|addr| addr.to_string())
+             .unwrap_or_else(|| "unknown".to_string());
+@@ -2673,6 +2680,7 @@
+             },
+             tx_id,
+             sender,
++            recipient,
+             message_type: payload_type.to_string(),
+             amount: event.amount,
+             payload: event.payload.and_then(payload_within_limit),
+@@ -2695,6 +2703,9 @@
+         data.insert("daa_score".to_string(), payload.daa_score.to_string());
+         data.insert("title".to_string(), payload.aps.alert.title.clone());
+         data.insert("body".to_string(), payload.aps.alert.body.clone());
++        if let Some(recipient) = payload.recipient.as_ref() {
++            data.insert("recipient".to_string(), recipient.clone());
++        }
+         if let Some(amount) = payload.amount {
+             data.insert("amount".to_string(), amount.to_string());
+         }
+@@ -2750,6 +2761,8 @@
+     aps: PushAps,
+     tx_id: String,
+     sender: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    recipient: Option<String>,
+     #[serde(rename = "type")]
+     message_type: String,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -3716,9 +3729,9 @@
+     use super::{
+         DeviceRegistration, GROUP_V1_CAPABILITY, MAX_ADDRESS_LEN_BYTES, MAX_ALIAS_LEN_BYTES,
+         MAX_ALIASES, MAX_WATCH_ONLY_ADDRESSES, MAX_WATCHED_ADDRESSES, PushRegistry,
+-        PushRegistryActor, WalletBinding, address_to_payload, format_kas, normalize_device_token,
+-        normalize_platform, normalize_wallet_pubkey, normalize_watch_only_addresses,
+-        resolve_wallet_binding, validate_registration_limits,
++        PushAlert, PushAps, PushPayload, PushRegistryActor, WalletBinding, address_to_payload,
++        format_kas, normalize_device_token, normalize_platform, normalize_wallet_pubkey,
++        normalize_watch_only_addresses, resolve_wallet_binding, validate_registration_limits,
+     };
+     use indexer_actors::metrics::create_shared_metrics;
+     use indexer_db::push::{
+@@ -3746,4 +3759,29 @@
+     #[test]
++    fn chat_payload_serializes_the_exact_recipient_wallet() {
++        let recipient =
++            "kaspatest:qq258y97v6uc26jqhztw49v9xh6wa85fc8sd5zqxz9jmhkky4pnvvf7heqegy";
++        let payload = PushPayload {
++            aps: PushAps {
++                alert: PushAlert::from_type("contextual", "kaspatest:qsender"),
++                mutable_content: 1,
++                content_available: 1,
++            },
++            tx_id: "ab".repeat(32),
++            sender: "kaspatest:qsender".to_string(),
++            recipient: Some(recipient.to_string()),
++            message_type: "contextual".to_string(),
++            amount: None,
++            payload: None,
++            timestamp: 1,
++            daa_score: 2,
++            blinded_group_id: None,
++        };
++
++        let json = serde_json::to_value(payload).expect("payload serializes");
++        assert_eq!(json["recipient"], recipient);
++    }
++
++    #[test]
+     fn normalize_platform_rejects_unsupported() {
+         assert!(normalize_platform("windows".to_string()).is_err());
+         assert!(normalize_platform("".to_string()).is_err());
+@@ -3854,6 +3892,8 @@ mod tests {
              kaposts_pubkey: None,
              kaposts_notify: None,
              watch_only_addresses: vec![],
