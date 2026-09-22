@@ -25,6 +25,13 @@ independent of the selected chain environment. Set
 `FCM_SERVICE_ACCOUNT_HOST_PATH` to its read-only service-account file. Push
 registration and unregister mutations run in strict wallet-authenticated mode.
 
+Apple delivery uses the team-scoped `Kasanova Chats Push` APNs key for bundle
+ID `io.kasanova.wallet`. Set `APNS_KEY_HOST_PATH` to its mode-`0600` `.p8` file
+in the private deployment environment. PROD defaults unknown iOS tokens to the
+production APNs host; the indexer retries sandbox once on `BadDeviceToken` and
+persists the learned environment per device. Never store the `.p8` file in this
+repository.
+
 ## Live activation: 2026-09-15
 
 Ren explicitly authorized public activation while historical recovery continues.

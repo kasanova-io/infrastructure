@@ -46,6 +46,13 @@ it to `kasanova-io-dev`. Set only `FCM_SERVICE_ACCOUNT_HOST_PATH` in the private
 deployment environment, and never store the service-account JSON in this
 repository.
 
+Apple delivery uses the team-scoped `Kasanova Chats Push` APNs key for bundle
+ID `io.kasanova.wallet`. Set `APNS_KEY_HOST_PATH` to its mode-`0600` `.p8` file
+in the private deployment environment. DEV defaults unknown iOS tokens to the
+sandbox APNs host; the indexer retries production once on `BadDeviceToken` and
+persists the learned environment per device. PROD reverses that default. Never
+store the `.p8` file in this repository.
+
 Build on Hertz, then record the resulting image ID, test output, upstream
 revision, and infrastructure revision in the deployment evidence:
 
