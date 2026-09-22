@@ -53,6 +53,12 @@ sandbox APNs host; the indexer retries production once on `BadDeviceToken` and
 persists the learned environment per device. PROD reverses that default. Never
 store the `.p8` file in this repository.
 
+For direct Chats events, the indexer includes the canonical `recipient` wallet
+address in both APNs and FCM payloads. The wallet binds the notification route
+to that exact address, so a delayed tap cannot open after the user switches to
+another wallet on the same network. Transaction-bound Chats routes without a
+recipient are rejected by the app.
+
 Build on Hertz, then record the resulting image ID, test output, upstream
 revision, and infrastructure revision in the deployment evidence:
 
