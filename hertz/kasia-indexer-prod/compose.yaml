@@ -16,6 +16,11 @@ services:
       # Chain environment does not select a different Firebase sender project.
       FCM_PROJECT_ID: kasanova-io
       FCM_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
+      APNS_TEAM_ID: 3G9H3Z5AP4
+      APNS_KEY_ID: A7N29TZ7AP
+      APNS_TOPIC: io.kasanova.wallet
+      APNS_ENVIRONMENT: production
+      APNS_KEY_PATH: /run/secrets/apns-key.p8
       RUST_BACKTRACE: "1"
       RUST_LOG: info
     expose:
@@ -23,6 +28,7 @@ services:
     volumes:
       - kasia_indexer_prod_data:/app/data
       - ${FCM_SERVICE_ACCOUNT_HOST_PATH:?FCM_SERVICE_ACCOUNT_HOST_PATH is required}:/run/secrets/firebase-service-account.json:ro
+      - ${APNS_KEY_HOST_PATH:?APNS_KEY_HOST_PATH is required}:/run/secrets/apns-key.p8:ro
     networks:
       - caddy_caddy_net
     stop_signal: SIGINT
