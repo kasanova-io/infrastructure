@@ -2,21 +2,40 @@ diff --git a/indexer/src/push.rs b/indexer/src/push.rs
 index 89667fb..1c80f41 100644
 --- a/indexer/src/push.rs
 +++ b/indexer/src/push.rs
-@@ -2645,6 +2645,13 @@
+@@ -2005,6 +2005,19 @@
+     pub last_seen: u64,
+ }
+ 
++fn exact_primary_recipient(
++    tokens: &[String],
++    primary_addresses: &HashMap<String, String>,
++) -> Option<String> {
++    let recipients = tokens
++        .iter()
++        .filter_map(|token| primary_addresses.get(token))
++        .collect::<HashSet<_>>();
++    (recipients.len() == 1)
++        .then(|| recipients.into_iter().next().cloned())
++        .flatten()
++}
++
+ pub struct PushDispatcher {
+     rx: flume::Receiver<PushEvent>,
+     ext_rx: flume::Receiver<ExtensionPushEvent>,
+@@ -2645,6 +2658,12 @@
              PushEventKind::GroupMessage => "group_message",
              PushEventKind::GroupControl => "group_control",
          };
-+        let recipient = match event.kind {
-+            PushEventKind::Contextual | PushEventKind::Payment | PushEventKind::Handshake => {
-+                to_rpc_address(&event.receiver, self.network_type)?
-+                    .map(|address| address.to_string())
-+            }
-+            _ => None,
-+        };
++        let recipient = matches!(
++            event.kind,
++            PushEventKind::Contextual | PushEventKind::Payment | PushEventKind::Handshake
++        )
++        .then(|| exact_primary_recipient(&tokens, &own_primaries))
++        .flatten();
          let watched_addr = to_rpc_address(&event.watched_address, self.network_type)?
              .map(|addr| addr.to_string())
              .unwrap_or_else(|| "unknown".to_string());
-@@ -2673,6 +2680,7 @@
+@@ -2673,6 +2692,7 @@
              },
              tx_id,
              sender,
@@ -24,7 +43,7 @@ index 89667fb..1c80f41 100644
              message_type: payload_type.to_string(),
              amount: event.amount,
              payload: event.payload.and_then(payload_within_limit),
-@@ -2695,6 +2703,9 @@
+@@ -2695,6 +2715,9 @@
          data.insert("daa_score".to_string(), payload.daa_score.to_string());
          data.insert("title".to_string(), payload.aps.alert.title.clone());
          data.insert("body".to_string(), payload.aps.alert.body.clone());
@@ -34,7 +53,7 @@ index 89667fb..1c80f41 100644
          if let Some(amount) = payload.amount {
              data.insert("amount".to_string(), amount.to_string());
          }
-@@ -2750,6 +2761,8 @@
+@@ -2750,6 +2773,8 @@
      aps: PushAps,
      tx_id: String,
      sender: String,
@@ -43,7 +62,7 @@ index 89667fb..1c80f41 100644
      #[serde(rename = "type")]
      message_type: String,
      #[serde(skip_serializing_if = "Option::is_none")]
-@@ -3716,9 +3729,9 @@
+@@ -3716,9 +3741,10 @@
      use super::{
          DeviceRegistration, GROUP_V1_CAPABILITY, MAX_ADDRESS_LEN_BYTES, MAX_ALIAS_LEN_BYTES,
          MAX_ALIASES, MAX_WATCH_ONLY_ADDRESSES, MAX_WATCHED_ADDRESSES, PushRegistry,
@@ -51,12 +70,23 @@ index 89667fb..1c80f41 100644
 -        normalize_platform, normalize_wallet_pubkey, normalize_watch_only_addresses,
 -        resolve_wallet_binding, validate_registration_limits,
 +        PushAlert, PushAps, PushPayload, PushRegistryActor, WalletBinding, address_to_payload,
-+        format_kas, normalize_device_token, normalize_platform, normalize_wallet_pubkey,
-+        normalize_watch_only_addresses, resolve_wallet_binding, validate_registration_limits,
++        exact_primary_recipient, format_kas, normalize_device_token, normalize_platform,
++        normalize_wallet_pubkey, normalize_watch_only_addresses, resolve_wallet_binding,
++        validate_registration_limits,
      };
      use indexer_actors::metrics::create_shared_metrics;
      use indexer_db::push::{
-@@ -3746,4 +3759,29 @@
+@@ -3726,6 +3752,7 @@
+         WatchedGroupIdPartition,
+     };
+     use kaspa_addresses::{Address, Prefix, Version};
++    use std::collections::HashMap;
+ 
+     #[test]
+     fn normalize_platform_accepts_ios_macos_and_android() {
+@@ -3744,6 +3771,56 @@
+     }
+ 
      #[test]
 +    fn chat_payload_serializes_the_exact_recipient_wallet() {
 +        let recipient =
@@ -83,10 +113,35 @@ index 89667fb..1c80f41 100644
 +    }
 +
 +    #[test]
++    fn chat_recipient_comes_from_the_matched_device_primary_wallet() {
++        let tokens = vec!["device-a".to_string(), "device-b".to_string()];
++        let primary_addresses = HashMap::from([
++            ("device-a".to_string(), "kaspatest:qrecipient".to_string()),
++            ("device-b".to_string(), "kaspatest:qrecipient".to_string()),
++        ]);
++
++        assert_eq!(
++            exact_primary_recipient(&tokens, &primary_addresses),
++            Some("kaspatest:qrecipient".to_string())
++        );
++    }
++
++    #[test]
++    fn chat_recipient_is_omitted_for_mixed_primary_wallets() {
++        let tokens = vec!["device-a".to_string(), "device-b".to_string()];
++        let primary_addresses = HashMap::from([
++            ("device-a".to_string(), "kaspatest:qone".to_string()),
++            ("device-b".to_string(), "kaspatest:qtwo".to_string()),
++        ]);
++
++        assert_eq!(exact_primary_recipient(&tokens, &primary_addresses), None);
++    }
++
++    #[test]
      fn normalize_platform_rejects_unsupported() {
          assert!(normalize_platform("windows".to_string()).is_err());
          assert!(normalize_platform("".to_string()).is_err());
-@@ -3854,6 +3892,8 @@ mod tests {
+@@ -3854,6 +3931,8 @@
              kaposts_pubkey: None,
              kaposts_notify: None,
              watch_only_addresses: vec![],
