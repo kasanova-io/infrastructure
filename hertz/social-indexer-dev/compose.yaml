@@ -99,6 +99,7 @@ services:
 
 volumes:
   social_data:
+    name: ${SOCIAL_DATABASE_VOLUME:-social_indexer_dev_social_data}
 networks:
   social:
     internal: true

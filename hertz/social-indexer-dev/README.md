@@ -17,3 +17,11 @@ Runtime root: `/home/ren/Kasanova/deployments/social-indexer-dev` on Hertz; Comp
 All four health checks pass. Public API: `https://dev-miniapps.kasanova.io/social-api`; `/health` reports healthy TN10. Initial `/stats` contains zero social posts; this is an empty live index, not a seeded demonstration or historical mainnet import. The miniapp static files are hosted at `/social/`. App/public activation is still held by the existing release pin.
 
 The Caddyfile is a file mount, so validate a copied temporary candidate *inside* the Caddy container before replacing the host file. Back up the original and compare for concurrent edits; reload only after validation. The deployed managed block is included beside this README.
+
+## Temporary mainnet reader for UI work
+
+Ren explicitly authorized DEV Social to read mainnet on 2026-10-08. This changes only this indexer's `SOCIAL_NETWORK` and node URL; the wallet and other DEV services retain their existing environment. The miniapp is read-only and this stack has no signing keys.
+
+Set `SOCIAL_DATABASE_VOLUME` to a distinct named volume per network. The initial TN10 default remains `social_indexer_dev_social_data`; mainnet uses `social_indexer_dev_mainnet_data`. Never reuse one database across networks. The server retains mode-0600 `.env.tn10` and `.env.mainnet` configurations. Stop only this Compose project's services before switching `.env`, validate configuration, and bring the same project back up with health checks. Neither environment file belongs in Git.
+
+To restore TN10, from this deployment's Compose directory run `docker compose stop --timeout 60`, copy `.env.tn10` to `.env`, then `docker compose config --quiet` and `docker compose up -d --wait --wait-timeout 240`. Keep both database volumes. The `/social-api` URL stays stable. No Caddy, wallet-network, app/public release pin or production deployment change is needed for this reader switch.
