@@ -18,9 +18,9 @@ All four health checks pass. Public API: `https://dev-miniapps.kasanova.io/socia
 
 The Caddyfile is a file mount, so validate a copied temporary candidate *inside* the Caddy container before replacing the host file. Back up the original and compare for concurrent edits; reload only after validation. The deployed managed block is included beside this README.
 
-## Temporary mainnet reader for UI work
+## Superseded temporary mainnet switch
 
-Ren explicitly authorized DEV Social to read mainnet on 2026-10-08. This changes only this indexer's `SOCIAL_NETWORK` and node URL; the wallet and other DEV services retain their existing environment. The miniapp is read-only and this stack has no signing keys.
+Ren initially requested a temporary DEV mainnet reader, then corrected the direction to keep TN10 running and publish production separately. DEV has been restored to its original TN10 configuration and database. The independent production recipe is in `../social-indexer-prod`. The miniapp is read-only and neither stack has signing keys.
 
 Set `SOCIAL_DATABASE_VOLUME` to a distinct named volume per network. The initial TN10 default remains `social_indexer_dev_social_data`; mainnet uses `social_indexer_dev_mainnet_data`. Never reuse one database across networks. The server retains mode-0600 `.env.tn10` and `.env.mainnet` configurations. Stop only this Compose project's services before switching `.env`, validate configuration, and bring the same project back up with health checks. Neither environment file belongs in Git.
 
