@@ -256,3 +256,14 @@ needs explicit snapshot overlap reconciliation, all real predecessor proofs for
 selected negative events, a fresh full native/API replay, and disclosed source
 count discrepancies and pre-capture gaps. A current projection is never described
 as complete historical follow/block activity.
+
+Future private API verification may opt in with
+`verify_stage.py ... --private-http-image sha256:<reviewed-web-image>` on the
+actual Linux Docker staging host. It uses a persistent connection to the inspected
+private web IP and the same routes, JSON decoding, pagination and production
+assertions as default Docker-exec verification. The image, project, container
+identity/start time, internal network and IP must remain unchanged; published
+ports, non-200 responses, redirects, oversized responses, timeouts and drift fail
+closed without a fallback. Responses are bounded to 8 MiB with a 10-second socket
+timeout. Runtime identity is rechecked before printing a success receipt. The
+default transport and all already-frozen watcher sources remain unchanged.

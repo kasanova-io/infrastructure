@@ -11,6 +11,18 @@ from stage import Stage, validate_records
 ANON = "02" + "0" * 64
 
 
+def read_json(stage, url):
+    reader = getattr(stage, "http_reader", None)
+    body = (
+        reader.read(url)
+        if reader is not None
+        else subprocess.check_output(
+            stage.command + ["exec", "-T", "web", "wget", "-qO-", url], text=True
+        )
+    )
+    return json.loads(body)
+
+
 def verify(
     stage,
     path,
@@ -35,12 +47,7 @@ def verify(
             url = "http://127.0.0.1:3001/get-vote-details?" + urllib.parse.urlencode(
                 {"id": row["transaction_id"], "requesterPubkey": row["sender_pubkey"]}
             )
-            vote = json.loads(
-                subprocess.check_output(
-                    stage.command + ["exec", "-T", "web", "wget", "-qO-", url],
-                    text=True,
-                )
-            )["vote"]
+            vote = read_json(stage, url)["vote"]
             check_vote(row, vote)
             counts["vote"] += 1
             continue
@@ -54,11 +61,7 @@ def verify(
         url = "http://127.0.0.1:3001/get-post-details?" + urllib.parse.urlencode(
             {"id": row["transaction_id"], "requesterPubkey": ANON}
         )
-        data = json.loads(
-            subprocess.check_output(
-                stage.command + ["exec", "-T", "web", "wget", "-qO-", url], text=True
-            )
-        )["post"]
+        data = read_json(stage, url)["post"]
         check(row, data, fields[6 if row["kind"] in ("quote", "reply") else 5])
         counts[row["kind"]] += 1
     for key, row in profiles.items():
@@ -66,12 +69,7 @@ def verify(
         url = "http://127.0.0.1:3001/get-user-details?" + urllib.parse.urlencode(
             {"user": key, "requesterPubkey": ANON}
         )
-        data = json.loads(
-            subprocess.check_output(
-                stage.command + ["exec", "-T", "web", "wget", "-qO-", url],
-                text=True,
-            )
-        )
+        data = read_json(stage, url)
         check(row, data, fields[-1])
         if data["userNickname"] != fields[5]:
             raise ValueError("Profile nickname mismatch")
@@ -121,6 +119,8 @@ def verify(
         result["api_relationship_proof_scope"] = (
             "final edge states only; native transition proof is in history_replay/history_pending_undo"
         )
+    if getattr(stage, "http_reader", None) is not None:
+        result["private_http_provenance"] = stage.http_reader.verify_identity()
     print(json.dumps(result), flush=True)
     return result
 
@@ -133,11 +133,7 @@ def read_pages(stage, route, query):
         if cursor:
             params["before"] = cursor
         url = "http://127.0.0.1:3001" + route + "?" + urllib.parse.urlencode(params)
-        data = json.loads(
-            subprocess.check_output(
-                stage.command + ["exec", "-T", "web", "wget", "-qO-", url], text=True
-            )
-        )
+        data = read_json(stage, url)
         yield from data["posts"]
         if not data["pagination"]["hasMore"]:
             return
@@ -183,12 +179,26 @@ if __name__ == "__main__":
     p.add_argument("--allow-relationship-snapshot", action="store_true")
     p.add_argument("--allow-live-overlay", action="store_true")
     p.add_argument("--allow-live-tail", action="store_true")
-    a = p.parse_args()
-    verify(
-        Stage(a.compose, a.project),
-        a.batch,
-        a.network,
-        a.allow_relationship_snapshot,
-        a.allow_live_overlay,
-        a.allow_live_tail,
+    p.add_argument(
+        "--private-http-image",
+        help="Opt in on the Linux staging host with the reviewed immutable web image ID",
     )
+    a = p.parse_args()
+    stage = Stage(a.compose, a.project)
+    try:
+        if a.private_http_image:
+            from private_http import PrivateHttpReader
+
+            stage.http_reader = PrivateHttpReader(stage, a.private_http_image)
+        verify(
+            stage,
+            a.batch,
+            a.network,
+            a.allow_relationship_snapshot,
+            a.allow_live_overlay,
+            a.allow_live_tail,
+        )
+    finally:
+        if getattr(stage, "http_reader", None) is not None:
+            stage.http_reader.close()
+        stage.close()
