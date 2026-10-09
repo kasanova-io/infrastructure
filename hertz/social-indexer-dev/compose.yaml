@@ -76,13 +76,13 @@ services:
       start_period: 30s
   web:
     <<: *service
-    image: kasanova/social-web:${SOURCE_REVISION:?required}
+    image: ${SOCIAL_WEB_IMAGE:?tested immutable image ID required}
     pull_policy: never
     container_name: social_indexer_dev_web
     networks: [social, caddy_caddy_net]
     build:
-      context: ../../vendor/k-indexer
-      dockerfile: docker/DEV/Dockerfile.K-webserver
+      context: .web-build
+      dockerfile: Dockerfile
       labels:
         org.opencontainers.image.revision: ${SOURCE_REVISION:?required}
     command: [--db-host, database, --db-port, '5432', --db-name, social, --db-user, social, --db-password, '${DB_PASSWORD:?required}', --bind-address, '0.0.0.0:3001', --worker-threads, '2', --db-max-connections, '6', --request-timeout, '15', --rate-limit, '200']
