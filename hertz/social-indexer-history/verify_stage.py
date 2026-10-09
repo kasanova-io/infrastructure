@@ -12,10 +12,19 @@ ANON = "02" + "0" * 64
 
 
 def verify(
-    stage, path, network, allow_relationship_snapshot=False, allow_live_overlay=False
+    stage,
+    path,
+    network,
+    allow_relationship_snapshot=False,
+    allow_live_overlay=False,
+    allow_live_tail=False,
 ):
     records = validate_records(
-        path.read_bytes(), network, allow_relationship_snapshot, allow_live_overlay
+        path.read_bytes(),
+        network,
+        allow_relationship_snapshot,
+        allow_live_overlay,
+        allow_live_tail,
     )
     counts = collections.Counter()
     profiles = {}
@@ -54,18 +63,15 @@ def verify(
         counts[row["kind"]] += 1
     for key, row in profiles.items():
         fields = bytes.fromhex(row["payload"]).decode().split(":")
-        if len(key) == 64:
-            data = find_xonly_profile(stage, row["transaction_id"])
-        else:
-            url = "http://127.0.0.1:3001/get-user-details?" + urllib.parse.urlencode(
-                {"user": key, "requesterPubkey": ANON}
+        url = "http://127.0.0.1:3001/get-user-details?" + urllib.parse.urlencode(
+            {"user": key, "requesterPubkey": ANON}
+        )
+        data = json.loads(
+            subprocess.check_output(
+                stage.command + ["exec", "-T", "web", "wget", "-qO-", url],
+                text=True,
             )
-            data = json.loads(
-                subprocess.check_output(
-                    stage.command + ["exec", "-T", "web", "wget", "-qO-", url],
-                    text=True,
-                )
-            )
+        )
         check(row, data, fields[-1])
         if data["userNickname"] != fields[5]:
             raise ValueError("Profile nickname mismatch")
@@ -78,8 +84,23 @@ def verify(
             else {"requesterPubkey": owner}
         )
         found = {item["id"]: item for item in read_pages(stage, route, query)}
-        for row in rows:
+        final_by_target = {
+            bytes.fromhex(bytes.fromhex(row["payload"]).decode().split(":")[6]): row
+            for row in rows
+        }
+        for row in final_by_target.values():
             fields = bytes.fromhex(row["payload"]).decode().split(":")
+            if fields[5] == "un" + kind:
+                if any(
+                    bytes.fromhex(item["userPublicKey"]) == bytes.fromhex(fields[6])
+                    for item in found.values()
+                ):
+                    raise ValueError(
+                        "Undone relationship still present in API: "
+                        + row["transaction_id"]
+                    )
+                counts[kind + "_removed"] += 1
+                continue
             item = found.get(row["transaction_id"])
             if not item or (
                 bytes.fromhex(item["userPublicKey"]) != bytes.fromhex(fields[6])
@@ -93,6 +114,13 @@ def verify(
         "kinds": dict(counts),
         "live_imported": 0,
     }
+    if allow_live_tail:
+        result["relationship_events_in_batch"] = sum(
+            len(rows) for rows in relations.values()
+        )
+        result["api_relationship_proof_scope"] = (
+            "final edge states only; native transition proof is in history_replay/history_pending_undo"
+        )
     print(json.dumps(result), flush=True)
     return result
 
@@ -116,33 +144,6 @@ def read_pages(stage, route, query):
         cursor = data["pagination"]["nextCursor"]
         if not cursor or cursor in seen:
             raise ValueError("API relationship pagination stalled")
-        seen.add(cursor)
-
-
-def find_xonly_profile(stage, txid):
-    # The pinned user-specific endpoint incorrectly rejects 32-byte keys even
-    # though its native parser stores them. Read global profiles without changing
-    # identity bytes. This does not establish user-route compatibility.
-    cursor = None
-    seen = set()
-    while True:
-        query = {"requesterPubkey": ANON, "limit": 100}
-        if cursor:
-            query["before"] = cursor
-        url = "http://127.0.0.1:3001/get-users?" + urllib.parse.urlencode(query)
-        data = json.loads(
-            subprocess.check_output(
-                stage.command + ["exec", "-T", "web", "wget", "-qO-", url], text=True
-            )
-        )
-        for profile in data["posts"]:
-            if profile["id"] == txid:
-                return profile
-        if not data["pagination"]["hasMore"]:
-            raise ValueError("X-only profile missing from global profile API")
-        cursor = data["pagination"]["nextCursor"]
-        if not cursor or cursor in seen:
-            raise ValueError("Profile pagination stalled")
         seen.add(cursor)
 
 
@@ -181,6 +182,7 @@ if __name__ == "__main__":
     p.add_argument("--network", required=True, choices=["mainnet", "testnet-10"])
     p.add_argument("--allow-relationship-snapshot", action="store_true")
     p.add_argument("--allow-live-overlay", action="store_true")
+    p.add_argument("--allow-live-tail", action="store_true")
     a = p.parse_args()
     verify(
         Stage(a.compose, a.project),
@@ -188,4 +190,5 @@ if __name__ == "__main__":
         a.network,
         a.allow_relationship_snapshot,
         a.allow_live_overlay,
+        a.allow_live_tail,
     )

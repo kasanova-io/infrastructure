@@ -12,6 +12,15 @@ def combine(history, overlay, network):
     live = validate_records(overlay, network, False, True)
     if any(r.get("recovery_scope") != "live-content-and-vote-projection" for r in live):
         raise ValueError("Overlay is not a frozen live projection")
+    for row in live:
+        proof = row.get("live_timestamp_provenance", {})
+        if (
+            proof.get("policy")
+            != "preserve-exact-live-time-after-block-membership-verification"
+            or proof.get("observed_block_time") != row["block_time"]
+            or proof.get("matched_containing_block") != row["containing_block"]
+        ):
+            raise ValueError("Overlay lacks exact original live timestamp proof")
     records = {r["transaction_id"]: r for r in historical}
     duplicate_ids = []
     added_ids = []
@@ -19,11 +28,29 @@ def combine(history, overlay, network):
         txid = row["transaction_id"]
         prior = records.get(txid)
         if prior is not None:
-            # Only the discovery scope may differ. Acceptance, payload, signer,
-            # network and both chain timestamps must all agree exactly.
+            # A separately proven live timestamp can refer to another containing
+            # block. Compare its original canonical archive evidence with history,
+            # then retain the live display time and its exact membership proof.
             canonical = lambda r: {k: v for k, v in r.items() if k != "recovery_scope"}
-            if canonical(prior) != canonical(row):
+            comparison = canonical(row)
+            time_proof = comparison.pop("live_timestamp_provenance", None)
+            if time_proof:
+                if (
+                    time_proof.get("policy")
+                    != "preserve-exact-live-time-after-block-membership-verification"
+                    or time_proof.get("observed_block_time") != row["block_time"]
+                    or time_proof.get("matched_containing_block")
+                    != row["containing_block"]
+                ):
+                    raise ValueError("Invalid preserved live timestamp provenance")
+                comparison["block_time"] = time_proof["canonical_archive_block_time"]
+                comparison["containing_block"] = time_proof[
+                    "canonical_archive_containing_block"
+                ]
+            if canonical(prior) != comparison:
                 raise ValueError("Conflicting historical/live duplicate: " + txid)
+            if time_proof:
+                records[txid] = row
             duplicate_ids.append(txid)
         else:
             records[txid] = row
@@ -44,6 +71,7 @@ def combine(history, overlay, network):
         "overlay_records": len(live),
         "exact_duplicate_ids": duplicate_ids,
         "added_ids": added_ids,
+        "preserved_live_timestamp_ids": [r["transaction_id"] for r in live],
         "candidate_records": len(ordered),
         "native_combined_replay_verified": False,
         "live_imported": 0,

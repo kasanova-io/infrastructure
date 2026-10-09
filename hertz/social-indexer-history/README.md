@@ -183,7 +183,13 @@ separate inventory, using the same archive acceptance, network, original payload
 and containing-block checks as historical recovery. It shares the original
 collector's pacing/cooldown files. The snapshot binds exact IDs, signer and
 signature, content/parent, and vote target/value; changing the snapshot or source
-requires another inventory. It performs no database writes outside its local
+requires another inventory. The original live `block_time` must match an archived
+containing block that includes the exact transaction and payload. Because one
+transaction can occur in several DAG blocks, that time may differ from the
+deterministically selected historical containing block. `live_time.py` preserves
+the proven original time and matching block, retaining canonical archive timing
+and unchanged acceptance evidence separately. An unmatched time is quarantined;
+it is never silently normalized. It performs no database writes outside its local
 evidence directory. Export its verified records using `History.export` only after
 every selected record is resolved; preserve exclusions explicitly.
 
@@ -197,10 +203,56 @@ globally recovered by this limited live projection.
 
 `build_candidate.py --history <batch> --overlay <batch> --network <network>
 --output <new-directory>` combines completed immutable batches. Duplicate IDs
-must have identical archive evidence, including chain timestamps and payload;
-only recovery scope may differ. It preserves historical rows and records every
-added and duplicate ID plus input/output hashes. The combined batch requires a
+must have identical canonical archive evidence and payload. A proven original
+live timestamp may use another containing block, in which case the original live
+row wins only after canonical provenance agrees exactly. Legacy normalized
+overlays without the original timestamp proof are rejected. The builder records
+every added, duplicate and preserved live ID plus input/output hashes. The combined batch requires a
 fresh guarded native replay with both explicit scope flags, and full API
 verification. Its manifest intentionally records native combined verification as
 false until that separate proof exists. Neither overlay verification nor batch
 combination authorizes live cutover or claims a complete intervening event tail.
+
+`capture_tail.py` captures all retained `k:1:` payloads in consistent read-only
+database snapshots every five minutes, for at most six hours and 200MiB of
+capture evidence. It preserves raw undo/profile/vote events, fails closed on
+retention-window gaps or conflicting IDs, and retains the pre-capture gap
+disclosure. Each read is capped at1000Kevents/5MiB of payload. The existing2GiB
+free-disk guard remains active. Freeze source and dependencies before starting;
+record its PID, source hashes and retained ranges. Window overlap does not prove
+complete chain history.
+
+`verify_tail.py` reads that immutable captured inventory without modifying it,
+archive-verifies new exact payloads through the shared original rate/cooldown,
+and checks the original captured timestamp with `live_time.py`. It stops at the
+capture deadline and limits its separate archive evidence to200MiB. Native replay
+of this event tail remains a separate reviewed step, especially for undo events;
+the current relationship-snapshot staging option does not accept those as active
+edges. A timestamp guard change requires a fresh frozen verifier/output, keeping
+earlier evidence unchanged.
+
+`stage.py --allow-live-tail` is an explicit private replay path for individually
+archive-verified captured events, including `unfollow` and `unblock`. Every tail
+row must carry its exact original-time containing-block proof. A negative action
+requires a currently present, strictly earlier exact edge. Before submitting the
+raw event, staging durably stores that predecessor and exact input in
+`history_pending_undo`; only the unchanged native parser's observed deletion
+permits a replay ledger entry. Restart recovery requires that same witness and
+the exact already-submitted raw transaction. Already-absent/no-op inverses are
+rejected: absence alone cannot prove that the parser accepted a signature.
+
+Tail replay additionally verifies exactly three private running services, an
+internal network containing only those services, no published ports, one parser
+worker and no raw input outside the immutable batch, before and after replay.
+The original native signature checks remain unchanged. API verification reports
+final edge states separately from replayed event counts. Synthetic invalid
+signature diagnostics belong only in a separate private test database and are
+never archive evidence or candidate records.
+
+This does not yet merge the fresh relationship projection and captured tail into
+one final candidate. Overlapping snapshots can already reflect a negative event,
+so blindly replaying it would be a no-op and must fail closed. A final candidate
+needs explicit snapshot overlap reconciliation, all real predecessor proofs for
+selected negative events, a fresh full native/API replay, and disclosed source
+count discrepancies and pre-capture gaps. A current projection is never described
+as complete historical follow/block activity.

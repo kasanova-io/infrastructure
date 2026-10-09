@@ -8,11 +8,24 @@ import os
 from pathlib import Path
 import sqlite3
 from history import History, HEX64
+from live_time import preserve_observed_time
 
 
 class LiveOverlay(History):
     scope = "live-content-and-vote-projection"
     kinds = {"post", "quote", "reply", "vote"}
+
+    def verify_one(self, txid, observations=None):
+        if observations is None:
+            observations = list(
+                self.db.execute("SELECT data FROM observations WHERE txid=?", (txid,))
+            )
+        observed = {json.loads(encoded)["timestamp"] for (encoded,) in observations}
+        if len(observed) != 1:
+            raise ValueError("Missing/conflicting observed live timestamps")
+        kind = super().verify_one(txid, observations)
+        preserve_observed_time(self, txid, observed.pop())
+        return kind
 
     def __init__(self, root, source, archive, network, shared_rate_root, snapshot):
         data = Path(snapshot).read_bytes()

@@ -17,11 +17,16 @@ KINDS = {"post", "quote", "reply", "broadcast"}
 
 
 def validate_records(
-    data, network, allow_relationship_snapshot=False, allow_live_overlay=False
+    data,
+    network,
+    allow_relationship_snapshot=False,
+    allow_live_overlay=False,
+    allow_live_tail=False,
 ):
     records = [json.loads(line) for line in data.decode().splitlines() if line.strip()]
     last = None
     seen = set()
+    stateful_times = {}
     for row in records:
         txid = row["transaction_id"]
         if not HEX64.fullmatch(txid) or txid in seen:
@@ -30,7 +35,8 @@ def validate_records(
         allowed = (
             KINDS
             | ({"follow", "block"} if allow_relationship_snapshot else set())
-            | ({"vote"} if allow_live_overlay else set())
+            | ({"vote"} if allow_live_overlay or allow_live_tail else set())
+            | ({"follow", "block"} if allow_live_tail else set())
         )
         if row["network"] != network or row["kind"] not in allowed:
             raise ValueError("Wrong network/action")
@@ -42,7 +48,13 @@ def validate_records(
         if row["kind"] == "vote":
             fields = raw.decode().split(":")
             if (
-                row.get("recovery_scope") != "live-content-and-vote-projection"
+                not (
+                    row.get("recovery_scope") == "live-content-and-vote-projection"
+                    or (
+                        allow_live_tail
+                        and row.get("recovery_scope") == "captured-live-event-tail"
+                    )
+                )
                 or len(fields) < 8
                 or not HEX64.fullmatch(fields[5])
                 or fields[6] not in {"upvote", "downvote"}
@@ -52,14 +64,44 @@ def validate_records(
                 )
         if row["kind"] in {"follow", "block"}:
             fields = raw.decode().split(":")
+            is_tail = (
+                allow_live_tail
+                and row.get("recovery_scope") == "captured-live-event-tail"
+            )
             if (
-                row.get("recovery_scope") != "current-relationship-projection"
+                not (
+                    row.get("recovery_scope") == "current-relationship-projection"
+                    or is_tail
+                )
                 or len(fields) != 7
-                or fields[5] != row["kind"]
+                or fields[5]
+                not in ({row["kind"], "un" + row["kind"]} if is_tail else {row["kind"]})
                 or not re.fullmatch(r"(?:0[23])?[0-9a-fA-F]{64}", fields[6])
             ):
                 raise ValueError(
                     "Only explicitly marked active relationship projections are allowed"
+                )
+            state_key = (
+                row["kind"],
+                bytes.fromhex(fields[3]),
+                bytes.fromhex(fields[6]),
+            )
+            if stateful_times.get(state_key) == int(row["block_time"]):
+                raise ValueError(
+                    "Equal-time relationship transitions need explicit ordering"
+                )
+            stateful_times[state_key] = int(row["block_time"])
+        if row.get("recovery_scope") == "captured-live-event-tail":
+            proof = row.get("live_timestamp_provenance", {})
+            if (
+                not allow_live_tail
+                or proof.get("observed_block_time") != row["block_time"]
+                or proof.get("matched_containing_block") != row["containing_block"]
+                or proof.get("policy")
+                != "preserve-exact-live-time-after-block-membership-verification"
+            ):
+                raise ValueError(
+                    "Live tail requires exact observed timestamp membership proof"
                 )
         if not all(
             HEX64.fullmatch(row[k]) for k in ("accepting_block", "containing_block")
@@ -163,12 +205,23 @@ class Stage:
             rows.append(line.rstrip("\n"))
 
     def run(
-        self, path, network, allow_relationship_snapshot=False, allow_live_overlay=False
+        self,
+        path,
+        network,
+        allow_relationship_snapshot=False,
+        allow_live_overlay=False,
+        allow_live_tail=False,
     ):
         data = path.read_bytes()
         records = validate_records(
-            data, network, allow_relationship_snapshot, allow_live_overlay
+            data,
+            network,
+            allow_relationship_snapshot,
+            allow_live_overlay,
+            allow_live_tail,
         )
+        if allow_live_tail:
+            self.verify_tail_isolation(records)
         batch = hashlib.sha256(data).hexdigest()
         source_network = self.sql("SELECT value FROM k_vars WHERE key='network'")
         if source_network != network:
@@ -199,6 +252,11 @@ class Stage:
                     raise ValueError("Conflicting prior replay record")
                 done += 1
                 continue
+            fields = bytes.fromhex(raw).decode().split(":")
+            undo = (
+                row["kind"] in {"follow", "block"} and fields[5] == "un" + row["kind"]
+            )
+            undo_query = self.prepare_undo(row, encoded) if undo else None
             # Each previous parser effect is confirmed before the next NOTIFY.
             # Re-notify an unledgered row after interruption; dedup is native.
             conflict = self.sql(
@@ -224,9 +282,13 @@ class Stage:
             found = False
             for attempt in range(100):
                 result = self.sql(
-                    f"SELECT encode(sender_pubkey,'hex') || ':' || block_time FROM {table} WHERE transaction_id=decode('{txid}','hex')"
+                    undo_query
+                    if undo
+                    else f"SELECT encode(sender_pubkey,'hex') || ':' || block_time FROM {table} WHERE transaction_id=decode('{txid}','hex')"
                 )
-                if result == expected_key + ":" + str(stamp):
+                if (undo and result == "") or (
+                    not undo and result == expected_key + ":" + str(stamp)
+                ):
                     found = True
                     break
                 time.sleep(0.1)
@@ -252,7 +314,104 @@ class Stage:
                 ),
                 flush=True,
             )
+        if allow_live_tail:
+            self.verify_tail_isolation(records)
         return done
+
+    def verify_tail_isolation(self, records):
+        """Undo effects require one private parser and no unrelated raw inputs."""
+        identifiers = subprocess.check_output(
+            self.command + ["ps", "-q"], text=True
+        ).split()
+        if len(identifiers) != 3:
+            raise ValueError("Tail replay requires exactly three private services")
+        containers = json.loads(
+            subprocess.check_output(["docker", "inspect", *identifiers], text=True)
+        )
+        project = self.command[self.command.index("--project-name") + 1]
+        expected_network = project + "_history"
+        services = set()
+        for container in containers:
+            config = container["Config"]
+            labels = config.get("Labels", {})
+            service = labels.get("com.docker.compose.service")
+            if (
+                labels.get("com.docker.compose.project") != project
+                or service not in {"database", "processor", "web"}
+                or service in services
+                or not container["State"]["Running"]
+                or set(container["NetworkSettings"]["Networks"]) != {expected_network}
+                or any(container["NetworkSettings"].get("Ports", {}).values())
+            ):
+                raise ValueError("Tail replay service isolation mismatch")
+            services.add(service)
+            if service == "processor":
+                command = config["Cmd"]
+                if command.count("--workers") != 1 or command[
+                    command.index("--workers") + 1 :
+                ][:1] != ["1"]:
+                    raise ValueError("Tail replay requires exactly one parser worker")
+        network = json.loads(
+            subprocess.check_output(
+                ["docker", "network", "inspect", expected_network], text=True
+            )
+        )[0]
+        if not network.get("Internal") or set(network.get("Containers", {})) != {
+            c["Id"] for c in containers
+        }:
+            raise ValueError("Tail replay network has external or extra writers")
+        observed = set(
+            self.sql(
+                "SELECT encode(transaction_id,'hex') FROM transactions"
+            ).splitlines()
+        )
+        if not observed <= {r["transaction_id"] for r in records}:
+            raise ValueError("Tail replay contains unrelated raw input")
+
+    def prepare_undo(self, row, encoded):
+        """Require a durable positive predecessor; absence alone proves nothing."""
+        txid = row["transaction_id"]
+        fields = bytes.fromhex(row["payload"]).decode().split(":")
+        kind = row["kind"]
+        owner = bytes.fromhex(fields[3]).hex()
+        target = bytes.fromhex(fields[6]).hex()
+        table, column = (
+            ("k_follows", "followed_user_pubkey")
+            if kind == "follow"
+            else ("k_blocks", "blocked_user_pubkey")
+        )
+        query = f"SELECT json_build_object('transaction_id',encode(transaction_id,'hex'),'block_time',block_time)::text FROM {table} WHERE sender_pubkey=decode('{owner}','hex') AND {column}=decode('{target}','hex')"
+        current = self.sql(query)
+        pending = self.sql(
+            f"SELECT json_build_object('matches',record=convert_from(decode('{encoded}','hex'),'UTF8')::jsonb,'predecessor',predecessor)::text FROM history_pending_undo WHERE transaction_id=decode('{txid}','hex')"
+        )
+        if pending:
+            witness = json.loads(pending)
+            if not witness["matches"]:
+                raise ValueError("Conflicting pending undo record")
+            if current and json.loads(current) != witness["predecessor"]:
+                raise ValueError("Pending undo predecessor changed")
+            if not current:
+                exists = self.sql(
+                    f"SELECT EXISTS(SELECT 1 FROM transactions WHERE transaction_id=decode('{txid}','hex') AND payload=decode('{row['payload']}','hex') AND block_time={int(row['block_time'])})"
+                )
+                if exists != "t":
+                    raise ValueError(
+                        "Absent undo predecessor without original submitted input"
+                    )
+        else:
+            if not current:
+                raise ValueError(
+                    "No-op undo cannot prove native signature acceptance; positive predecessor required"
+                )
+            prior = json.loads(current)
+            if int(prior["block_time"]) >= int(row["block_time"]):
+                raise ValueError("Undo predecessor ordering is ambiguous")
+            predecessor = json.dumps(prior, sort_keys=True).encode().hex()
+            self.sql(
+                f"INSERT INTO history_pending_undo VALUES(decode('{txid}','hex'),convert_from(decode('{encoded}','hex'),'UTF8')::jsonb,convert_from(decode('{predecessor}','hex'),'UTF8')::jsonb)"
+            )
+        return query
 
 
 if __name__ == "__main__":
@@ -265,6 +424,7 @@ if __name__ == "__main__":
     p.add_argument("--network", required=True, choices=["mainnet", "testnet-10"])
     p.add_argument("--allow-relationship-snapshot", action="store_true")
     p.add_argument("--allow-live-overlay", action="store_true")
+    p.add_argument("--allow-live-tail", action="store_true")
     a = p.parse_args()
     if not PROJECT.fullmatch(a.project):
         raise ValueError("Not a history staging project")
@@ -278,6 +438,7 @@ if __name__ == "__main__":
                         a.network,
                         a.allow_relationship_snapshot,
                         a.allow_live_overlay,
+                        a.allow_live_tail,
                     ),
                     "live_imported": 0,
                 }
