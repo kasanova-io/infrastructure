@@ -267,3 +267,27 @@ ports, non-200 responses, redirects, oversized responses, timeouts and drift fai
 closed without a fallback. Responses are bounded to 8 MiB with a 10-second socket
 timeout. Runtime identity is rechecked before printing a success receipt. The
 default transport and all already-frozen watcher sources remain unchanged.
+
+New private projects record initial and incremental native replay in
+`history_lineage`. Each immutable batch binds its exact parent digest, network,
+record count, ordinal interval, chronological endpoints and actual private
+runtime identity. A parent is complete only after every native effect is
+ledgered and runtime identity is unchanged. This records native replay status;
+full API readback and candidate/cutover approval remain separate requirements.
+
+`stage.py <delta.jsonl> ... --allow-live-tail --parent-batch-sha256 <exact-head>`
+reuses the same per-record execution loop for a captured, archive-verified delta.
+Its first timestamp must be strictly greater than the completed parent's last
+timestamp. Unknown/incomplete/noncurrent parents, equal-time overlap, ordinal
+gaps, changed runtime identity and unexplained/no-op inverse effects fail closed.
+The lineage is written before any event submission; interruption resumes only
+the same pending immutable delta. Repeating the latest completed delta checks
+the exact existing records and ordinals without adding rows. Older completed
+batches cannot be replayed as the current head after a child has been appended.
+
+This path requires the new private schema and a parent originally proved with
+these guards; earlier pilot receipts are not retroactively rebound or upgraded.
+After a delta, verify the combined parent-plus-delta expectation through the same
+actual API methods and fresh before/after image provenance. A delta with late or
+overlapping timestamps needs a new reviewed reconciliation or replay, not an
+unordered append. None of these private operations authorize live cutover.

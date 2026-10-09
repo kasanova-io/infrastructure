@@ -220,8 +220,8 @@ class Stage:
             allow_live_overlay,
             allow_live_tail,
         )
-        if allow_live_tail:
-            self.verify_tail_isolation(records)
+        if not records:
+            raise ValueError("An immutable staging batch cannot be empty")
         batch = hashlib.sha256(data).hexdigest()
         source_network = self.sql("SELECT value FROM k_vars WHERE key='network'")
         if source_network != network:
@@ -236,8 +236,143 @@ class Stage:
         )
         if self.sql("SELECT sha256 FROM history_batch") != batch:
             raise ValueError("Another batch already owns this staging database")
+        runtime = self.verify_tail_isolation(records)
+        offset = self.prepare_lineage(records, batch, network, runtime=runtime)
+        done = self.replay_records(records, offset)
+        if self.verify_tail_isolation(records) != runtime:
+            raise ValueError("Private runtime changed during native replay")
+        self.complete_lineage(batch, records, offset)
+        return done
+
+    def run_delta(self, path, network, parent_sha256):
+        """Append only a strictly later immutable tail to a completed private parent."""
+        if not HEX64.fullmatch(parent_sha256):
+            raise ValueError("Delta requires the exact parent batch digest")
+        data = path.read_bytes()
+        records = validate_records(data, network, False, False, True)
+        if not records or any(
+            row.get("recovery_scope") != "captured-live-event-tail" for row in records
+        ):
+            raise ValueError("Delta must contain only verified captured tail events")
+        if self.sql("SELECT value FROM k_vars WHERE key='network'") != network:
+            raise ValueError("Processor network mismatch")
+        if self.sql("SELECT network FROM history_batch") != network:
+            raise ValueError("Parent batch network mismatch")
+        batch = hashlib.sha256(data).hexdigest()
+        prior_ids = self.sql(
+            "SELECT encode(transaction_id,'hex') FROM history_replay"
+        ).splitlines()
+        permitted = [{"transaction_id": txid} for txid in prior_ids] + records
+        runtime = self.verify_tail_isolation(permitted)
+        offset = self.prepare_lineage(records, batch, network, parent_sha256, runtime)
+        done = self.replay_records(records, offset)
+        if self.verify_tail_isolation(permitted) != runtime:
+            raise ValueError("Private runtime changed during delta replay")
+        self.complete_lineage(batch, records, offset)
+        return done
+
+    def prepare_lineage(self, records, batch, network, parent=None, runtime=None):
+        if not records:
+            raise ValueError("An immutable staging batch cannot be empty")
+        latest_raw = self.sql(
+            "SELECT json_build_object('sha256',sha256,'parent',parent_sha256,'manifest',manifest,'complete',complete)::text FROM history_lineage ORDER BY (manifest->>'end_ordinal')::bigint DESC LIMIT 1"
+        )
+        latest = json.loads(latest_raw) if latest_raw else None
+        existing_raw = self.sql(
+            f"SELECT json_build_object('parent',parent_sha256,'manifest',manifest,'complete',complete)::text FROM history_lineage WHERE sha256='{batch}'"
+        )
+        existing = json.loads(existing_raw) if existing_raw else None
+        parent_manifest = None
+        offset = 0
+        if parent is not None:
+            parent_raw = self.sql(
+                f"SELECT json_build_object('manifest',manifest,'complete',complete)::text FROM history_lineage WHERE sha256='{parent}'"
+            )
+            parent_row = json.loads(parent_raw) if parent_raw else None
+            if not parent_row or not parent_row["complete"]:
+                raise ValueError("Delta parent is absent or incomplete")
+            parent_manifest = parent_row["manifest"]
+            if parent_manifest["network"] != network:
+                raise ValueError("Delta parent network mismatch")
+            if parent_manifest.get("runtime") != runtime:
+                raise ValueError("Delta runtime differs from the completed parent")
+            offset = parent_manifest["end_ordinal"]
+            if records[0]["block_time"] <= parent_manifest["last_block_time"]:
+                raise ValueError(
+                    "Delta overlaps or shares the parent chronological boundary"
+                )
+        manifest = {
+            "network": network,
+            "record_count": len(records),
+            "start_ordinal": offset + 1,
+            "end_ordinal": offset + len(records),
+            "first_block_time": records[0]["block_time"],
+            "first_transaction_id": records[0]["transaction_id"],
+            "last_block_time": records[-1]["block_time"],
+            "last_transaction_id": records[-1]["transaction_id"],
+            "runtime": runtime,
+        }
+        if existing:
+            if (
+                not latest
+                or latest["sha256"] != batch
+                or existing["parent"] != parent
+                or existing["manifest"] != manifest
+            ):
+                raise ValueError("Resumed batch lineage differs or has a later child")
+        elif (parent is None and latest is not None) or (
+            parent is not None
+            and (not latest or latest["sha256"] != parent or not latest["complete"])
+        ):
+            raise ValueError("Delta does not extend the exact completed current head")
+        state = json.loads(
+            self.sql(
+                "SELECT json_build_object('count',count(*),'first',coalesce(min(ordinal),0),'last',coalesce(max(ordinal),0))::text FROM history_replay"
+            )
+        )
+        if (
+            state["first"] != (1 if state["count"] else 0)
+            or state["last"] != state["count"]
+            or not offset <= state["count"] <= manifest["end_ordinal"]
+            or (not existing and state["count"] != offset)
+            or (
+                existing
+                and existing["complete"]
+                and state["count"] != manifest["end_ordinal"]
+            )
+        ):
+            raise ValueError(
+                "Replay ledger count/ordinal boundary differs from lineage"
+            )
+        if parent_manifest is not None:
+            actual_parent = self.sql(
+                f"SELECT encode(transaction_id,'hex') || ':' || (record->>'block_time') FROM history_replay WHERE ordinal={offset}"
+            )
+            if actual_parent != parent_manifest["last_transaction_id"] + ":" + str(
+                parent_manifest["last_block_time"]
+            ):
+                raise ValueError("Parent ledger watermark differs from durable lineage")
+        if not existing:
+            encoded = json.dumps(manifest, sort_keys=True).encode().hex()
+            parent_sql = "NULL" if parent is None else "'" + parent + "'"
+            self.sql(
+                f"INSERT INTO history_lineage(sha256,parent_sha256,manifest) VALUES('{batch}',{parent_sql},convert_from(decode('{encoded}','hex'),'UTF8')::jsonb)"
+            )
+        return offset
+
+    def complete_lineage(self, batch, records, offset):
+        end = offset + len(records)
+        actual = self.sql(
+            f"SELECT count(*) FROM history_replay WHERE ordinal>{offset} AND ordinal<={end}"
+        )
+        if actual != str(len(records)):
+            raise ValueError("Cannot complete a partially replayed batch")
+        self.sql(f"UPDATE history_lineage SET complete=true WHERE sha256='{batch}'")
+
+    def replay_records(self, records, ordinal_offset=0):
+        """One native execution path shared by initial batches and later deltas."""
         done = 0
-        for ordinal, row in enumerate(records, 1):
+        for ordinal, row in enumerate(records, ordinal_offset + 1):
             txid = row["transaction_id"]
             raw = row["payload"]
             stamp = int(row["block_time"])
@@ -245,7 +380,7 @@ class Stage:
                 json.dumps(row, sort_keys=True, separators=(",", ":")).encode().hex()
             )
             known = self.sql(
-                f"SELECT record=convert_from(decode('{encoded}','hex'),'UTF8')::jsonb FROM history_replay WHERE transaction_id=decode('{txid}','hex')"
+                f"SELECT record=convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AND ordinal={ordinal} FROM history_replay WHERE transaction_id=decode('{txid}','hex')"
             )
             if known:
                 if known != "t":
@@ -314,8 +449,6 @@ class Stage:
                 ),
                 flush=True,
             )
-        if allow_live_tail:
-            self.verify_tail_isolation(records)
         return done
 
     def verify_tail_isolation(self, records):
@@ -367,6 +500,18 @@ class Stage:
         )
         if not observed <= {r["transaction_id"] for r in records}:
             raise ValueError("Tail replay contains unrelated raw input")
+        return {
+            "project": project,
+            "network_id": network["Id"],
+            "services": {
+                c["Config"]["Labels"]["com.docker.compose.service"]: {
+                    "container_id": c["Id"],
+                    "image": c["Image"],
+                    "started_at": c["State"]["StartedAt"],
+                }
+                for c in containers
+            },
+        }
 
     def prepare_undo(self, row, encoded):
         """Require a durable positive predecessor; absence alone proves nothing."""
@@ -425,21 +570,33 @@ if __name__ == "__main__":
     p.add_argument("--allow-relationship-snapshot", action="store_true")
     p.add_argument("--allow-live-overlay", action="store_true")
     p.add_argument("--allow-live-tail", action="store_true")
+    p.add_argument(
+        "--parent-batch-sha256",
+        help="Append a strictly later immutable captured tail to this exact completed parent",
+    )
     a = p.parse_args()
     if not PROJECT.fullmatch(a.project):
         raise ValueError("Not a history staging project")
+    if a.parent_batch_sha256 and not a.allow_live_tail:
+        p.error("--parent-batch-sha256 requires --allow-live-tail")
     with a.compose.with_name(a.project + ".replay.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        instance = Stage(a.compose, a.project)
+        completed = (
+            instance.run_delta(a.batch, a.network, a.parent_batch_sha256)
+            if a.parent_batch_sha256
+            else instance.run(
+                a.batch,
+                a.network,
+                a.allow_relationship_snapshot,
+                a.allow_live_overlay,
+                a.allow_live_tail,
+            )
+        )
         print(
             json.dumps(
                 {
-                    "complete_staged": Stage(a.compose, a.project).run(
-                        a.batch,
-                        a.network,
-                        a.allow_relationship_snapshot,
-                        a.allow_live_overlay,
-                        a.allow_live_tail,
-                    ),
+                    "complete_staged": completed,
                     "live_imported": 0,
                 }
             )

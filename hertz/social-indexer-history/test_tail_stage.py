@@ -88,7 +88,8 @@ class TailStageTest(unittest.TestCase):
         containers = [
             {
                 "Id": name,
-                "State": {"Running": True},
+                "State": {"Running": True, "StartedAt": "fixed"},
+                "Image": "sha256:" + "1" * 64,
                 "Config": {
                     "Labels": {
                         "com.docker.compose.project": project,
@@ -101,6 +102,7 @@ class TailStageTest(unittest.TestCase):
             for name in ["database", "processor", "web"]
         ]
         network_data = {
+            "Id": "private-network-id",
             "Internal": True,
             "Containers": {c["Id"]: {} for c in containers},
         }
