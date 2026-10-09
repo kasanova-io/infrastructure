@@ -1,0 +1,283 @@
+--- a/K-webserver/src/api_handlers.rs
++++ b/K-webserver/src/api_handlers.rs
+@@ -27,25 +27,10 @@
+         before: Option<String>,
+         after: Option<String>,
+     ) -> Result<String, String> {
+-        // Validate user public key format (66 hex characters for compressed public key)
+-        if user_public_key.len() != 66 {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must be 66 hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        if !user_public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must contain only hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        // Validate compressed public key prefix (should start with 02 or 03)
+-        if !user_public_key.starts_with("02") && !user_public_key.starts_with("03") {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Compressed public key must start with 02 or 03.",
++        // Preserve historical x-only and compressed author identities exactly.
++        if !is_valid_author_key(user_public_key) {
++            return Err(self.create_error_response(
++                "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                 "INVALID_USER_KEY",
+             ));
+         }
+@@ -455,17 +440,10 @@
+         searched_user_pubkey: Option<String>,
+         searched_user_nickname: Option<String>,
+     ) -> Result<String, String> {
+-        // Validate searched_user_pubkey if provided
+         if let Some(ref pubkey) = searched_user_pubkey {
+-            if pubkey.len() != 66 {
++            if !is_valid_author_key(pubkey) {
+                 return Err(self.create_error_response(
+-                    "Invalid searched user public key format. Must be 66 hex characters.",
+-                    "INVALID_USER_KEY",
+-                ));
+-            }
+-            if !pubkey.starts_with("02") && !pubkey.starts_with("03") {
+-                return Err(self.create_error_response(
+-                    "Invalid searched user public key prefix. Must start with 02 or 03.",
++                    "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                     "INVALID_USER_KEY",
+                 ));
+             }
+@@ -478,15 +456,14 @@
+             sort_descending: true,
+         };
+ 
+-        // Strip the 02/03 prefix from the searched pubkey to match both variants
+-        let searched_pubkey_without_prefix = searched_user_pubkey.map(|pk| pk[2..].to_string());
++        // Keep exact author bytes; an x-only key is not a guessed compressed key.
+ 
+         let broadcasts_result = match self
+             .db
+             .search_users(
+                 requester_pubkey,
+                 options,
+-                searched_pubkey_without_prefix,
++                searched_user_pubkey,
+                 searched_user_nickname,
+             )
+             .await
+@@ -645,25 +622,10 @@
+         before: Option<String>,
+         after: Option<String>,
+     ) -> Result<String, String> {
+-        // Validate user public key format (66 hex characters for compressed public key)
+-        if user_public_key.len() != 66 {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must be 66 hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        if !user_public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must contain only hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        // Validate compressed public key prefix (should start with 02 or 03)
+-        if !user_public_key.starts_with("02") && !user_public_key.starts_with("03") {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Compressed public key must start with 02 or 03.",
++        // Preserve historical x-only and compressed author identities exactly.
++        if !is_valid_author_key(user_public_key) {
++            return Err(self.create_error_response(
++                "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                 "INVALID_USER_KEY",
+             ));
+         }
+@@ -757,25 +719,10 @@
+         before: Option<String>,
+         after: Option<String>,
+     ) -> Result<String, String> {
+-        // Validate user public key format (66 hex characters for compressed public key)
+-        if user_public_key.len() != 66 {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must be 66 hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        if !user_public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must contain only hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        // Validate compressed public key prefix (should start with 02 or 03)
+-        if !user_public_key.starts_with("02") && !user_public_key.starts_with("03") {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Compressed public key must start with 02 or 03.",
++        // Preserve historical x-only and compressed author identities exactly.
++        if !is_valid_author_key(user_public_key) {
++            return Err(self.create_error_response(
++                "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                 "INVALID_USER_KEY",
+             ));
+         }
+@@ -1131,25 +1078,10 @@
+         user_public_key: &str,
+         requester_pubkey: &str,
+     ) -> Result<String, String> {
+-        // Validate user public key format (66 hex characters for compressed public key)
+-        if user_public_key.len() != 66 {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must be 66 hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        if !user_public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must contain only hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        // Validate compressed public key prefix (should start with 02 or 03)
+-        if !user_public_key.starts_with("02") && !user_public_key.starts_with("03") {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Compressed public key must start with 02 or 03.",
++        // Preserve historical x-only and compressed author identities exactly.
++        if !is_valid_author_key(user_public_key) {
++            return Err(self.create_error_response(
++                "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                 "INVALID_USER_KEY",
+             ));
+         }
+@@ -1485,25 +1417,10 @@
+             ));
+         }
+ 
+-        // Validate user public key format (66 hex characters for compressed public key)
+-        if user_pubkey.len() != 66 {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must be 66 hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        if !user_pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must contain only hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        // Validate compressed public key prefix (should start with 02 or 03)
+-        if !user_pubkey.starts_with("02") && !user_pubkey.starts_with("03") {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Compressed public key must start with 02 or 03.",
++        // Preserve historical x-only and compressed author identities exactly.
++        if !is_valid_author_key(user_pubkey) {
++            return Err(self.create_error_response(
++                "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                 "INVALID_USER_KEY",
+             ));
+         }
+@@ -1603,25 +1520,10 @@
+             ));
+         }
+ 
+-        // Validate user public key format (66 hex characters for compressed public key)
+-        if user_pubkey.len() != 66 {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must be 66 hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        if !user_pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Must contain only hex characters.",
+-                "INVALID_USER_KEY",
+-            ));
+-        }
+-
+-        // Validate compressed public key prefix (should start with 02 or 03)
+-        if !user_pubkey.starts_with("02") && !user_pubkey.starts_with("03") {
+-            return Err(self.create_error_response(
+-                "Invalid user public key format. Compressed public key must start with 02 or 03.",
++        // Preserve historical x-only and compressed author identities exactly.
++        if !is_valid_author_key(user_pubkey) {
++            return Err(self.create_error_response(
++                "Invalid author key. Expected 64 hex characters or 66 hex characters starting with 02 or 03.",
+                 "INVALID_USER_KEY",
+             ));
+         }
+@@ -1965,3 +1867,32 @@
+         }
+     }
+ }
++
++// Author keys are opaque protocol identities; validation must not rewrite parity.
++fn is_valid_author_key(key: &str) -> bool {
++    key.bytes().all(|byte| byte.is_ascii_hexdigit())
++        && (key.len() == 64
++            || (key.len() == 66 && (key.starts_with("02") || key.starts_with("03"))))
++}
++
++#[cfg(test)]
++mod historical_author_key_tests {
++    use super::is_valid_author_key;
++
++    #[test]
++    fn accepts_historical_and_both_compressed_forms_without_rewriting() {
++        let x = "330a856d1fbc1b6312141d4535af72c01f5bcefa3930e120069e8cde0c6742b9";
++        for key in [x.to_string(), x.to_uppercase(), format!("02{x}"), format!("03{x}")] {
++            assert!(is_valid_author_key(&key));
++        }
++    }
++
++    #[test]
++    fn rejects_malformed_author_keys() {
++        for key in [String::new(), "a".repeat(63), "a".repeat(65), "g".repeat(64),
++                    format!("04{}", "a".repeat(64)), format!("02{}", "g".repeat(64)),
++                    format!(" {}", "a".repeat(64)), "é".repeat(32)] {
++            assert!(!is_valid_author_key(&key), "accepted malformed key: {key}");
++        }
++    }
++}
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -515,12 +515,12 @@
+         let mut bind_count = 1; // Start with 1 since we already have requester_pubkey
+         let mut search_user_pubkey_bytes: Option<Vec<u8>> = None;
+ 
+-        // Add search filter for user pubkey (matches both 02 and 03 prefix variants)
++        // Match the exact protocol identity, including historical x-only keys.
+         if let Some(ref pubkey) = searched_user_pubkey {
+             search_user_pubkey_bytes = Some(Self::decode_hex_to_bytes(pubkey)?);
+             bind_count += 1;
+             query.push_str(&format!(
+-                " AND encode(b.sender_pubkey, 'hex') LIKE ${}",
++                " AND b.sender_pubkey = ${}",
+                 bind_count
+             ));
+         }
+@@ -569,10 +569,9 @@
+ 
+         let mut query_builder = sqlx::query(&query).bind(&requester_pubkey_bytes);
+ 
+-        // Bind search user pubkey pattern if provided (matches both 02 and 03 prefix)
++        // Bind exact author bytes without adding or removing a parity prefix.
+         if let Some(ref pubkey_bytes) = search_user_pubkey_bytes {
+-            let hex_pattern = format!("%{}", hex::encode(pubkey_bytes));
+-            query_builder = query_builder.bind(hex_pattern);
++            query_builder = query_builder.bind(pubkey_bytes);
+         }
+ 
+         // Bind nickname search pattern if provided

@@ -1,0 +1,191 @@
+--- a/K-webserver/src/database_trait.rs
++++ b/K-webserver/src/database_trait.rs
+@@ -1,5 +1,5 @@
+ use crate::models::{
+-    ContentRecord, KBroadcastRecord, KPostRecord, KReplyRecord, NotificationContentRecord,
++    ContentRecord, KBroadcastRecord, KPostRecord, KReplyRecord, KVoteRecord, NotificationContentRecord,
+     PaginationMetadata,
+ };
+ use async_trait::async_trait;
+@@ -170,6 +170,13 @@
+         options: QueryOptions,
+     ) -> DatabaseResult<PaginatedResult<NotificationContentRecord>>;
+ 
++    // Exact, requester-owned vote confirmation; independent of notifications.
++    async fn get_vote_by_id(
++        &self,
++        vote_id: &str,
++        requester_pubkey: &str,
++    ) -> DatabaseResult<Option<KVoteRecord>>;
++
+     // NEW: k_contents table - Get content by ID using unified content table
+     async fn get_content_by_id(
+         &self,
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -1994,6 +1994,37 @@
+             items: content_records,
+             pagination,
+         })
++    }
++
++    async fn get_vote_by_id(
++        &self,
++        vote_id: &str,
++        requester_pubkey: &str,
++    ) -> DatabaseResult<Option<KVoteRecord>> {
++        let vote_id_bytes = Self::decode_hex_to_bytes(vote_id)?;
++        let requester_bytes = Self::decode_hex_to_bytes(requester_pubkey)?;
++        let row = sqlx::query(
++            "SELECT id, transaction_id, block_time, sender_pubkey, sender_signature, post_id, vote \
++             FROM k_votes WHERE transaction_id = $1 AND sender_pubkey = $2 LIMIT 1",
++        )
++        .bind(vote_id_bytes)
++        .bind(requester_bytes)
++        .fetch_optional(&self.pool)
++        .await
++        .map_err(|error| DatabaseError::QueryError(error.to_string()))?;
++        Ok(row.map(|row| KVoteRecord {
++            id: row.get("id"),
++            transaction_id: Self::encode_bytes_to_hex(&row.get::<Vec<u8>, _>("transaction_id")),
++            block_time: row.get::<i64, _>("block_time") as u64,
++            sender_pubkey: Self::encode_bytes_to_hex(&row.get::<Vec<u8>, _>("sender_pubkey")),
++            sender_signature: Self::encode_bytes_to_hex(&row.get::<Vec<u8>, _>("sender_signature")),
++            post_id: Self::encode_bytes_to_hex(&row.get::<Vec<u8>, _>("post_id")),
++            vote: row.get("vote"),
++            mention_block_time: None,
++            voted_content: None,
++            user_nickname: None,
++            user_profile_image: None,
++        }))
+     }
+ 
+     async fn get_content_by_id(
+--- a/K-webserver/src/api_handlers.rs
++++ b/K-webserver/src/api_handlers.rs
+@@ -943,11 +943,36 @@
+         }
+     }
+ 
++    /// GET /get-vote-details?id={voteId}&requesterPubkey={requesterPubkey}
++    /// Confirm an exact requester-owned vote without relying on notifications.
++    pub async fn get_vote_details(
++        &self,
++        vote_id: &str,
++        requester_pubkey: &str,
++    ) -> Result<String, String> {
++        if !is_valid_vote_request(vote_id, requester_pubkey) {
++            return Err(self.create_error_response(
++                "Expected a 64-hex transaction ID and a compressed 66-hex requester key.",
++                "INVALID_VOTE_QUERY",
++            ));
++        }
++        match self.db.get_vote_by_id(vote_id, requester_pubkey).await {
++            Ok(Some(vote)) => Ok(serde_json::json!({"vote": {
++                "id": vote.transaction_id,
++                "userPublicKey": vote.sender_pubkey,
++                "parentPostId": vote.post_id,
++                "voteType": vote.vote,
++            }}).to_string()),
++            Ok(None) => Err(self.create_error_response("Vote not found", "NOT_FOUND")),
++            Err(error) => {
++                log_error!("Failed to read exact vote: {}", error);
++                Err(self.create_error_response("Internal server error", "DATABASE_ERROR"))
++            }
++        }
++    }
++
+     /// GET /get-post-details?id={postId}&requesterPubkey={requesterPubkey}
+-    /// Fetch details for a specific post or reply by its ID with voting information for the requesting user
+-
+-    /// GET /get-post-details?id={postId}&requesterPubkey={requesterPubkey}
+-    /// Fetch details for a specific post or reply by its ID with voting information and blocking status for the requesting user
++    /// Fetch a post or reply with voting information and requester blocking status.
+     pub async fn get_post_details(
+         &self,
+         content_id: &str,
+@@ -1896,3 +1921,33 @@
+         }
+     }
+ }
++
++fn is_valid_vote_request(id: &str, requester: &str) -> bool {
++    id.len() == 64
++        && id.bytes().all(|byte| byte.is_ascii_hexdigit())
++        && requester.len() == 66
++        && is_valid_author_key(requester)
++}
++
++#[cfg(test)]
++mod vote_query_tests {
++    use super::is_valid_vote_request;
++
++    #[test]
++    fn accepts_exact_transaction_and_both_compressed_requester_forms() {
++        for prefix in ["02", "03"] {
++            assert!(is_valid_vote_request(&"a".repeat(64), &format!("{prefix}{}", "b".repeat(64))));
++        }
++    }
++
++    #[test]
++    fn rejects_malformed_ids_and_requesters_without_rewriting_keys() {
++        let requester = format!("02{}", "b".repeat(64));
++        for id in [String::new(), "a".repeat(63), "a".repeat(65), "g".repeat(64), "é".repeat(32)] {
++            assert!(!is_valid_vote_request(&id, &requester));
++        }
++        for key in [String::new(), "b".repeat(64), format!("04{}", "b".repeat(64)), format!("02{}", "g".repeat(64))] {
++            assert!(!is_valid_vote_request(&"a".repeat(64), &key));
++        }
++    }
++}
+--- a/K-webserver/src/web_server.rs
++++ b/K-webserver/src/web_server.rs
+@@ -244,6 +244,7 @@
+             )
+             .route("/get-posts", get(handle_get_posts))
+             .route("/get-post-details", get(handle_get_post_details))
++            .route("/get-vote-details", get(handle_get_vote_details))
+             .route("/get-posts-watching", get(handle_get_posts_watching))
+             .route(
+                 "/get-contents-following",
+@@ -484,6 +485,40 @@
+     }
+ }
+ 
++async fn handle_get_vote_details(
++    ConnectInfo(addr): ConnectInfo<SocketAddr>,
++    State(app_state): State<Arc<AppState>>,
++    Query(params): Query<GetPostDetailsQuery>,
++) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
++    check_rate_limit(&app_state, addr).await?;
++    let (Some(vote_id), Some(requester)) = (params.id, params.requester_pubkey) else {
++        return Err((StatusCode::BAD_REQUEST, Json(ApiError {
++            error: "Missing required id or requesterPubkey".to_string(),
++            code: "MISSING_PARAMETER".to_string(),
++        })));
++    };
++    match app_state.api_handlers.get_vote_details(&vote_id, &requester).await {
++        Ok(response) => serde_json::from_str(&response).map(Json).map_err(|_| {
++            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError {
++                error: "Internal server error".to_string(),
++                code: "SERIALIZATION_ERROR".to_string(),
++            }))
++        }),
++        Err(response) => {
++            let error = serde_json::from_str::<ApiError>(&response).unwrap_or(ApiError {
++                error: "Internal server error".to_string(),
++                code: "INTERNAL_ERROR".to_string(),
++            });
++            let status = match error.code.as_str() {
++                "INVALID_VOTE_QUERY" | "MISSING_PARAMETER" => StatusCode::BAD_REQUEST,
++                "NOT_FOUND" => StatusCode::NOT_FOUND,
++                _ => StatusCode::INTERNAL_SERVER_ERROR,
++            };
++            Err((status, Json(error)))
++        }
++    }
++}
++
+ async fn handle_get_post_details(
+     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+     State(app_state): State<Arc<AppState>>,
