@@ -16,7 +16,9 @@ PROJECT = re.compile(r"^social_history_[a-z0-9_]+$")
 KINDS = {"post", "quote", "reply", "broadcast"}
 
 
-def validate_records(data, network, allow_relationship_snapshot=False):
+def validate_records(
+    data, network, allow_relationship_snapshot=False, allow_live_overlay=False
+):
     records = [json.loads(line) for line in data.decode().splitlines() if line.strip()]
     last = None
     seen = set()
@@ -25,8 +27,10 @@ def validate_records(data, network, allow_relationship_snapshot=False):
         if not HEX64.fullmatch(txid) or txid in seen:
             raise ValueError("Invalid/duplicate transaction ID")
         seen.add(txid)
-        allowed = KINDS | (
-            {"follow", "block"} if allow_relationship_snapshot else set()
+        allowed = (
+            KINDS
+            | ({"follow", "block"} if allow_relationship_snapshot else set())
+            | ({"vote"} if allow_live_overlay else set())
         )
         if row["network"] != network or row["kind"] not in allowed:
             raise ValueError("Wrong network/action")
@@ -35,6 +39,17 @@ def validate_records(data, network, allow_relationship_snapshot=False):
             raise ValueError("Payload digest mismatch")
         if not raw.startswith(("k:1:" + row["kind"] + ":").encode()):
             raise ValueError("Action mismatch")
+        if row["kind"] == "vote":
+            fields = raw.decode().split(":")
+            if (
+                row.get("recovery_scope") != "live-content-and-vote-projection"
+                or len(fields) < 8
+                or not HEX64.fullmatch(fields[5])
+                or fields[6] not in {"upvote", "downvote"}
+            ):
+                raise ValueError(
+                    "Only explicitly verified live vote overlays are allowed"
+                )
         if row["kind"] in {"follow", "block"}:
             fields = raw.decode().split(":")
             if (
@@ -147,9 +162,13 @@ class Stage:
                 return "\n".join(rows).strip()
             rows.append(line.rstrip("\n"))
 
-    def run(self, path, network, allow_relationship_snapshot=False):
+    def run(
+        self, path, network, allow_relationship_snapshot=False, allow_live_overlay=False
+    ):
         data = path.read_bytes()
-        records = validate_records(data, network, allow_relationship_snapshot)
+        records = validate_records(
+            data, network, allow_relationship_snapshot, allow_live_overlay
+        )
         batch = hashlib.sha256(data).hexdigest()
         source_network = self.sql("SELECT value FROM k_vars WHERE key='network'")
         if source_network != network:
@@ -197,6 +216,7 @@ class Stage:
                 "broadcast": "k_broadcasts",
                 "follow": "k_follows",
                 "block": "k_blocks",
+                "vote": "k_votes",
             }.get(row["kind"], "k_contents")
             expected_key = row["sender_pubkey"]
             if not re.fullmatch(r"(?:0[23])?[0-9a-f]{64}", expected_key):
@@ -244,6 +264,7 @@ if __name__ == "__main__":
     p.add_argument("--project", required=True)
     p.add_argument("--network", required=True, choices=["mainnet", "testnet-10"])
     p.add_argument("--allow-relationship-snapshot", action="store_true")
+    p.add_argument("--allow-live-overlay", action="store_true")
     a = p.parse_args()
     if not PROJECT.fullmatch(a.project):
         raise ValueError("Not a history staging project")
@@ -253,7 +274,10 @@ if __name__ == "__main__":
             json.dumps(
                 {
                     "complete_staged": Stage(a.compose, a.project).run(
-                        a.batch, a.network, a.allow_relationship_snapshot
+                        a.batch,
+                        a.network,
+                        a.allow_relationship_snapshot,
+                        a.allow_live_overlay,
                     ),
                     "live_imported": 0,
                 }

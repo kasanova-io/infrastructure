@@ -11,13 +11,30 @@ from stage import Stage, validate_records
 ANON = "02" + "0" * 64
 
 
-def verify(stage, path, network, allow_relationship_snapshot=False):
-    records = validate_records(path.read_bytes(), network, allow_relationship_snapshot)
+def verify(
+    stage, path, network, allow_relationship_snapshot=False, allow_live_overlay=False
+):
+    records = validate_records(
+        path.read_bytes(), network, allow_relationship_snapshot, allow_live_overlay
+    )
     counts = collections.Counter()
     profiles = {}
     relations = {}
     for row in records:
         fields = bytes.fromhex(row["payload"]).decode().split(":")
+        if row["kind"] == "vote":
+            url = "http://127.0.0.1:3001/get-vote-details?" + urllib.parse.urlencode(
+                {"id": row["transaction_id"], "requesterPubkey": row["sender_pubkey"]}
+            )
+            vote = json.loads(
+                subprocess.check_output(
+                    stage.command + ["exec", "-T", "web", "wget", "-qO-", url],
+                    text=True,
+                )
+            )["vote"]
+            check_vote(row, vote)
+            counts["vote"] += 1
+            continue
         if row["kind"] in {"follow", "block"}:
             relations.setdefault((row["kind"], row["sender_pubkey"]), []).append(row)
             continue
@@ -142,6 +159,18 @@ def check(row, data, content):
             raise ValueError("Native API readback mismatch: " + row["transaction_id"])
 
 
+def check_vote(row, data):
+    fields = bytes.fromhex(row["payload"]).decode().split(":")
+    expected = {
+        "id": row["transaction_id"],
+        "userPublicKey": row["sender_pubkey"],
+        "parentPostId": fields[5],
+        "voteType": fields[6],
+    }
+    if any(data.get(key) != value for key, value in expected.items()):
+        raise ValueError("Native vote API readback mismatch: " + row["transaction_id"])
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("batch", type=Path)
@@ -151,7 +180,12 @@ if __name__ == "__main__":
     p.add_argument("--project", required=True)
     p.add_argument("--network", required=True, choices=["mainnet", "testnet-10"])
     p.add_argument("--allow-relationship-snapshot", action="store_true")
+    p.add_argument("--allow-live-overlay", action="store_true")
     a = p.parse_args()
     verify(
-        Stage(a.compose, a.project), a.batch, a.network, a.allow_relationship_snapshot
+        Stage(a.compose, a.project),
+        a.batch,
+        a.network,
+        a.allow_relationship_snapshot,
+        a.allow_live_overlay,
     )

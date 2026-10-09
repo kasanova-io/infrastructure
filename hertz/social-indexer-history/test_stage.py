@@ -72,6 +72,31 @@ class StageTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check([self.row])
 
+    def test_vote_requires_explicit_live_overlay_scope_and_value(self):
+        raw = b"k:1:vote:02" + b"1" * 64 + b":dd:" + b"f" * 64 + b":upvote:"
+        self.row.update(
+            kind="vote",
+            payload=raw.hex(),
+            payload_sha256=hashlib.sha256(raw).hexdigest(),
+        )
+        with self.assertRaises(ValueError):
+            validate_records(json.dumps(self.row).encode(), "mainnet", False, True)
+        self.row["recovery_scope"] = "live-content-and-vote-projection"
+        with self.assertRaises(ValueError):
+            self.check([self.row])
+        self.assertEqual(
+            len(
+                validate_records(json.dumps(self.row).encode(), "mainnet", False, True)
+            ),
+            1,
+        )
+        raw = raw.replace(b"upvote", b"invalid")
+        self.row.update(
+            payload=raw.hex(), payload_sha256=hashlib.sha256(raw).hexdigest()
+        )
+        with self.assertRaises(ValueError):
+            validate_records(json.dumps(self.row).encode(), "mainnet", False, True)
+
     def test_out_of_order_and_duplicates(self):
         second = copy.deepcopy(self.row)
         second["transaction_id"] = "d" * 64

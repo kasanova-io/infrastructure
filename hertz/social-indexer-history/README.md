@@ -175,3 +175,32 @@ uses an independent private project and the reviewed compatible web image. Its
 source hashes, PID, waiting checkpoint and preserved old snapshot are recorded
 in the task's `watcher-guard-transition.json`. This is still a waiting collector
 completion workflow, not a completed full-stage replay or a live import.
+
+## Preserving the live content/vote overlay
+
+`live_overlay.py` verifies an immutable read-only live database projection in a
+separate inventory, using the same archive acceptance, network, original payload
+and containing-block checks as historical recovery. It shares the original
+collector's pacing/cooldown files. The snapshot binds exact IDs, signer and
+signature, content/parent, and vote target/value; changing the snapshot or source
+requires another inventory. It performs no database writes outside its local
+evidence directory. Export its verified records using `History.export` only after
+every selected record is resolved; preserve exclusions explicitly.
+
+Staging and API verification accept votes only with `--allow-live-overlay` and the
+explicit `live-content-and-vote-projection` record scope. The original processor
+still verifies the signature and populates `k_votes`; readback uses the real
+`/get-vote-details` route, checking exact transaction, sender, parent and value.
+Use a separate marked private project with provenance checks before/after replay,
+and repeat the immutable batch to verify idempotence. Historical votes are not
+globally recovered by this limited live projection.
+
+`build_candidate.py --history <batch> --overlay <batch> --network <network>
+--output <new-directory>` combines completed immutable batches. Duplicate IDs
+must have identical archive evidence, including chain timestamps and payload;
+only recovery scope may differ. It preserves historical rows and records every
+added and duplicate ID plus input/output hashes. The combined batch requires a
+fresh guarded native replay with both explicit scope flags, and full API
+verification. Its manifest intentionally records native combined verification as
+false until that separate proof exists. Neither overlay verification nor batch
+combination authorizes live cutover or claims a complete intervening event tail.
