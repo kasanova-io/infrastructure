@@ -291,3 +291,43 @@ After a delta, verify the combined parent-plus-delta expectation through the sam
 actual API methods and fresh before/after image provenance. A delta with late or
 overlapping timestamps needs a new reviewed reconciliation or replay, not an
 unordered append. None of these private operations authorize live cutover.
+
+`profiles.py` creates a separate dated current-broadcast inventory through the
+same paced `/get-users` pagination and archive verifier. It checks the exact
+nickname, image and message against the original payload, including globally
+listed x-only authors without guessing parity. Raw archive/block cache responses
+may be reused; prepared verdicts are never copied. A fresh observation must pass
+acceptance, network, payload membership and source-field checks again. Source
+pages remain a non-atomic projection; an owner changing within the pass fails
+rather than choosing one record. The separate output retains original evidence.
+
+`candidate_snapshot.py` is an offline assembly step, not a parser or migration.
+Supply completed `--content`, `--profiles`, `--relationships`, `--overlay`
+inventories plus `--tail`, `--capture`, the fresh graph `--reconciliation`,
+`--network` and a new `--output` directory. Each inventory is read in one SQLite
+read transaction; verified gzip files, source pages, observations, configuration,
+quarantine reasons and exact selected IDs are bound in the resulting manifest.
+The graph reconciliation input must be a new `bind_reconciliation` receipt that
+preserves the prior receipt and its hash and binds the complete fresh inventory
+proof. Matching counts alone cannot authorize different IDs or source payloads.
+Every accepted original content/profile row remains included. Fresh profiles
+must account for original profile owners and chronologically supersede differing
+older IDs. Current profile/overlay/tail exclusions and incomplete discovery or
+verification prevent assembly.
+
+Capture is frozen at its own durable SQLite checkpoint while collection may
+continue. The assembler recomputes each retained-window overlap and exact
+snapshot union, then requires accepted evidence for every captured event in that
+checkpoint, including its original payload/time and timestamp-membership proof.
+Later observations remain outside this checkpoint explicitly. The pre-capture
+gap stays unresolved, even with empty snapshots. An observed relationship tail
+requires a separate reviewed overlap/predecessor reconciliation; this assembler
+refuses it rather than dropping an inverse or reviving an old projection edge.
+
+Duplicates require byte-identical canonical archive evidence; separately proven
+original live timestamps are retained. Conflicting live times, equal-time
+profile transitions and duplicate active relationship pairs fail. The output
+manifest states native verification false, globally complete graph false and
+live import zero. A full fresh isolated native replay, actual API verification,
+idempotence, runtime provenance, ingestion checkpoint and rollback review are
+still required. Source block-count discrepancies and quarantines remain explicit.
