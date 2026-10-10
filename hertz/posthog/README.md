@@ -2,8 +2,8 @@
 
 This standalone Compose project installs the official PostHog hobby stack behind
 the existing Hertz Caddy gateway at `https://posthog.kasanova.io`. It owns its
-Postgres, ClickHouse, Kafka, Redis and object storage volumes. The wallet analytics
-connector and archived Amplitude exports are separate and remain unchanged.
+Postgres, ClickHouse, Kafka, Redis and object storage volumes. The owned wallet ingress preserves complete original event envelopes in a durable
+SQLite journal. Historical archives remain intact.
 
 Upstream source is pinned in `prepare.py`; pristine upstream deployment inputs
 are in `upstream/`. `prepare.py` generates private, durable secrets only on a fresh
@@ -233,3 +233,33 @@ merge; the 14-month offline maintenance preserved all reconciled native fields.
 PostHog describes this self-hosted deployment as unsupported and offers no data
 loss guarantee. Installation acceptance does not certify migration parity,
 historical recording playback or completion of the PROD Amplitude archive.
+
+## Owned wallet connector
+
+`analytics_ingress.py` accepts the existing HTTP V2 event envelopes at
+`/kasanova-ingest/amplitude`. The path describes the retained wire protocol;
+no Amplitude service is contacted. `prepare.py` routes only this path through
+the owned gateway. Private `analytics-ingress.json` maps the existing transport
+keys to the native DEV and PROD project IDs and PostHog project tokens. Keep this
+file outside Git with mode 0600. The wallet keeps its existing durable SDK queue,
+instance name and storage key, redirects uploads here, and disables vendor remote
+configuration. PostHog's native SDK captures masked replay separately.
+
+The `analytics-ingress` Compose service has no published port, a read-only root,
+a fixed runtime image and an exclusively owned `analytics-journal` volume. A
+successful acknowledgement follows an atomic SQLite WAL/FULL commit of the
+complete original event and native envelope. Delivery failures retain the event;
+acknowledged journal records remain as a local archive. Project-scoped insert IDs
+produce deterministic UUIDs for retry deduplication. Source keys are not logged.
+Seed the journal from the reconciled chronological import with `--seed-import`
+and `--seed-project` before client cutover to retain archived device identity
+links and suppress retransmission of already imported source events.
+
+The historical checkpoint does not include this newly added live journal. A
+consistent journal backup, independently stored copy, restore proof and recurring
+native database/recording backups remain required before PROD client cutover.
+Do not describe the existing offline checkpoint as a recurring live backup.
+Run `test_analytics_ingress.py` for durable retry, atomic batch, environment,
+identity/property and replay-session contracts. DEV browser capture has also been
+verified through normal queries for exact properties and no retry duplicates;
+native replay playback and upgrade/offline device acceptance remain separate.

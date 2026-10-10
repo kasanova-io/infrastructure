@@ -1,5 +1,24 @@
 name: kasanova_posthog
 services:
+  analytics-ingress:
+    image: posthog/posthog@sha256:898981df1996084d237a2322a8b10acc91af92f4497219ccb5441451f586decb
+    entrypoint: ["python3", "/opt/kasanova/analytics_ingress.py"]
+    command: ["--config", "/run/secrets/ingress.json", "--journal", "/var/lib/analytics/ingress.sqlite"]
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    cgroup_parent: kasanova-posthog.slice
+    volumes:
+      - ./analytics_ingress.py:/opt/kasanova/analytics_ingress.py:ro
+      - ./analytics-ingress.json:/run/secrets/ingress.json:ro
+      - analytics-journal:/var/lib/analytics
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   db:
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
@@ -377,3 +396,5 @@ services:
 networks:
   caddy_caddy_net:
     external: true
+volumes:
+  analytics-journal:

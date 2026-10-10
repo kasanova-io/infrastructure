@@ -64,6 +64,13 @@ def main():
                            ('docker-compose.hobby.yml', 'compose.upstream.yaml'),
                            ('.env.services', '.env.services')]:
         content = (ROOT / 'upstream' / source).read_text()
+        if source == 'docker-compose.base.yml':
+            content = content.replace(
+                '${CADDY_HOST:-http://localhost:8000} {',
+                '${CADDY_HOST:-http://localhost:8000} {\n'
+                '                    handle /kasanova-ingest/* {\n'
+                '                        reverse_proxy analytics-ingress:8099\n'
+                '                    }')
         for old, new in replacements.items():
             content = content.replace(old, new)
         if source == 'docker-compose.base.yml':
