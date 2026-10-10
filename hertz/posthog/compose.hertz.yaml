@@ -1,0 +1,347 @@
+name: kasanova_posthog
+services:
+  db:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+    volumes: !override
+      - postgres-data:/var/lib/postgresql/data
+      - ./posthog/docker/postgres-init-scripts:/docker-entrypoint-initdb.d:ro
+      - ./posthog/products:/products:ro
+  redis7:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  valkey:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  clickhouse:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  zookeeper:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  kafka:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  worker:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+    environment:
+      OPT_OUT_CAPTURE: "true"
+      DISABLE_SECURE_SSL_REDIRECT: "true"
+      IS_BEHIND_PROXY: "true"
+      TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
+      SECURE_COOKIES: "true"
+      ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
+      GUNICORN_CMD_ARGS: "--workers 2 --threads 2"
+      CELERY_WORKER_CONCURRENCY: "2"
+  web:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+    environment:
+      OPT_OUT_CAPTURE: "true"
+      DISABLE_SECURE_SSL_REDIRECT: "true"
+      IS_BEHIND_PROXY: "true"
+      TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
+      SECURE_COOKIES: "true"
+      ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
+      GUNICORN_CMD_ARGS: "--workers 2 --threads 2"
+  plugins:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  ingestion-general:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  ingestion-sessionreplay:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  recording-api:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  ingestion-error-tracking:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  ingestion-logs:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  ingestion-traces:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  proxy:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+    ports: !override
+      - "127.0.0.1:18084:80"
+    networks:
+      default:
+      caddy_caddy_net:
+        aliases: [kasanova_posthog_gateway]
+    environment:
+      CADDY_HOST: "http://:80"
+      CADDY_TLS_BLOCK: ""
+  objectstorage:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  seaweedfs:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  browserless:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  asyncmigrationscheck:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  temporal:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  elasticsearch:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  temporal-admin-tools:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  temporal-ui:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  temporal-django-worker:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+    environment:
+      OPT_OUT_CAPTURE: "true"
+      DISABLE_SECURE_SSL_REDIRECT: "true"
+      IS_BEHIND_PROXY: "true"
+      TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
+      SECURE_COOKIES: "true"
+      ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
+      GUNICORN_CMD_ARGS: "--workers 2 --threads 2"
+  capture:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  capture-logs:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  replay-capture:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  property-defs-rs:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  property-defs-ai:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  livestream:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  personhog-replica:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  personhog-router:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  feature-flags:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  hypercache-server:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  kafka-init:
+    cgroup_parent: kasanova-posthog.slice
+    restart: "no"
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  cymbal:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+  cymbal-resolution:
+    cgroup_parent: kasanova-posthog.slice
+    restart: unless-stopped
+    build: !reset null
+    ports: !reset []
+    labels:
+      io.kasanova.service: posthog
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
+networks:
+  caddy_caddy_net:
+    external: true
