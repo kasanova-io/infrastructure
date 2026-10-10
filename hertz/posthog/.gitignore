@@ -12,3 +12,7 @@ __pycache__/
 /upstream-source.json
 /upstream-source.tar.gz
 /images.lock.yaml
+/operations/
+/custom-images/
+/capture-precision/target/
+*.ndjson
