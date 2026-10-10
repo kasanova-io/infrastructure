@@ -1,6 +1,6 @@
 import unittest
 
-from backup import parse_group_lags
+from backup import ingestion_drained, parse_group_lags
 
 
 class ConsumerDrainTest(unittest.TestCase):
@@ -19,6 +19,20 @@ class ConsumerDrainTest(unittest.TestCase):
                        'TOTAL-LAG 0\n', 'GROUP group1\nSTATE Empty\n']:
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 parse_group_lags(output, ['group1'])
+
+    def test_preview_offsets_do_not_hide_storage_backlog(self):
+        lags = {'group1': 0, 'clickhouse-ingestion': 0,
+                'clickhouse-ingestion-historical': 0, 'livestream': 3}
+        self.assertTrue(ingestion_drained(lags))
+        lags['clickhouse-ingestion-historical'] = 1
+        self.assertFalse(ingestion_drained(lags))
+        lags['clickhouse-ingestion-historical'] = 0
+        lags['unrecognized-new-consumer'] = 1
+        self.assertFalse(ingestion_drained(lags))
+
+    def test_missing_ingestion_group_cannot_be_reported_as_drained(self):
+        with self.assertRaises(RuntimeError):
+            ingestion_drained({'livestream': 3})
 
 
 if __name__ == '__main__':

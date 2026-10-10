@@ -21,6 +21,10 @@ STORAGE = {'db', 'clickhouse', 'zookeeper', 'kafka', 'redis7', 'valkey',
 CAPTURE = {'capture', 'capture-logs', 'replay-capture'}
 INGESTION = {'ingestion-general', 'ingestion-sessionreplay', 'ingestion-error-tracking',
              'ingestion-logs', 'ingestion-traces', 'plugins'}
+# The pinned Go live-preview consumers use enable.auto.commit=false and have no
+# manual commit call. Broker "lag" is not a persistence acknowledgment for them.
+# Their Kafka and Redis bytes are still included in every checkpoint.
+NON_COMMITTING_PREVIEW_GROUPS = {'livestream', 'livestream-session-recordings'}
 
 
 def run(args):
@@ -78,6 +82,12 @@ def consumer_lags(kafka):
         raise RuntimeError('Required event ingestion consumer groups are absent')
     summary = run(['docker', 'exec', kafka, 'rpk', 'group', 'describe', '--print-summary', *groups]).decode()
     return parse_group_lags(summary, groups)
+
+
+def ingestion_drained(lags):
+    if not {'group1', 'clickhouse-ingestion', 'clickhouse-ingestion-historical'}.issubset(lags):
+        raise RuntimeError('Required ingestion groups are absent')
+    return all(lag == 0 for group, lag in lags.items() if group not in NON_COMMITTING_PREVIEW_GROUPS)
 
 
 def main(offline_import_reconciliation=None):
@@ -163,6 +173,13 @@ def main(offline_import_reconciliation=None):
         if import_proof:
             report['offline_import_proof'] = {'path': str(offline_import_reconciliation),
                 'sha256': sha(offline_import_reconciliation), 'records': prod_rows}
+        report['preview_group_offset_semantics'] = {
+            'groups': sorted(NON_COMMITTING_PREVIEW_GROUPS),
+            'zero_committed_lag_not_a_drain_test': True,
+            'source_revision': '397fc8862e1ca5121a8679f0f686afde88d70b14',
+            'reason': 'Pinned live-preview consumers disable automatic commits and do not manually commit',
+            'queue_volume_bytes_still_checkpointed': True,
+        }
         save(backup / 'manifest.json', report)
         running = [c for c in containers if c['State']['Running']]
         original_names = [c['Name'].lstrip('/') for c in running]
@@ -192,7 +209,7 @@ def main(offline_import_reconciliation=None):
             for attempt in range(90):
                 lags = consumer_lags(services['kafka']['Name'])
                 report['ingestion_drain_samples'].append({'at': dt.datetime.now(dt.timezone.utc).isoformat(), 'group_lags': lags})
-                consecutive = consecutive + 1 if all(lag == 0 for lag in lags.values()) else 0
+                consecutive = consecutive + 1 if ingestion_drained(lags) else 0
                 if consecutive >= 2: break
                 time.sleep(2)
             else:
@@ -200,7 +217,7 @@ def main(offline_import_reconciliation=None):
             if apps:
                 run(['docker', 'stop', '--time', '90', *apps])
             report['consumer_lags_after_app_shutdown'] = consumer_lags(services['kafka']['Name'])
-            if any(report['consumer_lags_after_app_shutdown'].values()):
+            if not ingestion_drained(report['consumer_lags_after_app_shutdown']):
                 raise RuntimeError('App shutdown left pending ingestion work; checkpoint rejected')
             # Capture a frozen event baseline with ClickHouse and its dependencies alive.
             frozen = json.loads(run(['docker', 'exec', services['clickhouse']['Name'], 'clickhouse-client', '--query',

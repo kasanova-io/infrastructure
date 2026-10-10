@@ -74,7 +74,10 @@ The initial checkpoint requires an empty PROD project. After a fully reconciled
 offline event backfill, `--offline-import-reconciliation <reconciliation.json>`
 allows that imported history to be checkpointed too. It stops the public gateway
 and capture services, requires clean capture/ingestion exits and zero lag for
-every consumer group, and rejects events that change during the drain.
+all consumers that commit storage offsets, and rejects events that change during
+the drain. The pinned Go live-preview consumers deliberately disable offset
+commits, so their reported broker lag cannot prove or disprove ingestion drain.
+Their queue bytes and offsets are still preserved in the Kafka/Redis checkpoint.
 It does not certify
 steady-state ingestion draining or recurring backup after importing history or
 connecting clients; those remain requirements before connector cutover.
