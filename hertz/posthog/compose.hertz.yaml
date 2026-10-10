@@ -67,8 +67,8 @@ services:
       TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
       SECURE_COOKIES: "true"
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
-      GUNICORN_CMD_ARGS: "--workers 2 --threads 2"
-      CELERY_WORKER_CONCURRENCY: "2"
+      GRANIAN_WORKERS: "2"
+      WEB_CONCURRENCY: "2"
   web:
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
@@ -84,7 +84,7 @@ services:
       TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
       SECURE_COOKIES: "true"
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
-      GUNICORN_CMD_ARGS: "--workers 2 --threads 2"
+      GRANIAN_WORKERS: "2"
   plugins:
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
@@ -237,7 +237,7 @@ services:
       TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
       SECURE_COOKIES: "true"
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
-      GUNICORN_CMD_ARGS: "--workers 2 --threads 2"
+      GRANIAN_WORKERS: "2"
   capture:
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
