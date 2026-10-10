@@ -68,6 +68,17 @@ def main():
         os.chown(p, uid, gid)
         p.chmod(0o600)
     try:
+        # Reserve the checked subnet before spending time restoring large volumes.
+        network_ids = run(['docker', 'network', 'ls', '-q']).decode().split()
+        existing = json.loads(run(['docker', 'network', 'inspect', *network_ids]))
+        blocked = [item['Subnet'] for network in existing for item in (network['IPAM'].get('Config') or []) if item.get('Subnet')]
+        routes = json.loads(run(['ip', '-j', 'route', 'show']))
+        blocked += [route['dst'] for route in routes if route.get('dst') not in (None, 'default', '0.0.0.0/0')]
+        subnet = choose_restore_subnet(blocked, restore_id)
+        run(['docker', 'network', 'create', '--internal', '--subnet', subnet,
+             '--label', 'io.kasanova.restore_id=' + restore_id, restore_id])
+        network_created = True
+        report['isolated_restore_subnet'] = subnet
         runtime = work / 'runtime'
         runtime.mkdir(mode=0o700)
         run(['tar', '--numeric-owner', '-xpf', str(checkpoint / 'runtime.tar.gz'), '-C', str(runtime)])
@@ -93,16 +104,6 @@ def main():
                 raise RuntimeError('Restored persistent volume bytes or ownership differ')
             report['volume_inventories_verified'].append(original)
             save()
-        network_ids = run(['docker', 'network', 'ls', '-q']).decode().split()
-        existing = json.loads(run(['docker', 'network', 'inspect', *network_ids]))
-        blocked = [item['Subnet'] for network in existing for item in network['IPAM'].get('Config', []) if item.get('Subnet')]
-        routes = json.loads(run(['ip', '-j', 'route', 'show']))
-        blocked += [route['dst'] for route in routes if route.get('dst') not in (None, 'default', '0.0.0.0/0')]
-        subnet = choose_restore_subnet(blocked, restore_id)
-        run(['docker', 'network', 'create', '--internal', '--subnet', subnet,
-             '--label', 'io.kasanova.restore_id=' + restore_id, restore_id])
-        network_created = True
-        report['isolated_restore_subnet'] = subnet
         services = {c['service']: c for c in manifest['containers']}
         def start(service, memory, extra=()):
             c = services[service]
