@@ -1,0 +1,7 @@
+# Insert this block inside the existing DEV miniapps site, before file_server.
+# Validate the complete candidate Caddyfile before reload.
+# BEGIN KSNV-411 Social DEV API
+handle_path /social-api/* {
+    reverse_proxy social_indexer_dev_web:3001
+}
+# END KSNV-411 Social DEV API
