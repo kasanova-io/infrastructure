@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,19 @@ from backup import inventory, sha
 
 def run(args):
     return subprocess.check_output(args, stderr=subprocess.PIPE)
+
+
+def choose_restore_subnet(blocked, seed):
+    networks = [ipaddress.ip_network(n, strict=False) for n in blocked]
+    # Explicit isolated networks do not consume Docker's exhausted default pool.
+    # Never overlap a current Docker network or a non-default host route.
+    offset = int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16) % 4096
+    for step in range(4096):
+        index = (offset + step) % 4096
+        candidate = ipaddress.ip_network(f'10.{240 + index // 256}.{index % 256}.0/24')
+        if not any(n.version == 4 and candidate.overlaps(n) for n in networks):
+            return str(candidate)
+    raise RuntimeError('No unused private restore subnet is available; preserve existing networks')
 
 
 def main():
@@ -79,8 +93,16 @@ def main():
                 raise RuntimeError('Restored persistent volume bytes or ownership differ')
             report['volume_inventories_verified'].append(original)
             save()
-        run(['docker', 'network', 'create', '--internal', '--label', 'io.kasanova.restore_id=' + restore_id, restore_id])
+        network_ids = run(['docker', 'network', 'ls', '-q']).decode().split()
+        existing = json.loads(run(['docker', 'network', 'inspect', *network_ids]))
+        blocked = [item['Subnet'] for network in existing for item in network['IPAM'].get('Config', []) if item.get('Subnet')]
+        routes = json.loads(run(['ip', '-j', 'route', 'show']))
+        blocked += [route['dst'] for route in routes if route.get('dst') not in (None, 'default', '0.0.0.0/0')]
+        subnet = choose_restore_subnet(blocked, restore_id)
+        run(['docker', 'network', 'create', '--internal', '--subnet', subnet,
+             '--label', 'io.kasanova.restore_id=' + restore_id, restore_id])
         network_created = True
+        report['isolated_restore_subnet'] = subnet
         services = {c['service']: c for c in manifest['containers']}
         def start(service, memory, extra=()):
             c = services[service]
