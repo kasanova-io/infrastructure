@@ -134,6 +134,17 @@ complete field reconciliation. It uses the normal authenticated PostHog query AP
 to compare every event type's count, total rows, UUIDs and absence of DEV fixtures;
 extra physical versions must finish merging before normal query counts can pass.
 
+To add another sealed source component, prepare a new combined source directory
+and validate its new events as separate DEV fixtures first. Use
+`--append-verified-parent <previous prepared directory> --parent-evidence <previous evidence>`.
+The importer checks the parent source hash and full reconciliation, proves that
+every old envelope is unchanged, and compares all existing live fields again.
+It sends only new UUIDs, retaining acknowledgement offsets for resumable batches,
+then verifies the entire combined dataset. Empty or missing source IPs require a
+separately validated queue path; append cannot replace or repair accepted history.
+Check normal query counts again after the append. Keep the earlier checkpoint and
+its frozen certificates unchanged.
+
 Run the offline contract checks with:
 
 ```sh

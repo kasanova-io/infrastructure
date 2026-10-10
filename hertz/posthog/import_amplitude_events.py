@@ -65,7 +65,63 @@ def compare(native, expected):
             raise RuntimeError('Persisted native session/device/IP mapping differs')
 
 
-def main(directory, evidence, verify_only=False, repair_unaccepted=False):
+def mark_verified_parent(con, directory, proof, team):
+    """Require an immutable, reconciled parent and unchanged envelopes in its extension."""
+    parent = json.loads((directory / 'preparation.json').read_text())
+    source = directory / 'events.ndjson.gz'
+    flags = ['all_uuids_event_names_distinct_ids_and_microsecond_timestamps_verified',
+             'all_original_record_bytes_hashes_and_typed_event_user_properties_verified',
+             'all_native_session_device_ip_mappings_verified']
+    if (parent['state'] != 'prepared_not_imported' or parent['source_project_ids'] != ['734469']
+        or digest(source) != parent['events_sha256'] or proof['source_sha256'] != parent['events_sha256']
+        or proof['target_project_id'] != team or proof['expected_source_records'] != parent['records']
+        or proof['logical_prod_rows'] != parent['records'] or any(proof.get(f) is not True for f in flags)
+        or proof.get('source_connector_changed') is not False):
+        raise RuntimeError('Append parent does not have complete, source-bound reconciliation')
+    rows = 0
+    with gzip.open(source, 'rb') as stream:
+        for line in stream:
+            old = json.loads(line)
+            row = con.execute('SELECT envelope,existing FROM expected WHERE uuid=?', (old['uuid'],)).fetchone()
+            if row is None or row[1] or not json_values_equal(old, json.loads(row[0])):
+                raise RuntimeError('Append removes, repeats or changes a verified parent event')
+            con.execute('UPDATE expected SET existing=1 WHERE uuid=?', (old['uuid'],))
+            rows += 1
+            if rows % 20000 == 0: con.commit()
+    con.commit()
+    if rows != parent['records']: raise RuntimeError('Append parent record count differs')
+    return rows
+
+
+def verify_present(con, team, evidence):
+    sql = ('SELECT uuid,event,distinct_id,toUnixTimestamp64Micro(timestamp) AS timestamp_us,properties '
+           'FROM posthog.sharded_events FINAL WHERE team_id=' + str(team) + ' FORMAT JSONEachRow')
+    native = subprocess.Popen(['docker', 'exec', CH, 'clickhouse-client', '--query', sql], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    rows = 0
+    try:
+        for line in native.stdout:
+            value = json.loads(line)
+            row = con.execute('SELECT envelope,seen FROM expected WHERE uuid=?', (value['uuid'],)).fetchone()
+            if row is None or row[1]: raise RuntimeError('Unexpected or repeated logical PROD UUID')
+            expected = json.loads(row[0])
+            try:
+                compare(value, expected)
+            except RuntimeError:
+                atomic_json(evidence / 'first-field-comparison-difference-private.json',
+                    {'native': value, 'expected': expected, 'previous_verified_rows': rows})
+                raise
+            con.execute('UPDATE expected SET seen=1 WHERE uuid=?', (value['uuid'],))
+            rows += 1
+            if rows % 20000 == 0: con.commit()
+        if native.wait() != 0: raise RuntimeError('Persisted event query failed')
+    finally:
+        if native.poll() is None: native.terminate(); native.wait()
+        native.stdout.close()
+    con.commit()
+    return rows
+
+
+def main(directory, evidence, verify_only=False, repair_unaccepted=False, parent_directory=None, parent_evidence=None):
     os.umask(0o077)
     preparation = json.loads((directory / 'preparation.json').read_text())
     source = directory / 'events.ndjson.gz'
@@ -93,6 +149,12 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
         raise RuntimeError('Resume source or target differs')
     if state['acknowledged_records'] > preparation['records']:
         raise RuntimeError('Invalid resume checkpoint')
+    if (parent_directory is None) != (parent_evidence is None):
+        raise RuntimeError('Append needs both parent source and reconciliation evidence')
+    if parent_directory is not None and repair_unaccepted:
+        raise RuntimeError('Append cannot repair or replace accepted parent events')
+    if state.get('append_parent_sha256') and parent_directory is None:
+        raise RuntimeError('Resume requires its original verified append parent')
 
     def query(sql):
         return json.loads(subprocess.check_output(['docker', 'exec', CH, 'clickhouse-client', '--query', sql + ' FORMAT JSON']))['data']
@@ -132,13 +194,13 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
             state.update(acknowledged_records=0, state='repair_prepared',
                 repair_ingestion_cutoff=(dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=2)).isoformat())
             atomic_json(state_path, state)
-        if state['acknowledged_records'] == 0 and not state_path.exists() and count() != 0:
+        if parent_directory is None and state['acknowledged_records'] == 0 and not state_path.exists() and count() != 0:
             raise RuntimeError('Fresh offline backfill requires empty PROD')
         index = evidence / 'verification.sqlite'
         # This disposable index has no external writers. Rebuild on each invocation.
         if index.exists(): index.unlink()
         con = sqlite3.connect(index)
-        con.execute('CREATE TABLE expected (uuid TEXT PRIMARY KEY, envelope TEXT, seen INTEGER DEFAULT 0)')
+        con.execute('CREATE TABLE expected (uuid TEXT PRIMARY KEY, envelope TEXT, seen INTEGER DEFAULT 0, existing INTEGER DEFAULT 0)')
         try:
             previous = None
             total = 0
@@ -160,6 +222,37 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
                     if total % 10000 == 0: con.commit()
             con.commit()
             if total != preparation['records']: raise RuntimeError('Prepared source record count differs')
+            parent_rows = 0
+            if parent_directory is not None:
+                proof_path = parent_evidence / 'reconciliation.json'
+                proof = json.loads(proof_path.read_text())
+                parent_rows = mark_verified_parent(con, parent_directory, proof, team)
+                if not 0 < parent_rows < total: raise RuntimeError('Append needs a strict nonempty source extension')
+                if state.get('append_parent_sha256') not in (None, proof['source_sha256']):
+                    raise RuntimeError('Resume append parent differs')
+                for row in con.execute('SELECT envelope FROM expected WHERE existing=0'):
+                    if not json.loads(row[0])['properties'].get('$ip'):
+                        raise RuntimeError('New events without source IP need validated queue ingestion')
+                capture = json.loads(subprocess.check_output(['docker', 'inspect', 'kasanova_posthog-capture-1']))[0]
+                if (capture['Config']['Labels'].get('com.docker.compose.project') != 'kasanova_posthog'
+                    or capture['Config']['Labels'].get('io.kasanova.capture.float-roundtrip') != 'true'
+                    or not capture['State']['Running']):
+                    raise RuntimeError('Append requires the running, owned capture image with the precise parser')
+                # Read the complete live dataset before the first new capture.
+                # Every existing row must match its envelope, and no parent UUID
+                # may be missing. Partial acknowledged extensions can be resumed.
+                present = verify_present(con, team, evidence)
+                if con.execute('SELECT count(*) FROM expected WHERE existing=1 AND seen=0').fetchone()[0]:
+                    raise RuntimeError('Verified parent events are missing from live PROD')
+                state.setdefault('append_parent_sha256', proof['source_sha256'])
+                state.setdefault('append_parent_proof_sha256', digest(proof_path))
+                state.setdefault('append_parent_records', parent_rows)
+                if state['acknowledged_records'] == 0:
+                    if present != parent_rows: raise RuntimeError('Fresh append target already contains extension events')
+                    state['acknowledged_records'] = parent_rows
+                con.execute('UPDATE expected SET seen=0'); con.commit()
+                print(json.dumps({'state':'parent_source_and_live_fields_reverified','parent_records':parent_rows,
+                                  'new_records':total-parent_rows}), flush=True)
             print(json.dumps({'state': 'full_source_preflight_passed', 'records': total}), flush=True)
             atomic_json(state_path, state)
             if not verify_only:
@@ -198,9 +291,12 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
 
                 with gzip.open(source, 'rb') as stream:
                     for line in stream:
+                        item = json.loads(line)
+                        if parent_rows and con.execute('SELECT existing FROM expected WHERE uuid=?', (item['uuid'],)).fetchone()[0]:
+                            continue
                         skipped += 1
-                        if skipped <= state['acknowledged_records']: continue
-                        batch.append(json.loads(line))
+                        if skipped <= state['acknowledged_records'] - parent_rows: continue
+                        batch.append(item)
                         if len(batch) == 1000:
                             send(batch); batch = []
                     if batch: send(batch)
@@ -210,32 +306,7 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
             else: raise RuntimeError('Acknowledged events are not fully queryable')
             state['state'] = 'verifying_persisted_fields'
             atomic_json(state_path, state)
-            sql = ('SELECT uuid,event,distinct_id,toUnixTimestamp64Micro(timestamp) AS timestamp_us,properties '
-                   'FROM posthog.sharded_events FINAL WHERE team_id=' + str(team) + ' FORMAT JSONEachRow')
-            native = subprocess.Popen(['docker', 'exec', CH, 'clickhouse-client', '--query', sql], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            rows = 0
-            try:
-                for line in native.stdout:
-                    value = json.loads(line)
-                    row = con.execute('SELECT envelope,seen FROM expected WHERE uuid=?', (value['uuid'],)).fetchone()
-                    if row is None or row[1]: raise RuntimeError('Unexpected or repeated logical PROD UUID')
-                    expected = json.loads(row[0])
-                    try:
-                        compare(value, expected)
-                    except RuntimeError:
-                        # Keep the failing row private for diagnosis; never put
-                        # source identities or properties in console output.
-                        atomic_json(evidence / 'first-field-comparison-difference-private.json',
-                            {'native': value, 'expected': expected, 'previous_verified_rows': rows})
-                        raise
-                    con.execute('UPDATE expected SET seen=1 WHERE uuid=?', (value['uuid'],))
-                    rows += 1
-                    if rows % 20000 == 0: con.commit()
-                if native.wait() != 0: raise RuntimeError('Persisted event query failed')
-            finally:
-                if native.poll() is None: native.terminate(); native.wait()
-                native.stdout.close()
-            con.commit()
+            rows = verify_present(con, team, evidence)
             if rows != total or con.execute('SELECT count(*) FROM expected WHERE seen=0').fetchone()[0]:
                 raise RuntimeError('Full native UUID set differs from prepared source')
             report = {'verified_at': dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -269,5 +340,8 @@ if __name__ == '__main__':
     parser.add_argument('evidence_directory', type=Path)
     parser.add_argument('--verify-only', action='store_true')
     parser.add_argument('--repair-unaccepted-backfill', action='store_true')
+    parser.add_argument('--append-verified-parent', type=Path)
+    parser.add_argument('--parent-evidence', type=Path)
     args = parser.parse_args()
-    main(args.prepared_directory, args.evidence_directory, args.verify_only, args.repair_unaccepted_backfill)
+    main(args.prepared_directory, args.evidence_directory, args.verify_only, args.repair_unaccepted_backfill,
+         args.append_verified_parent, args.parent_evidence)

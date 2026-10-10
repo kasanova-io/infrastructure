@@ -2,11 +2,16 @@ import datetime as dt
 import hashlib
 import json
 import math
+from pathlib import Path
+import gzip
+import sqlite3
+import tempfile
 import unittest
 import uuid
 
 from prepare_amplitude_import import RAW, SHA, USER, convert, session_key, session_uuid, time_us
-from import_amplitude_events import compare
+from import_amplitude_events import compare, mark_verified_parent
+from prepare_amplitude_import import digest
 
 class ImportContractTest(unittest.TestCase):
     def setUp(self):
@@ -91,5 +96,50 @@ class ImportContractTest(unittest.TestCase):
             persisted=self.persisted(expected);properties=json.loads(persisted['properties'])
             properties[field]=value;persisted['properties']=properties
             with self.assertRaises(RuntimeError):compare(persisted,expected)
+
+    def parent_fixture(self, root, expected):
+        root = Path(root)
+        with gzip.open(root/'events.ndjson.gz','wb') as stream:
+            stream.write(json.dumps(expected).encode()+b'\n')
+        sha = digest(root/'events.ndjson.gz')
+        (root/'preparation.json').write_text(json.dumps({'state':'prepared_not_imported',
+            'source_project_ids':['734469'],'events_sha256':sha,'records':1}))
+        return {'source_sha256':sha,'target_project_id':1,'expected_source_records':1,'logical_prod_rows':1,
+            'all_uuids_event_names_distinct_ids_and_microsecond_timestamps_verified':True,
+            'all_original_record_bytes_hashes_and_typed_event_user_properties_verified':True,
+            'all_native_session_device_ip_mappings_verified':True,'source_connector_changed':False}
+
+    def test_append_keeps_late_new_events_and_marks_only_unchanged_parent(self):
+        _,old=self.native(); new=dict(old,uuid=str(uuid.uuid4()),timestamp='2025-09-03T00:00:00+00:00')
+        with tempfile.TemporaryDirectory() as root, sqlite3.connect(':memory:') as con:
+            proof=self.parent_fixture(root,old)
+            con.execute('CREATE TABLE expected(uuid TEXT PRIMARY KEY,envelope TEXT,existing INTEGER DEFAULT 0)')
+            for e in [new,old]:con.execute('INSERT INTO expected(uuid,envelope) VALUES(?,?)',(e['uuid'],json.dumps(e)))
+            self.assertEqual(mark_verified_parent(con,Path(root),proof,1),1)
+            self.assertEqual(con.execute('SELECT existing FROM expected WHERE uuid=?',(new['uuid'],)).fetchone()[0],0)
+            self.assertEqual(con.execute('SELECT existing FROM expected WHERE uuid=?',(old['uuid'],)).fetchone()[0],1)
+
+    def test_append_rejects_changed_parent_identity_properties_and_original_bytes(self):
+        _,old=self.native()
+        for field in ['distinct_id','properties','timestamp']:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as root, sqlite3.connect(':memory:') as con:
+                proof=self.parent_fixture(root,old); changed=json.loads(json.dumps(old))
+                if field=='properties': changed[field][RAW]+=' '
+                else: changed[field]='changed'
+                con.execute('CREATE TABLE expected(uuid TEXT PRIMARY KEY,envelope TEXT,existing INTEGER DEFAULT 0)')
+                con.execute('INSERT INTO expected(uuid,envelope) VALUES(?,?)',(old['uuid'],json.dumps(changed)))
+                with self.assertRaises(RuntimeError):mark_verified_parent(con,Path(root),proof,1)
+
+    def test_append_rejects_missing_parent_or_incomplete_source_bound_proof(self):
+        _,old=self.native()
+        for invalid in ['missing','proof','target','source']:
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as root, sqlite3.connect(':memory:') as con:
+                proof=self.parent_fixture(root,old)
+                con.execute('CREATE TABLE expected(uuid TEXT PRIMARY KEY,envelope TEXT,existing INTEGER DEFAULT 0)')
+                if invalid!='missing':con.execute('INSERT INTO expected(uuid,envelope) VALUES(?,?)',(old['uuid'],json.dumps(old)))
+                if invalid=='proof':proof['all_native_session_device_ip_mappings_verified']=False
+                if invalid=='target':proof['target_project_id']=2
+                if invalid=='source':proof['source_sha256']='unbound'
+                with self.assertRaises(RuntimeError):mark_verified_parent(con,Path(root),proof,1)
 
 if __name__=='__main__':unittest.main()
