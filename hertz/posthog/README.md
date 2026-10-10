@@ -68,11 +68,15 @@ and restarts the original running containers. Backups are private under
 Run `sudo python3 verify_backup_restore.py <checkpoint path>` to restore all
 volume copies, compare content and ownership, and query isolated PostgreSQL,
 ClickHouse and ZooKeeper containers without connecting to live data mounts.
+The restore reserves an internal subnet that overlaps neither existing Docker
+networks nor host routes; it does not change the host's shared address pools.
 Copy the sealed checkpoint to independent storage and verify its hashes too.
 
 The initial checkpoint requires an empty PROD project. After a fully reconciled
 offline event backfill, `--offline-import-reconciliation <reconciliation.json>`
-allows that imported history to be checkpointed too. It stops the public gateway
+allows that imported history to be checkpointed too. It freezes both field and
+normal-query certificates into the checkpoint, with their hashes bound to the
+manifest. It stops the public gateway
 and capture services, requires clean capture/ingestion exits and zero lag for
 all consumers that commit storage offsets, and rejects events that change during
 the drain. The pinned Go live-preview consumers deliberately disable offset
@@ -142,7 +146,7 @@ restoration, future SDK identity continuity, chart/cohort parity or replay playb
 
 ## Numeric precision
 
-The installed capture image uses `serde_json` 1.0.149 with its default best-effort
+The original capture image used `serde_json` 1.0.149 with its default best-effort
 float parser. Complete historical comparison found a one-step binary float change;
 the original record bytes still matched. A synthetic 60,000-number regression
 reproduced 8,719 value changes with the default parser and zero with
@@ -157,8 +161,10 @@ base images, limits compilation to two cores/eight GiB, mounts no app credential
 and does not deploy the result. Validate the resulting image on DEV, preserve its
 image archive and immutable ID, then repair and reconcile the entire offline PROD
 backfill. Full original-field comparison passed for all 556,777 events after the
-correction. Event backfill acceptance alone does not authorize connector cutover;
-the full archive, profile/identity/reporting/replay parity and live backup remain
+correction. The installed capture image now enables `float_roundtrip`; its immutable ID
+and image archive are bound to the restore proof.
+Event backfill acceptance alone does not authorize connector cutover; the full
+archive, profile/identity/reporting/replay parity and live backup remain
 separate acceptance requirements.
 
 `verify_capture_precision.py <evidence directory>` first captures 600 synthetic DEV
