@@ -165,6 +165,16 @@ def main(offline_import_reconciliation=None):
                 or import_proof['logical_prod_rows'] != prod_rows
                 or import_proof['expected_source_records'] != prod_rows):
                 raise RuntimeError('Offline import proof does not match persisted PROD')
+            normal_path = offline_import_reconciliation.parent / 'normal-query-count-verification.json'
+            normal = json.loads(normal_path.read_text())
+            physical_prod_rows = sum(int(row['rows']) for row in baseline['clickhouse']
+                if int(row['team_id']) == baseline['project_ids']['prod'])
+            if (normal.get('normal_posthog_prod_queries_count_each_original_event_once') is not True
+                or normal.get('source_sha256') != import_proof['source_sha256']
+                or normal['prod_project_id'] != baseline['project_ids']['prod']
+                or normal['expected_events'] != prod_rows or normal['normal_query_prod_rows'] != prod_rows
+                or physical_prod_rows != prod_rows):
+                raise RuntimeError('Normal query proof or current physical PROD rows differ from reconciled source')
         elif prod_rows:
             raise RuntimeError('Nonempty PROD requires verified offline import proof; live ingestion backup is not supported')
         report = {'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'project': PROJECT,
@@ -172,7 +182,8 @@ def main(offline_import_reconciliation=None):
                   'baseline': baseline, 'archives': {}}
         if import_proof:
             report['offline_import_proof'] = {'path': str(offline_import_reconciliation),
-                'sha256': sha(offline_import_reconciliation), 'records': prod_rows}
+                'sha256': sha(offline_import_reconciliation), 'records': prod_rows,
+                'normal_query_proof_path': str(normal_path), 'normal_query_proof_sha256': sha(normal_path)}
         report['preview_group_offset_semantics'] = {
             'groups': sorted(NON_COMMITTING_PREVIEW_GROUPS),
             'zero_committed_lag_not_a_drain_test': True,

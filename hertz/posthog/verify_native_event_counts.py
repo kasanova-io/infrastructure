@@ -11,6 +11,7 @@ from pathlib import Path
 import urllib.request
 
 from import_amplitude_events import atomic_json
+from prepare_amplitude_import import digest
 
 CREDENTIALS = Path('/home/ren/Kasanova/secrets/posthog/bootstrap.json')
 
@@ -18,6 +19,9 @@ CREDENTIALS = Path('/home/ren/Kasanova/secrets/posthog/bootstrap.json')
 def main(source, evidence):
     os.umask(0o077)
     credentials = json.loads(CREDENTIALS.read_text())
+    preparation = json.loads((source / 'preparation.json').read_text())
+    if digest(source / 'events.ndjson.gz') != preparation['events_sha256']:
+        raise RuntimeError('Prepared source checksum differs')
     base = credentials['url']
     jar = http.cookiejar.CookieJar()
     client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
@@ -41,6 +45,7 @@ def main(source, evidence):
     dev = query(credentials['projects']['dev']['id'], "SELECT count(),uniqExact(uuid) FROM events WHERE event = 'posthog_precision_validation'")[0]
     passed = actual == dict(expected) and int(aggregate[0]) == sum(expected.values()) and int(aggregate[1]) == sum(expected.values()) and int(aggregate[2]) == 0
     report = {'verified_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+        'source_sha256': preparation['events_sha256'],
         'prod_project_id': prod, 'expected_events': sum(expected.values()), 'normal_query_prod_rows': int(aggregate[0]),
         'normal_query_unique_uuids': int(aggregate[1]), 'observed_event_types': len(actual),
         'all_event_type_counts_match_source': actual == dict(expected),
