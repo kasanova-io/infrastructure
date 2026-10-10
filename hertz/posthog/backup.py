@@ -181,9 +181,22 @@ def main(offline_import_reconciliation=None):
                   'backup_path': str(backup), 'state': 'prepared', 'containers': rows, 'volumes': volumes,
                   'baseline': baseline, 'archives': {}}
         if import_proof:
+            # Freeze proof bytes in the checkpoint. Later verification runs may
+            # update the operational reports at their original mutable paths.
+            certificates = [('offline-import-reconciliation.json', offline_import_reconciliation),
+                            ('normal-query-count-verification.json', normal_path)]
+            for name, source_path in certificates:
+                certificate = backup / name
+                certificate.write_bytes(source_path.read_bytes())
+                certificate.chmod(0o600)
+                os.chown(certificate, owner.st_uid, owner.st_gid)
+                report['archives'][name] = {'sha256': sha(certificate), 'bytes': certificate.stat().st_size,
+                                           'role': 'offline_import_certificate'}
             report['offline_import_proof'] = {'path': str(offline_import_reconciliation),
                 'sha256': sha(offline_import_reconciliation), 'records': prod_rows,
-                'normal_query_proof_path': str(normal_path), 'normal_query_proof_sha256': sha(normal_path)}
+                'normal_query_proof_path': str(normal_path), 'normal_query_proof_sha256': sha(normal_path),
+                'checkpoint_field_proof': 'offline-import-reconciliation.json',
+                'checkpoint_normal_query_proof': 'normal-query-count-verification.json'}
         report['preview_group_offset_semantics'] = {
             'groups': sorted(NON_COMMITTING_PREVIEW_GROUPS),
             'zero_committed_lag_not_a_drain_test': True,
