@@ -156,7 +156,10 @@ feature enabled. It keeps upstream source unchanged, pins the compiler and runti
 base images, limits compilation to two cores/eight GiB, mounts no app credentials,
 and does not deploy the result. Validate the resulting image on DEV, preserve its
 image archive and immutable ID, then repair and reconcile the entire offline PROD
-backfill. The current unaccepted backfill must not authorize connector cutover.
+backfill. Full original-field comparison passed for all 556,777 events after the
+correction. Event backfill acceptance alone does not authorize connector cutover;
+the full archive, profile/identity/reporting/replay parity and live backup remain
+separate acceptance requirements.
 
 `verify_capture_precision.py <evidence directory>` first captures 600 synthetic DEV
 events with the original image and records the drift. After compilation,
@@ -168,6 +171,25 @@ Run the DEV validator again with `--corrected`: the same UUIDs must retain every
 number exactly and acquire the new validation phase. The verified live DEV test
 found 74 changed values before the correction and zero after it. Synthetic fixtures
 remain in DEV; no original PROD UUIDs are used in the precision test.
+
+Four archived events have no source IP address. The capture HTTP endpoint replaces
+an omitted, null, false or empty `$ip` with the migration server address. The
+DEV-only `verify_missing_ip.py` reproduces that behavior. `repair_missing_ip.py`
+tests a new explicit fixture through the normal historical queue envelope before
+`--prod` can correct just the four original UUIDs, retaining every source field and
+original record byte. Its empty transport IP prevents the Node normalizer's
+fallback. Source timestamps must fit the installed millisecond ingestion
+precision; the four affected source timestamps do. The synthetic test also
+verifies the original source bytes and typed properties. No source archive or
+project privacy setting is changed.
+
+Background ReplacingMergeTree merges do not guarantee normal query deduplication.
+After full field reconciliation, `merge_offline_event_versions.py <evidence>`
+merges the affected monthly partitions sequentially. Before and after it computes
+a cryptographic fingerprint over UUID, name, identity, exact timestamp and every
+property byte, and verifies both environments' unique UUID counts. Fingerprinting
+one month at a time keeps reads within one GiB. Verify normal API counts after the
+merge; the 14-month offline maintenance preserved all reconciled native fields.
 
 PostHog describes this self-hosted deployment as unsupported and offers no data
 loss guarantee. Installation acceptance does not certify migration parity,
