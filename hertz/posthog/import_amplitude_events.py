@@ -2,6 +2,7 @@
 """Resumable offline PROD backfill, followed by complete persisted-field comparison."""
 import argparse
 import datetime as dt
+from decimal import Decimal
 import fcntl
 import gzip
 import hashlib
@@ -32,6 +33,19 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
 
 
+def json_values_equal(left, right):
+    # JSON has one numeric type. Preserve exact numeric value without tolerance;
+    # permit 1 vs 1.0 while rejecting true vs 1 and even a one-step float change.
+    if type(left) in (int, float) and type(right) in (int, float):
+        return Decimal(str(left)) == Decimal(str(right))
+    if type(left) is not type(right): return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(json_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(json_values_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def compare(native, expected):
     if native['event'] != expected['event'] or native['distinct_id'] != expected['distinct_id']:
         raise RuntimeError('Persisted event name or identity differs')
@@ -42,12 +56,12 @@ def compare(native, expected):
         raise RuntimeError('Persisted original record bytes or checksum differ')
     original = json.loads(properties[RAW])
     for key, value in original.get('event_properties', {}).items():
-        if key not in properties or canonical(properties[key]) != canonical(value):
+        if key not in properties or not json_values_equal(properties[key], value):
             raise RuntimeError('Persisted source event property value or type differs')
-    if canonical(properties[USER]) != canonical(original.get('user_properties', {})):
+    if not json_values_equal(properties[USER], original.get('user_properties', {})):
         raise RuntimeError('Persisted event-time user properties differ')
     for key in ('$session_id', '$device_id', '$ip'):
-        if canonical(properties.get(key)) != canonical(expected['properties'].get(key)):
+        if not json_values_equal(properties.get(key), expected['properties'].get(key)):
             raise RuntimeError('Persisted native session/device/IP mapping differs')
 
 
@@ -192,6 +206,8 @@ def main(directory, evidence, verify_only=False):
                 'all_uuids_event_names_distinct_ids_and_microsecond_timestamps_verified': True,
                 'all_original_record_bytes_hashes_and_typed_event_user_properties_verified': True,
                 'all_native_session_device_ip_mappings_verified': True,
+                'json_number_values_compared_exactly_without_tolerance': True,
+                'original_json_number_lexemes_preserved_in_original_record': True,
                 'source_connector_changed': False,
                 'scope': 'Offline retained-event backfill only; full archive, current profiles, future identities, reporting and replay remain separate',
                 'physical_counts': query('SELECT count() AS rows,uniqExact(uuid) AS unique_uuids FROM posthog.events WHERE team_id=' + str(team))[0]}

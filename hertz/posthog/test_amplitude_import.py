@@ -1,6 +1,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import unittest
 import uuid
 
@@ -69,6 +70,19 @@ class ImportContractTest(unittest.TestCase):
         self.source['event_properties']['bool']=True
         _,expected=self.native();persisted=self.persisted(expected)
         properties=json.loads(persisted['properties']);properties['bool']=1
+        persisted['properties']=properties
+        with self.assertRaises(RuntimeError):compare(persisted,expected)
+    def test_json_integer_float_formatting_preserves_value_and_original_bytes(self):
+        self.source['event_properties']['number']=42.0
+        _,expected=self.native();persisted=self.persisted(expected)
+        properties=json.loads(persisted['properties']);properties['number']=42
+        persisted['properties']=properties
+        compare(persisted,expected)
+        self.assertEqual(properties[RAW],expected['properties'][RAW])
+    def test_one_binary_float_step_is_rejected_without_tolerance(self):
+        self.source['event_properties']['number']=1.25
+        _,expected=self.native();persisted=self.persisted(expected)
+        properties=json.loads(persisted['properties']);properties['number']=math.nextafter(1.25,math.inf)
         persisted['properties']=properties
         with self.assertRaises(RuntimeError):compare(persisted,expected)
     def test_full_reconciliation_rejects_raw_record_or_session_drift(self):

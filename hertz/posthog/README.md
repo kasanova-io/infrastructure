@@ -129,6 +129,24 @@ The 121-event DEV validation covers all 120 observed source event types and the
 newest event boundary. It does not certify the full PROD backfill, current-profile
 restoration, future SDK identity continuity, chart/cohort parity or replay playback.
 
+## Numeric precision
+
+The installed capture image uses `serde_json` 1.0.149 with its default best-effort
+float parser. Complete historical comparison found a one-step binary float change;
+the original record bytes still matched. A synthetic 60,000-number regression
+reproduced 8,719 value changes with the default parser and zero with
+`serde_json/float_roundtrip`. Keep the full comparison strict: a one-step change
+fails, and there is no numerical tolerance. JSON permits `1` and `1.0` to represent
+the same numeric value; booleans, strings, arrays and objects remain distinct.
+Original numeric text remains available in the unchanged original record bytes.
+
+`build_precise_capture.py` builds the exact capture revision with that Cargo
+feature enabled. It keeps upstream source unchanged, pins the compiler and runtime
+base images, limits compilation to two cores/eight GiB, mounts no app credentials,
+and does not deploy the result. Validate the resulting image on DEV, preserve its
+image archive and immutable ID, then repair and reconcile the entire offline PROD
+backfill. The current unaccepted backfill must not authorize connector cutover.
+
 PostHog describes this self-hosted deployment as unsupported and offers no data
 loss guarantee. Installation acceptance does not certify migration parity,
 historical recording playback or completion of the PROD Amplitude archive.
