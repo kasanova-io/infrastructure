@@ -123,7 +123,7 @@ def main():
             stores = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in STORAGE]
             for group in (proxy, apps, stores):
                 if group:
-                    run(['docker', 'stop', '--time', '120', *group])
+                    run(['docker', 'stop', '--time', '30' if group == apps else '120', *group])
             states = json.loads(run(['docker', 'inspect', *ids]))
             if any(c['State']['Running'] or c['State']['OOMKilled'] for c in states):
                 raise RuntimeError('An owned process remains running or was OOM-killed')
@@ -132,6 +132,7 @@ def main():
                 raise RuntimeError('Clean shutdown was not achieved; do not certify checkpoint')
             report['shutdown_exit_codes'] = {c['Config']['Labels']['com.docker.compose.service']: c['State']['ExitCode'] for c in states}
             report['scope'] = 'Initial empty-PROD checkpoint; persistent services must stop cleanly. Stateless setup services may require termination; no live PROD capture is connected.'
+            report['backup_program_sha256'] = sha(Path(__file__))
             report.update(state='all_owned_writers_stopped', stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
             save(backup / 'manifest.json', report)
             print(json.dumps({'state': report['state'], 'backup_path': str(backup)}), flush=True)
