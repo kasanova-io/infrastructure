@@ -90,6 +90,8 @@ def main(offline_import_reconciliation=None):
         path.chmod(0o600)
         os.chown(path, owner.st_uid, owner.st_gid)
     with (ROOT / 'operations' / '.backup.lock').open('a') as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         ids = run(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=' + PROJECT]).decode().split()
         if not ids:
