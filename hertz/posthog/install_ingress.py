@@ -3,6 +3,7 @@
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -19,6 +20,10 @@ def digest(data):
 def main():
     operations = ROOT / 'operations'
     operations.mkdir(mode=0o700, exist_ok=True)
+    # sudo is needed for the shared gateway, but runtime verification runs as ren.
+    owner = ROOT.stat()
+    os.chown(operations, owner.st_uid, owner.st_gid)
+    operations.chmod(0o700)
     with Path('/opt/caddy/config/.posthog-install.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         before = LIVE.read_bytes()
@@ -33,9 +38,11 @@ def main():
             raise RuntimeError('Existing original gateway backup must not be overwritten')
         backup.write_bytes(before)
         backup.chmod(0o600)
+        os.chown(backup, owner.st_uid, owner.st_gid)
         staged = operations / 'Caddyfile.candidate'
         staged.write_bytes(candidate)
         staged.chmod(0o600)
+        os.chown(staged, owner.st_uid, owner.st_gid)
         subprocess.run(['docker', 'cp', str(staged), 'caddy:' + STAGED_CONTAINER], check=True, capture_output=True)
         check = subprocess.run(['docker', 'exec', 'caddy', 'caddy', 'validate', '--adapter', 'caddyfile', '--config', STAGED_CONTAINER], capture_output=True)
         if check.returncode:
@@ -54,7 +61,10 @@ def main():
                   'original_sha256': digest(before), 'installed_sha256': digest(candidate),
                   'original_routes_preserved_byte_for_byte': candidate[:-len(BLOCK)-1] == before,
                   'full_configuration_validated': True, 'hot_reload_successful': True}
-        (operations / 'ingress-verification.json').write_text(json.dumps(report, indent=2) + '\n')
+        receipt = operations / 'ingress-verification.json'
+        receipt.write_text(json.dumps(report, indent=2) + '\n')
+        receipt.chmod(0o600)
+        os.chown(receipt, owner.st_uid, owner.st_gid)
         print(json.dumps(report))
 
 

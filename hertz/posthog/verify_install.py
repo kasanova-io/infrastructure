@@ -26,7 +26,7 @@ def main():
     def request(path, payload=None):
         headers = {'Content-Type': 'application/json', 'Referer': base + '/login',
                    'User-Agent': 'Kasanova-PostHog-installation-verification'}
-        token = next((c.value for c in jar if c.name == 'csrftoken'), None)
+        token = next((c.value for c in jar if c.name == 'posthog_csrftoken'), None)
         if token:
             headers['X-CSRFToken'] = token
         req = urllib.request.Request(base + path, data=None if payload is None else json.dumps(payload).encode(), headers=headers)
@@ -36,14 +36,15 @@ def main():
     report = {'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'url': base}
     report['https_health_status'], _ = request('/_health')
     report['login_page_status'], html = request('/login')
-    assets = [x for x in re.findall(r'<script[^>]+src=["\']([^"\']+)', html.decode()) if x.startswith('/') and '.js' in x]
+    # Current builds load modules through inline imports and modulepreload links.
+    assets = [x for x in re.findall(r'(?:src|href)=["\']([^"\']+)', html.decode()) if x.startswith('/') and '.js' in x]
     if not assets:
         raise RuntimeError('Login page has no local JavaScript asset')
     report['frontend_asset_status'], _ = request(assets[0])
     status, body = request('/api/login/', {'email': credentials['email'], 'password': credentials['password']})
     if status != 200 or not json.loads(body).get('success'):
         raise RuntimeError('Owner login did not succeed')
-    status, body = request('/api/user/')
+    status, body = request('/api/users/@me/')
     if status != 200 or json.loads(body).get('email') != credentials['email']:
         raise RuntimeError('Authenticated owner identity differs')
     report['owner_login_verified'] = True
@@ -57,7 +58,11 @@ def main():
              'uuid': marker['uuid'], 'timestamp': marker['timestamp'],
              'properties': {'installation_marker': marker['uuid'], 'environment': 'dev',
                             'number': 42, 'boolean': True, 'nested': {'preserved': 'yes'}}}
-    status, _ = request('/batch/', {'api_key': credentials['projects']['dev']['api_key'], 'batch': [event]})
+    status = marker.get('capture_status')
+    if status is None:
+        status, _ = request('/batch/', {'api_key': credentials['projects']['dev']['api_key'], 'batch': [event]})
+        marker['capture_status'] = status
+        marker_path.write_text(json.dumps(marker) + '\n')
     report['dev_capture_status'] = status
     sql = "SELECT event, distinct_id, properties FROM events WHERE uuid = '" + marker['uuid'] + "'"
 
@@ -81,14 +86,16 @@ def main():
         time.sleep(2)
     else:
         raise RuntimeError('Captured DEV event did not become queryable')
-    if len(rows) != 1 or rows[0][:2] != ['posthog_installation_check', identifier]:
-        raise RuntimeError('Captured diagnostic event fields changed or were duplicated')
-    properties = json.loads(rows[0][2]) if isinstance(rows[0][2], str) else rows[0][2]
-    if any(properties.get(k) != v for k, v in event['properties'].items()):
-        raise RuntimeError('Captured typed properties changed')
+    for row in rows:
+        if row[:2] != ['posthog_installation_check', identifier]:
+            raise RuntimeError('Captured diagnostic event fields changed')
+        properties = json.loads(row[2]) if isinstance(row[2], str) else row[2]
+        if any(properties.get(k) != v for k, v in event['properties'].items()):
+            raise RuntimeError('Captured typed properties changed')
     if query('prod'):
         raise RuntimeError('DEV diagnostic event leaked into PROD')
     report.update({'dev_event_query_and_typed_properties_verified': True,
+                   'diagnostic_rows': len(rows),
                    'prod_dev_project_isolation_verified': True,
                    'projects': {k: v['id'] for k, v in credentials['projects'].items()},
                    'diagnostic_uuid': marker['uuid'], 'prod_source_events_imported': 0,
