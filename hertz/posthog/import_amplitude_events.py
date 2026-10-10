@@ -219,7 +219,15 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
                     value = json.loads(line)
                     row = con.execute('SELECT envelope,seen FROM expected WHERE uuid=?', (value['uuid'],)).fetchone()
                     if row is None or row[1]: raise RuntimeError('Unexpected or repeated logical PROD UUID')
-                    compare(value, json.loads(row[0]))
+                    expected = json.loads(row[0])
+                    try:
+                        compare(value, expected)
+                    except RuntimeError:
+                        # Keep the failing row private for diagnosis; never put
+                        # source identities or properties in console output.
+                        atomic_json(evidence / 'first-field-comparison-difference-private.json',
+                            {'native': value, 'expected': expected, 'previous_verified_rows': rows})
+                        raise
                     con.execute('UPDATE expected SET seen=1 WHERE uuid=?', (value['uuid'],))
                     rows += 1
                     if rows % 20000 == 0: con.commit()
