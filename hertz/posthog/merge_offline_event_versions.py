@@ -40,19 +40,26 @@ def main(evidence):
     def counts():
         return [json.loads(line) for line in query('SELECT team_id,count() AS rows,uniqExact(uuid) AS uuids '
             'FROM posthog.events GROUP BY team_id ORDER BY team_id FORMAT JSONEachRow').splitlines()]
-    def fingerprint(final):
+    def fingerprint(final, partitions):
         # Sort fixed-size cryptographic row digests rather than complete private
         # properties. Bind names, identity, exact time and every property byte.
-        sql = ('SELECT lower(hex(SHA256(toJSONString(tuple(uuid,event,distinct_id,'
-            'toUnixTimestamp64Micro(timestamp),properties))))) AS digest FROM posthog.sharded_events '
-            + ('FINAL ' if final else '') + 'WHERE team_id=' + str(team)
-            + ' ORDER BY uuid SETTINGS max_threads=2,max_final_threads=2,max_block_size=2048,'
-            'max_bytes_before_external_sort=268435456,max_memory_usage=1073741824 FORMAT TSV')
-        result = query(sql)
-        rows = result.splitlines()
-        if len(rows) != proof['logical_prod_rows'] or any(re.fullmatch(rb'[0-9a-f]{64}', row) is None for row in rows):
+        h = hashlib.sha256(); total = 0
+        for partition in sorted(partitions):
+            # FINAL can retain read buffers for many source parts. Fingerprint
+            # one month at a time instead of opening the entire history at once.
+            sql = ('SELECT lower(hex(SHA256(toJSONString(tuple(uuid,event,distinct_id,'
+                'toUnixTimestamp64Micro(timestamp),properties))))) AS digest FROM posthog.sharded_events '
+                + ('FINAL ' if final else '') + 'WHERE team_id=' + str(team)
+                + " AND _partition_id='" + partition + "'"
+                + ' ORDER BY uuid SETTINGS max_threads=2,max_final_threads=2,max_block_size=2048,'
+                'max_bytes_before_external_sort=268435456,max_memory_usage=1073741824 FORMAT TSV')
+            result = query(sql); rows = result.splitlines(); total += len(rows)
+            if any(re.fullmatch(rb'[0-9a-f]{64}', row) is None for row in rows):
+                raise RuntimeError('Invalid event fingerprint row')
+            h.update(partition.encode() + b'\n'); h.update(result)
+        if total != proof['logical_prod_rows']:
             raise RuntimeError('Event fingerprint row set differs')
-        return hashlib.sha256(result).hexdigest()
+        return h.hexdigest()
     with (ROOT / 'operations/.backup.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         schema = query('SHOW CREATE TABLE posthog.sharded_events').decode()
@@ -62,11 +69,11 @@ def main(evidence):
         source_rows = next(r for r in before if int(r['team_id']) == team)
         if int(source_rows['uuids']) != proof['logical_prod_rows']:
             raise RuntimeError('Persisted UUID count differs from reconciliation')
-        initial = fingerprint(True)
         partitions = [json.loads(line)['partition'] for line in query('SELECT DISTINCT _partition_id AS partition '
             'FROM posthog.sharded_events WHERE team_id=' + str(team) + ' FORMAT JSONEachRow').splitlines()]
         if not partitions or any(re.fullmatch(r'[0-9]{6}', p) is None for p in partitions):
             raise RuntimeError('Unexpected monthly event partition')
+        initial = fingerprint(True, partitions)
         report = {'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'before_counts': before,
             'source_reconciliation_sha256': hashlib.sha256((evidence / 'reconciliation.json').read_bytes()).hexdigest(),
             'logical_row_fingerprint_before': initial, 'partitions_merged': [], 'source_connector_changed': False}
@@ -81,7 +88,7 @@ def main(evidence):
         after = counts()
         if [{k:v for k,v in r.items() if k != 'rows'} for r in before] != [{k:v for k,v in r.items() if k != 'rows'} for r in after]:
             raise RuntimeError('Merging changed logical environment UUID counts')
-        final = fingerprint(False)
+        final = fingerprint(False, partitions)
         if final != initial: raise RuntimeError('Merging changed reconciled native event fields')
         report.update(completed_at=dt.datetime.now(dt.timezone.utc).isoformat(), after_counts=after,
             logical_row_fingerprint_after=final, all_reconciled_native_row_fields_preserved=True,
