@@ -86,6 +86,8 @@ def main():
         time.sleep(2)
     else:
         raise RuntimeError('Captured DEV event did not become queryable')
+    if len(rows) != 1:
+        raise RuntimeError('One-shot diagnostic capture returned duplicate rows')
     for row in rows:
         if row[:2] != ['posthog_installation_check', identifier]:
             raise RuntimeError('Captured diagnostic event fields changed')
