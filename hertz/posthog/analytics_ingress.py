@@ -6,6 +6,7 @@ the private SQLite journal. Delivery failures retain that journal for retry.
 No Amplitude service is contacted. Accepted records remain as a live archive.
 """
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import gzip
@@ -44,11 +45,16 @@ class Journal:
                     PRIMARY KEY(project,source_id));
             ''')
 
+    @contextmanager
     def connect(self):
         con = sqlite3.connect(self.path, timeout=30)
         con.execute('PRAGMA journal_mode=WAL')
         con.execute('PRAGMA synchronous=FULL')
-        return con
+        try:
+            with con:
+                yield con
+        finally:
+            con.close()
 
     def accept(self, payload):
         route = self.routes.get(payload.get('api_key'))
@@ -121,7 +127,16 @@ class Journal:
                      (((entropy >> 64) & 0xfff) << 64) | (2 << 62) |
                      (entropy & ((1 << 62) - 1)))
             props['$session_id'] = str(uuid.UUID(int=value))
-        timestamp = dt.datetime.fromtimestamp(event['time'] / 1000, dt.timezone.utc).isoformat()
+        occurrence = extra.get('kasanova_event_timestamp_ms')
+        timestamp = None
+        if isinstance(occurrence, int) and not isinstance(occurrence, bool):
+            try:
+                timestamp = (dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) +
+                             dt.timedelta(milliseconds=occurrence)).isoformat()
+            except (OverflowError, OSError, ValueError):
+                pass  # Old or malformed envelopes retain the established SDK time behavior.
+        if timestamp is None:
+            timestamp = dt.datetime.fromtimestamp(event['time'] / 1000, dt.timezone.utc).isoformat()
         return {'event': event['event_type'], 'distinct_id': distinct,
                 'uuid': record_id, 'timestamp': timestamp, 'properties': props}
 

@@ -255,11 +255,60 @@ Seed the journal from the reconciled chronological import with `--seed-import`
 and `--seed-project` before client cutover to retain archived device identity
 links and suppress retransmission of already imported source events.
 
-The historical checkpoint does not include this newly added live journal. A
-consistent journal backup, independently stored copy, restore proof and recurring
-native database/recording backups remain required before PROD client cutover.
-Do not describe the existing offline checkpoint as a recurring live backup.
+The historical checkpoint does not include this newly added live journal. Use
+the steady-state checkpoint path below for the journal and native recording
+volumes. Actual journal backup, independent copy, isolated restore and recurring
+execution evidence remain required before PROD client cutover. Do not describe
+the existing offline checkpoint as a recurring live backup.
 Run `test_analytics_ingress.py` for durable retry, atomic batch, environment,
 identity/property and replay-session contracts. DEV browser capture has also been
 verified through normal queries for exact properties and no retry duplicates;
 native replay playback and upgrade/offline device acceptance remain separate.
+
+
+## Steady-state journal and native backups
+
+Run `sudo python3 backup.py --live --verify-restore` after deploying the exact
+reviewed tooling. This is a distinct live-client scope, mutually exclusive with
+`--offline-import-reconciliation`; historical certificate rules stay intact.
+It takes only this project's gateway offline, stops its journal ingress before
+capture, drains native ingestion, and freezes the post-drain database baseline.
+Clients retain failed requests for retry. Accepted and pending SQLite records,
+identity mappings and historical retry IDs are retained; pending records need
+not have reached PostHog before the checkpoint. The SQLite backup API includes
+committed WAL transactions in a separate private snapshot. Every journal row,
+schema and pending count is compared with the stopped source and with the
+isolated restored volume. Existing ownership, full volume content/metadata,
+Postgres/ClickHouse and object-storage/recording checks remain in force.
+
+All exclusively owned native/queue/object-storage volumes, including the live
+journal volume, are archived. Original services restart before isolated restore
+verification. A gateway recovery failure or incomplete journal/native restore
+fails the command. Nothing deletes source history, journal rows or prior backups.
+Capacity admission reserves the current allocated source bytes plus two GiB on
+the checkpoint filesystem before pausing writers. A rejected checkpoint keeps
+its failure evidence and restores the original running services.
+
+After one real successful live checkpoint, independent storage copy and isolated
+restore, install the supplied `kasanova-posthog-backup.service` and `.timer` in
+`/etc/systemd/system`, reload systemd, and enable the timer. The daily 06:00 UTC
+job calls the same `--live --verify-restore` path; it pauses this PostHog gateway
+briefly and verifies that exact checkpoint rather than a moving latest pointer.
+Record the installed file hashes, next firing, successful service status and
+checkpoint/restore receipts. Monitor failures and available disk space; no
+unreviewed retention deletion is performed. Copy sealed new checkpoints to the
+existing independent storage and verify all manifest/archive hashes there too;
+the server timer alone does not certify an independent storage copy or playable
+recording acceptance. A local unit-test pass does not certify the deployed job.
+
+For rollback, disable only this new timer, restore the prior reviewed tooling if
+needed, and keep all completed and rejected checkpoints plus current journal and
+native volumes. Never replace live post-cutover data with the old offline import
+checkpoint. Recovery must reconcile the accepted/pending journal rows and native
+event/recording writes acquired after that earlier cutoff.
+
+The mobile connector includes `extra.kasanova_event_timestamp_ms` as the original
+integer occurrence time. Ingress uses it for the native event timestamp without
+changing event properties, original raw envelope, identity or existing session
+mapping. Missing or malformed metadata retains the legacy SDK time fallback;
+no new event type or client queue identity is introduced.

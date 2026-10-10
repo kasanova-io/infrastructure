@@ -8,10 +8,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import time
 
-from backup import inventory, sha
+from backup import inventory, sha, journal_inventory, interrupt_operation
 
 
 def run(args):
@@ -67,6 +68,7 @@ def main():
         p.write_text(json.dumps(report, indent=2) + '\n')
         os.chown(p, uid, gid)
         p.chmod(0o600)
+    signal.signal(signal.SIGTERM, interrupt_operation)
     try:
         # Reserve the checked subnet before spending time restoring large volumes.
         network_ids = run(['docker', 'network', 'ls', '-q']).decode().split()
@@ -103,6 +105,18 @@ def main():
             if inventory(destination) != expected:
                 raise RuntimeError('Restored persistent volume bytes or ownership differ')
             report['volume_inventories_verified'].append(original)
+            save()
+        if manifest.get('live_checkpoint'):
+            journal = manifest['analytics_journal']
+            if journal['relative_path'] != 'ingress.sqlite' or journal['snapshot'] != 'analytics-journal.sqlite':
+                raise RuntimeError('Unexpected restored journal location')
+            volume = volumes[journal['volume']]
+            mount = Path(json.loads(run(['docker', 'volume', 'inspect', volume]))[0]['Mountpoint'])
+            if (journal_inventory(mount / 'ingress.sqlite') != journal['inventory']
+                or journal_inventory(checkpoint / journal['snapshot']) != journal['inventory']):
+                raise RuntimeError('Restored analytics journal rows differ from checkpoint')
+            report['analytics_journal_all_rows_and_pending_verified'] = True
+            report['analytics_journal_pending_rows'] = journal['inventory']['pending']
             save()
         services = {c['service']: c for c in manifest['containers']}
         def start(service, memory, extra=()):

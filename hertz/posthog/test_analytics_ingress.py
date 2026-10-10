@@ -67,5 +67,29 @@ class IngressTest(unittest.TestCase):
         self.assertEqual(native['properties']['$session_id'], event['extra']['kasanova_posthog_session_id'])
 
 
+    def test_original_occurrence_time_survives_native_timestamp_loss(self):
+        event = copy.deepcopy(self.event)
+        event['extra'] = {'kasanova_event_timestamp_ms': 1700000000123}
+        self.journal.accept({'api_key': 'dev', 'events': [event]})
+        with self.journal.connect() as con:
+            raw, native = con.execute('SELECT raw,native FROM records').fetchone()
+        native = json.loads(native)
+        self.assertEqual(native['timestamp'], '2023-11-14T22:13:20.123000+00:00')
+        self.assertEqual(json.loads(raw), event)
+        self.assertNotIn('kasanova_event_timestamp_ms', native['properties'])
+        self.assertEqual(native['distinct_id'], event['user_id'])
+        original_mapping = Journal.convert(self.event, json.dumps(self.event), 'id', event['user_id'], self.routes['dev'])
+        self.assertEqual(native['properties']['$session_id'], original_mapping['properties']['$session_id'])
+
+    def test_missing_or_invalid_occurrence_metadata_keeps_legacy_time(self):
+        for value in (None, True, '1700000000123', 1700000000123.5, 10**100):
+            with self.subTest(value=value):
+                event = copy.deepcopy(self.event)
+                if value is not None:
+                    event['extra'] = {'kasanova_event_timestamp_ms': value}
+                native = Journal.convert(event, json.dumps(event), 'id', event['user_id'], self.routes['prod'])
+                self.assertEqual(native['timestamp'], '2026-10-10T20:00:00.123000+00:00')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,12 @@
+[Unit]
+Description=Checkpoint and verify only the owned Kasanova PostHog stack
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ren/Kasanova/tools/posthog
+ExecStart=/usr/bin/python3 /home/ren/Kasanova/tools/posthog/backup.py --live --verify-restore
+UMask=0077
+TimeoutStartSec=2h
+TimeoutStopSec=10min

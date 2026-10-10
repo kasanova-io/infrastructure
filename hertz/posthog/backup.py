@@ -12,6 +12,10 @@ import subprocess
 import time
 import urllib.request
 import re
+import sqlite3
+import signal
+import shutil
+from contextlib import closing
 
 ROOT = Path(__file__).resolve().parent
 PROJECT = 'kasanova_posthog'
@@ -90,15 +94,78 @@ def ingestion_drained(lags):
     return all(lag == 0 for group, lag in lags.items() if group not in NON_COMMITTING_PREVIEW_GROUPS)
 
 
-def main(offline_import_reconciliation=None):
+def journal_inventory(path):
+    """Read every committed journal row, including pending work, without changing it."""
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError('Missing or aliased analytics journal')
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as con:
+        con.execute('PRAGMA query_only=ON')
+        if con.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+            raise RuntimeError('Analytics journal integrity failed')
+        schema = con.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+        tables = {row[1] for row in schema if row[0] == 'table'}
+        if tables != {'records', 'identities', 'history'}:
+            raise RuntimeError('Unexpected analytics journal tables')
+        result = {'schema_sha256': hashlib.sha256(json.dumps(schema, separators=(',', ':')).encode()).hexdigest(),
+                  'tables': {}, 'pending': con.execute('SELECT count(*) FROM records WHERE sent=0').fetchone()[0]}
+        for table, ordering in (('records', 'project,id'), ('identities', 'project,device'), ('history', 'project,source_id')):
+            digest, count = hashlib.sha256(), 0
+            for row in con.execute('SELECT * FROM ' + table + ' ORDER BY ' + ordering):
+                digest.update(json.dumps(row, separators=(',', ':'), ensure_ascii=False).encode() + b'\n')
+                count += 1
+            result['tables'][table] = {'rows': count, 'sha256': digest.hexdigest()}
+        return result
+
+
+def snapshot_journal(source, destination):
+    """SQLite backup consolidates committed WAL rows; original volume is also archived."""
+    before = journal_inventory(source)
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    with closing(sqlite3.connect(source.resolve().as_uri() + '?mode=ro', uri=True)) as src:
+        with closing(sqlite3.connect(destination)) as dst:
+            src.backup(dst)
+    if journal_inventory(destination) != before or journal_inventory(source) != before:
+        raise RuntimeError('Analytics journal changed or snapshot differs')
+    with destination.open('rb') as stream:
+        os.fsync(stream.fileno())
+    fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return before
+
+
+def interrupt_operation(signum, frame):
+    raise InterruptedError('Owned backup/restore interrupted')
+
+
+def main(offline_import_reconciliation=None, live=False, verify_restore=False):
+    if verify_restore and not live:
+        raise RuntimeError('Automatic restore verification requires live checkpoint scope')
+    if live and offline_import_reconciliation is not None:
+        raise RuntimeError('Live and offline checkpoint scopes are mutually exclusive')
     if os.geteuid() != 0:
         raise RuntimeError('Run through sudo to preserve persistent volume ownership')
+    if live:
+        signal.signal(signal.SIGTERM, interrupt_operation)
     os.umask(0o077)
     owner = ROOT.stat()
     def save(path, data):
-        path.write_text(json.dumps(data, indent=2) + '\n')
+        with path.open('w') as stream:
+            stream.write(json.dumps(data, indent=2) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
         path.chmod(0o600)
         os.chown(path, owner.st_uid, owner.st_gid)
+        with path.open('rb') as stream:
+            os.fsync(stream.fileno())
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     with (ROOT / 'operations' / '.backup.lock').open('a') as lock:
         os.fchmod(lock.fileno(), 0o600)
         os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
@@ -108,6 +175,8 @@ def main(offline_import_reconciliation=None):
             raise RuntimeError('No owned PostHog containers found')
         containers = json.loads(run(['docker', 'inspect', *ids]))
         services = {c['Config']['Labels']['com.docker.compose.service']: c for c in containers}
+        if live and ('analytics-ingress' not in services or not services['analytics-ingress']['State']['Running']):
+            raise RuntimeError('Live checkpoint requires the owned running analytics ingress')
         if not STORAGE.issubset(services):
             raise RuntimeError('Required persistent services are missing')
         volumes = {}
@@ -140,6 +209,14 @@ def main(offline_import_reconciliation=None):
         os.chown(BACKUPS, owner.st_uid, owner.st_gid)
         os.chown(backup, owner.st_uid, owner.st_gid)
         BACKUPS.chmod(0o700)
+        if live:
+            # No automatic archive deletion: reject before pausing writers if the
+            # checkpoint filesystem cannot hold an uncompressed copy plus margin.
+            allocated = sum(p.lstat().st_blocks * 512
+                            for base in [ROOT, *(Path(v) for v in volumes.values())]
+                            for p in [base, *base.rglob('*')] if not p.is_symlink())
+            if shutil.disk_usage(backup).free < allocated + 2 * 1024**3:
+                raise RuntimeError('Insufficient free space for an owned live checkpoint')
         baseline = {
             'postgres': json.loads(run(['docker', 'exec', services['db']['Name'], 'psql', '-U', 'posthog', '-d', 'posthog', '-At', '-c',
                 "SELECT json_build_object('users',(SELECT json_agg(json_build_object('id',id,'email',email)) FROM posthog_user),'teams',(SELECT json_agg(json_build_object('id',id,'name',name)) FROM posthog_team));"])),
@@ -175,7 +252,7 @@ def main(offline_import_reconciliation=None):
                 or normal['expected_events'] != prod_rows or normal['normal_query_prod_rows'] != prod_rows
                 or physical_prod_rows != prod_rows):
                 raise RuntimeError('Normal query proof or current physical PROD rows differ from reconciled source')
-        elif prod_rows:
+        elif prod_rows and not live:
             raise RuntimeError('Nonempty PROD requires verified offline import proof; live ingestion backup is not supported')
         report = {'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'project': PROJECT,
                   'backup_path': str(backup), 'state': 'prepared', 'containers': rows, 'volumes': volumes,
@@ -220,9 +297,17 @@ def main(offline_import_reconciliation=None):
             ordered_stores = [[services[s]['Name'] for s in group if services[s]['State']['Running']]
                               for group in (('clickhouse',), ('kafka',), ('zookeeper',),
                                             ('redis7', 'valkey', 'objectstorage', 'seaweedfs', 'elasticsearch'), ('db',))]
-            for group in (proxy, captures):
+            ingress = [services['analytics-ingress']['Name']] if live else []
+            apps = [name for name in apps if name not in ingress]
+            # Stop the public gateway, then the owned journal producer before capture.
+            # Committed pending rows stay in the journal and retry after restart.
+            for group in (proxy, ingress, captures):
                 if group:
                     run(['docker', 'stop', '--time', '15' if group == proxy else '90', *group])
+            if live:
+                state = json.loads(run(['docker', 'inspect', *ingress]))[0]['State']
+                if state['Running'] or state['OOMKilled'] or state['ExitCode'] not in (0, 143):
+                    raise RuntimeError('Analytics ingress did not stop safely')
             capture_states = json.loads(run(['docker', 'inspect', *captures])) if captures else []
             report['capture_shutdown_exit_codes'] = {c['Config']['Labels']['com.docker.compose.service']: c['State']['ExitCode'] for c in capture_states}
             save(backup / 'shutdown-results.json', report['capture_shutdown_exit_codes'])
@@ -247,9 +332,23 @@ def main(offline_import_reconciliation=None):
             frozen = json.loads(run(['docker', 'exec', services['clickhouse']['Name'], 'clickhouse-client', '--query',
                 "SELECT team_id,event,count() AS rows,uniqExact(uuid) AS unique_events FROM posthog.events GROUP BY team_id,event ORDER BY team_id,event FORMAT JSON"]))['data']
             logical = lambda rows: [{k: v for k, v in row.items() if k != 'rows'} for row in rows]
-            if logical(frozen) != logical(baseline['clickhouse']):
+            if not live and logical(frozen) != logical(baseline['clickhouse']):
                 raise RuntimeError('Events changed during offline checkpoint drain')
             baseline['clickhouse'] = frozen
+            if live:
+                baseline['postgres'] = json.loads(run(['docker', 'exec', services['db']['Name'], 'psql', '-U', 'posthog', '-d', 'posthog', '-At', '-c',
+                    "SELECT json_build_object('users',(SELECT json_agg(json_build_object('id',id,'email',email)) FROM posthog_user),'teams',(SELECT json_agg(json_build_object('id',id,'name',name)) FROM posthog_team));"]))
+                mounts = [m for m in services['analytics-ingress']['Mounts']
+                          if m['Type'] == 'volume' and m['Destination'] == '/var/lib/analytics']
+                if len(mounts) != 1 or mounts[0]['Name'] not in volumes:
+                    raise RuntimeError('Unexpected analytics journal mount')
+                snapshot = backup / 'analytics-journal.sqlite'
+                journal = snapshot_journal(Path(mounts[0]['Source']) / 'ingress.sqlite', snapshot)
+                os.chown(snapshot, owner.st_uid, owner.st_gid)
+                report['analytics_journal'] = {'volume': mounts[0]['Name'], 'relative_path': 'ingress.sqlite',
+                    'snapshot': snapshot.name, 'inventory': journal, 'pending_rows_preserved': True}
+                report['archives'][snapshot.name] = {'sha256': sha(snapshot), 'bytes': snapshot.stat().st_size,
+                                                    'role': 'live_journal_snapshot'}
             for group in ordered_stores:
                 if group: run(['docker', 'stop', '--time', '120', *group])
             states = json.loads(run(['docker', 'inspect', *ids]))
@@ -263,7 +362,8 @@ def main(offline_import_reconciliation=None):
             if any(c['State']['ExitCode'] != 0 for c in states
                    if c['Config']['Labels']['com.docker.compose.service'] in INGESTION):
                 raise RuntimeError('Ingestion service did not stop cleanly')
-            report['scope'] = ('Reconciled offline PROD event backfill checkpoint' if import_proof else 'Initial empty-PROD checkpoint') + '; capture and ingestion drain verified, persistent services stop cleanly; no SDK clients connected. Recurring live-ingestion backup remains unverified.'
+            report['scope'] = ('Steady-state live-client cold checkpoint; public requests paused, accepted and pending journal rows retained, downstream ingestion drained, all owned native database/object-storage/recording volume bytes preserved' if live else ('Reconciled offline PROD event backfill checkpoint' if import_proof else 'Initial empty-PROD checkpoint') + '; capture and ingestion drain verified, persistent services stop cleanly; no SDK clients connected. Recurring live-ingestion backup remains unverified.')
+            report['live_checkpoint'] = live
             report['backup_program_sha256'] = sha(Path(__file__))
             report.update(state='all_owned_writers_stopped', stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
             save(backup / 'manifest.json', report)
@@ -288,6 +388,9 @@ def main(offline_import_reconciliation=None):
             credentials.write_bytes(Path('/home/ren/Kasanova/secrets/posthog/bootstrap.json').read_bytes())
             os.chown(credentials, owner.st_uid, owner.st_gid)
             report['archives'][credentials.name] = {'sha256': sha(credentials), 'bytes': credentials.stat().st_size}
+            for name in report['archives']:
+                with (backup / name).open('rb') as stream:
+                    os.fsync(stream.fileno())
             report.update(state='cold_checkpoint_complete', completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
             save(backup / 'manifest.json', report)
         except BaseException as error:
@@ -313,17 +416,28 @@ def main(offline_import_reconciliation=None):
                         except Exception:
                             pass
                         time.sleep(2)
+                    else:
+                        if live:
+                            raise RuntimeError('Owned gateway did not recover after live backup')
                 finally:
                     if other_names:
                         run(['docker', 'start', *other_names])
                 save(backup / 'restart.json', {'original_running_containers_restarted': original_names,
                      'completed_at': dt.datetime.now(dt.timezone.utc).isoformat()})
                 print(json.dumps({'owned_services_restarted': len(original_names)}), flush=True)
+        if verify_restore:
+            result = json.loads(run(['python3', str(ROOT / 'verify_backup_restore.py'), str(backup)]))
+            if result.get('analytics_journal_all_rows_and_pending_verified') is not True:
+                raise RuntimeError('Live journal restore verification incomplete')
+            print(json.dumps({'live_checkpoint_isolated_restore_verified': True, 'backup_path': str(backup)}), flush=True)
         print(json.dumps({'state': report['state'], 'backup_path': str(backup), 'volume_count': len(volumes)}), flush=True)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--offline-import-reconciliation', type=Path)
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument('--offline-import-reconciliation', type=Path)
+    scope.add_argument('--live', action='store_true', help='Cold checkpoint of active client ingestion, including durable journal')
+    parser.add_argument('--verify-restore', action='store_true', help='After live restart, verify this exact checkpoint through the existing isolated restore')
     args = parser.parse_args()
-    main(args.offline_import_reconciliation)
+    main(args.offline_import_reconciliation, args.live, args.verify_restore)

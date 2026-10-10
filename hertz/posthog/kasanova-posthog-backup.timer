@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily owned PostHog checkpoint and isolated restore verification
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+Unit=kasanova-posthog-backup.service
+
+[Install]
+WantedBy=timers.target
