@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import shutil
 import subprocess
@@ -66,6 +67,10 @@ def main():
         for old, new in replacements.items():
             content = content.replace(old, new)
         if source == 'docker-compose.base.yml':
+            # The gateway joins a shared network whose other projects also use
+            # aliases such as "web". Route to this project's unique names.
+            content = re.sub(r'(reverse_proxy\s+)([a-z][a-z0-9-]*)(:[0-9]+)',
+                             lambda match: match[1] + 'kasanova_posthog-' + match[2] + '-1' + match[3], content)
             content = content.replace('                ${CADDY_TLS_BLOCK:-}',
                                       '                ${CADDY_TLS_BLOCK:-}\n'
                                       '                    servers {\n'
