@@ -26,8 +26,9 @@ docker compose -f compose.upstream.yaml -f compose.hertz.yaml pull --quiet
 ```
 
 Record each pulled image's immutable repository digest in `images.lock.yaml`,
-with a `services` mapping that overrides every service's `image`. Start with
-all three files and `up -d --no-build`. Continue using the lock file for all
+with a `services` mapping that overrides every service's `image`. On a fresh
+instance, start `web proxy kafka-init` with all three files and `up -d --no-build`,
+let the initial migrations finish, then start the entire stack. Continue using the lock file for all
 subsequent commands; upgrading requires a new explicit source/image selection
 and a backup first. Run `prepare.py` again after the gateway starts, then repeat
 `up -d --no-build`; this binds Django's trusted proxy chain to the actual gateway
