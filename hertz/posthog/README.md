@@ -55,6 +55,22 @@ secret directory. Before importing source data, implement and verify consistent
 database/object-storage backups and restore. The original Amplitude archives
 remain the source of truth until backfill reconciliation succeeds.
 
+Before the first PROD import, run `sudo python3 backup.py`. This takes only this
+PostHog instance offline, checkpoints every exclusively owned volume (including
+anonymous volumes), runtime configuration and private bootstrap credentials,
+and restarts the original running containers. Backups are private under
+`/home/ren/kasanova-archives/posthog/<UTC timestamp>`.
+Run `sudo python3 verify_backup_restore.py <checkpoint path>` to restore all
+volume copies, compare content and ownership, and query isolated PostgreSQL,
+ClickHouse and ZooKeeper containers without connecting to live data mounts.
+Copy the sealed checkpoint to independent storage and verify its hashes too.
+
+This checkpoint command requires an empty PROD project. It does not certify
+steady-state ingestion draining or recurring backup after importing history or
+connecting clients; those remain requirements before connector cutover.
+The generated SeaweedFS bucket bootstrap wrapper forwards shutdown signals to
+the storage process so its persistent volume can be checkpointed cleanly.
+
 PostHog describes this self-hosted deployment as unsupported and offers no data
 loss guarantee. Installation acceptance does not certify migration parity,
 historical recording playback or completion of the PROD Amplitude archive.

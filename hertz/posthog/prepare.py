@@ -67,6 +67,10 @@ def main():
         for old, new in replacements.items():
             content = content.replace(old, new)
         if source == 'docker-compose.base.yml':
+            # The upstream bucket bootstrap shell otherwise swallows SIGTERM.
+            content = content.replace('                WEED_PID=$$!\n',
+                '                WEED_PID=$$!\n'
+                '                trap \'kill -TERM $$WEED_PID; wait $$WEED_PID; exit 0\' TERM INT\n')
             # The gateway joins a shared network whose other projects also use
             # aliases such as "web". Route to this project's unique names.
             content = re.sub(r'(reverse_proxy\s+)([a-z][a-z0-9-]*)(:[0-9]+)',
