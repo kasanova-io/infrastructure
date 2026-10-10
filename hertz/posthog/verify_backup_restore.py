@@ -57,6 +57,17 @@ def main():
         runtime = work / 'runtime'
         runtime.mkdir(mode=0o700)
         run(['tar', '--numeric-owner', '-xpf', str(checkpoint / 'runtime.tar.gz'), '-C', str(runtime)])
+        capture = next(c for c in manifest['containers'] if c['service'] == 'capture')
+        if capture['image'].startswith('sha256:'):
+            receipt_path = runtime / 'custom-images' / ('capture-' + capture['image'].removeprefix('sha256:') + '.tar.json')
+            preserved = json.loads(receipt_path.read_text())
+            archive = receipt_path.parent / preserved['archive_name']
+            if (archive.parent != receipt_path.parent or preserved['runtime_image_id'] != capture['image']
+                or sha(archive) != preserved['archive_sha256']):
+                raise RuntimeError('Restored custom capture image archive differs')
+            report['custom_capture_image_archive_verified'] = True
+            report['custom_capture_image_id'] = preserved['runtime_image_id']
+            save()
         for original in sorted(manifest['volumes']):
             name = restore_id + '_' + hashlib.sha256(original.encode()).hexdigest()[:16]
             run(['docker', 'volume', 'create', '--label', 'io.kasanova.restore_id=' + restore_id, name])
