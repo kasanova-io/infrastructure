@@ -145,7 +145,6 @@ services:
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
-    ports: !reset []
     labels:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
