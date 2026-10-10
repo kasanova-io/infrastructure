@@ -46,7 +46,8 @@ def main(evidence):
         sql = ('SELECT lower(hex(SHA256(toJSONString(tuple(uuid,event,distinct_id,'
             'toUnixTimestamp64Micro(timestamp),properties))))) AS digest FROM posthog.sharded_events '
             + ('FINAL ' if final else '') + 'WHERE team_id=' + str(team)
-            + ' ORDER BY uuid SETTINGS max_threads=2,max_memory_usage=1073741824 FORMAT TSV')
+            + ' ORDER BY uuid SETTINGS max_threads=2,max_final_threads=2,max_block_size=2048,'
+            'max_bytes_before_external_sort=268435456,max_memory_usage=1073741824 FORMAT TSV')
         result = query(sql)
         rows = result.splitlines()
         if len(rows) != proof['logical_prod_rows'] or any(re.fullmatch(rb'[0-9a-f]{64}', row) is None for row in rows):
