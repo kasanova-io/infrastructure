@@ -55,6 +55,12 @@ def main():
         content = (ROOT / 'upstream' / source).read_text()
         for old, new in replacements.items():
             content = content.replace(old, new)
+        if source == 'docker-compose.base.yml':
+            content = content.replace('                ${CADDY_TLS_BLOCK:-}',
+                                      '                ${CADDY_TLS_BLOCK:-}\n'
+                                      '                    servers {\n'
+                                      '                        trusted_proxies static 172.18.0.0/16\n'
+                                      '                    }')
         write_private(ROOT / target, content)
     archive = ROOT / 'upstream-source.tar.gz'
     if not (ROOT / 'upstream-source.json').exists():
@@ -86,7 +92,7 @@ def main():
             directory.chmod(0o755)
     compose = ROOT / 'compose'
     compose.mkdir(exist_ok=True)
-    for name, content in {'start': '#!/bin/bash\nset -e\n./compose/wait\n./bin/migrate\nexec ./bin/docker-server\n',
+    for name, content in {'start': '#!/bin/bash\nset -e\n/compose/wait\n./bin/migrate\nexec ./bin/docker-server\n',
                           'temporal-django-worker': '#!/bin/bash\nset -e\nexec ./bin/temporal-django-worker\n',
                           'wait': '#!/usr/bin/env python3\nimport socket,time\nfor host,port in [("clickhouse",9000),("db",5432)]:\n while True:\n  try:\n   with socket.create_connection((host,port),timeout=5): break\n  except OSError: time.sleep(5)\n'}.items():
         (compose / name).write_text(content)
