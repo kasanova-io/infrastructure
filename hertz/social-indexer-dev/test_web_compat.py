@@ -17,6 +17,8 @@ class HistoricalAuthorCompatibility(unittest.TestCase):
         shutil.copytree(SOURCE / "K-webserver/src", cls.root / "K-webserver/src")
         subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(HERE / "patches/historical-author-keys.patch")], cwd=cls.root, check=True, capture_output=True)
         subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(HERE / "patches/exact-vote-details.patch")], cwd=cls.root, check=True, capture_output=True)
+        shutil.copy2(SOURCE / "K-webserver/Cargo.toml", cls.root / "K-webserver/Cargo.toml")
+        subprocess.run(["patch", "--batch", "--fuzz=0", "-p1", "-i", str(HERE / "patches/content-search.patch")], cwd=cls.root, check=True, capture_output=True)
         cls.handlers = (cls.root / "K-webserver/src/api_handlers.rs").read_text()
 
     @classmethod
@@ -44,6 +46,12 @@ class HistoricalAuthorCompatibility(unittest.TestCase):
         database = (self.root / "K-webserver/src/database_postgres_impl.rs").read_text()
         self.assertIn('" AND b.sender_pubkey = ${}"', database)
         self.assertNotIn("hex_pattern", database)
+
+    def test_actual_search_validator_and_literal_predicate(self):
+        source = self.root / "K-webserver/src/search.rs"
+        binary = self.root / "search-tests"
+        subprocess.run(["rustc", "--edition=2024", "--test", str(source), "-o", str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
 
 
 if __name__ == "__main__":

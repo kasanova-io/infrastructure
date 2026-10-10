@@ -10,6 +10,8 @@ RUN patch --batch --fuzz=0 -p1 < /tmp/historical-author-keys.patch
 RUN cargo test --bin K-webserver historical_author_key_tests && cargo build --release --bin K-webserver
 COPY exact-vote-details.patch /tmp/exact-vote-details.patch
 RUN patch --batch --fuzz=0 -p1 < /tmp/exact-vote-details.patch
+COPY content-search.patch /tmp/content-search.patch
+RUN patch --batch --fuzz=0 -p1 < /tmp/content-search.patch
 RUN cargo test --bin K-webserver && cargo build --release --bin K-webserver
 
 FROM alpine:3.19
@@ -18,5 +20,5 @@ WORKDIR /app
 COPY --from=builder /app/target/release/K-webserver /app/
 USER app
 EXPOSE 3001
-LABEL io.kasanova.social.compatibility="historical-author-keys-v1-exact-vote-v1" org.opencontainers.image.revision="917863f49623aa6802e5ad4c0e246581470d93cb"
+LABEL io.kasanova.social.compatibility="historical-author-keys-v1-exact-vote-v1-content-search-v1" org.opencontainers.image.revision="917863f49623aa6802e5ad4c0e246581470d93cb"
 ENTRYPOINT ["./K-webserver"]
