@@ -1,0 +1,746 @@
+--- a/K-webserver/src/api_handlers.rs
++++ b/K-webserver/src/api_handlers.rs
+@@ -63,6 +63,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Use the new k_contents table method with blocking awareness
+@@ -144,11 +145,39 @@
+             ));
+         }
+ 
++        self.get_posts_watching_filtered(requester_pubkey, limit, before, after, None)
++            .await
++    }
++
++    pub async fn search_posts_paginated(
++        &self,
++        requester: &str,
++        query: &str,
++        limit: u32,
++        before: Option<String>,
++        after: Option<String>,
++    ) -> Result<String, String> {
++        crate::search::validate(query, requester, limit, before.as_deref(), after.as_deref())
++            .map_err(|message| self.create_error_response(message, "INVALID_SEARCH"))?;
++        self.get_posts_watching_filtered(
++            requester, limit, before, after, Some(query.trim().to_owned()),
++        ).await
++    }
++
++    async fn get_posts_watching_filtered(
++        &self,
++        requester_pubkey: &str,
++        limit: u32,
++        before: Option<String>,
++        after: Option<String>,
++        search_text: Option<String>,
++    ) -> Result<String, String> {
+         let options = QueryOptions {
+             limit: Some(limit as u64),
+             before,
+             after,
+             sort_descending: true,
++            search_text,
+         };
+ 
+         // Use the new k_contents table query method with blocking awareness
+@@ -229,6 +258,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Get content from followed users
+@@ -290,6 +320,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         let broadcasts_result = match self.db.get_all_users(requester_pubkey, options).await {
+@@ -379,6 +410,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         let result = match self
+@@ -454,6 +486,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Keep exact author bytes; an x-only key is not a guessed compressed key.
+@@ -564,6 +597,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Use the new k_contents table method with blocking awareness
+@@ -658,6 +692,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Use the new k_contents table method with blocking awareness
+@@ -757,6 +792,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Use the new k_contents table method with blocking awareness
+@@ -873,6 +909,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Use the new k_contents table method to get notifications with content details
+@@ -1258,6 +1295,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         let broadcasts_result = match self
+@@ -1352,6 +1390,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         let broadcasts_result = match self
+@@ -1455,6 +1494,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         let broadcasts_result = match self
+@@ -1558,6 +1598,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         let broadcasts_result = match self
+@@ -1748,6 +1789,7 @@
+             before,
+             after,
+             sort_descending: true,
++            search_text: None,
+         };
+ 
+         // Get content with this hashtag
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -1275,6 +1275,13 @@
+             }
+         }
+ 
++        let search_condition = if options.search_text.is_some() {
++            bind_count += 1;
++            crate::search::condition(bind_count)
++        } else {
++            String::new()
++        };
++
+         let order_clause = if options.sort_descending {
+             " ORDER BY c.block_time DESC, c.id DESC"
+         } else {
+@@ -1296,7 +1303,7 @@
+                 FROM k_contents c
+                 LEFT JOIN k_blocks kb ON kb.sender_pubkey = $1 AND kb.blocked_user_pubkey = c.sender_pubkey
+                 WHERE c.content_type IN ('post', 'quote')
+-                  AND kb.blocked_user_pubkey IS NULL{cursor_conditions}
++                  AND kb.blocked_user_pubkey IS NULL{cursor_conditions}{search_condition}
+                 {order_clause}
+                 LIMIT ${limit_param}
+             ), post_stats AS (
+@@ -1393,6 +1400,9 @@
+             }
+         }
+ 
++        if let Some(search_text) = &options.search_text {
++            query_builder = query_builder.bind(search_text);
++        }
+         query_builder = query_builder.bind(offset_limit);
+ 
+         let rows = query_builder
+--- a/K-webserver/src/database_trait.rs
++++ b/K-webserver/src/database_trait.rs
+@@ -38,6 +38,7 @@
+     pub before: Option<String>, // Compound cursors like "timestamp_id"
+     pub after: Option<String>,  // Compound cursors like "timestamp_id"
+     pub sort_descending: bool,
++    pub search_text: Option<String>,
+ }
+ 
+ impl Default for QueryOptions {
+@@ -47,6 +48,7 @@
+             before: None,
+             after: None,
+             sort_descending: true,
++            search_text: None,
+         }
+     }
+ }
+--- a/K-webserver/src/main.rs
++++ b/K-webserver/src/main.rs
+@@ -4,6 +4,7 @@
+ mod database_trait;
+ mod models;
+ mod web_server;
++mod search;
+ 
+ use clap::Parser;
+ use config::AppConfig;
+@@ -156,3 +157,6 @@
+ 
+     Ok(())
+ }
++
++#[cfg(all(test, feature = "search-contract"))]
++mod search_contract_tests;
+--- /dev/null
++++ b/K-webserver/src/search.rs
+@@ -0,0 +1,107 @@
++// Bounded, literal text search. Never decode untrusted historical bytes to SQL
++// text until both the Base64 structure and PostgreSQL-compatible UTF-8 pass.
++pub fn validate(
++    query: &str,
++    requester: &str,
++    limit: u32,
++    before: Option<&str>,
++    after: Option<&str>,
++) -> Result<(), &'static str> {
++    let query = query.trim();
++    if !(2..=200).contains(&query.chars().count()) || query.contains('\0') {
++        return Err("Query must contain 2 to 200 characters.");
++    }
++    if requester.len() != 66
++        || !(requester.starts_with("02") || requester.starts_with("03"))
++        || !requester.bytes().all(|b| b.is_ascii_hexdigit())
++    {
++        return Err("A compressed requester public key is required.");
++    }
++    if !(1..=100).contains(&limit) {
++        return Err("Limit must be between 1 and 100.");
++    }
++    if before.is_some() && after.is_some() {
++        return Err("Use only one cursor direction.");
++    }
++    for cursor in [before, after].into_iter().flatten() {
++        let valid = cursor
++            .split_once('_')
++            .map(|(stamp, id)| {
++                !stamp.is_empty()
++                    && !id.is_empty()
++                    && stamp.bytes().all(|b| b.is_ascii_digit())
++                    && id.bytes().all(|b| b.is_ascii_digit())
++                    && stamp.parse::<i64>().is_ok_and(|n| n >= 0)
++                    && id.parse::<i64>().is_ok_and(|n| n > 0)
++            })
++            .unwrap_or(false);
++        if !valid {
++            return Err("Invalid search cursor.");
++        }
++    }
++    Ok(())
++}
++
++pub fn condition(parameter: usize) -> String {
++    // Base64 whitespace is allowed by PostgreSQL and the protocol decoder.
++    // The nested CASEs are intentional: SQL AND does not guarantee evaluation order.
++    // Hex UTF-8 alternatives: non-NUL ASCII; valid 2/3/4-byte sequences, excluding
++    // overlong encodings, surrogate codepoints, and values above U+10FFFF.
++    let encoded = "regexp_replace(c.base64_encoded_message, E'[\\n\\r\\t ]', '', 'g')";
++    let utf8 = "^(0[1-9a-f]|[1-7][0-9a-f]|(c[2-9a-f]|d[0-9a-f])[89ab][0-9a-f]|e0[ab][0-9a-f][89ab][0-9a-f]|e[1-9abcef]([89ab][0-9a-f]){2}|ed[89][0-9a-f][89ab][0-9a-f]|f0[9ab][0-9a-f]([89ab][0-9a-f]){2}|f[1-3]([89ab][0-9a-f]){3}|f48[0-9a-f]([89ab][0-9a-f]){2})*$";
++    format!(
++        " AND strpos(lower(CASE WHEN {encoded} ~ '^([A-Za-z0-9+/]{{4}})*([A-Za-z0-9+/]{{2}}==|[A-Za-z0-9+/]{{3}}=)?$' THEN CASE WHEN encode(decode({encoded}, 'base64'), 'hex') ~ '{utf8}' THEN convert_from(decode({encoded}, 'base64'), 'UTF8') END END), lower(${parameter})) > 0"
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn viewer() -> String {
++        format!("02{}", "a".repeat(64))
++    }
++    #[test]
++    fn bounds_and_unicode_are_validated() {
++        for q in ["Kaspa", "100%_", "日本", "🦊🌊", "a'b\\c"] {
++            assert!(validate(q, &viewer(), 10, None, None).is_ok());
++        }
++        assert!(validate(&"界".repeat(200), &viewer(), 100, None, None).is_ok());
++        for q in ["", " a ", "\0x", &"界".repeat(201)] {
++            assert!(validate(q, &viewer(), 10, None, None).is_err());
++        }
++        for limit in [0, 101, u32::MAX] {
++            assert!(validate("kaspa", &viewer(), limit, None, None).is_err());
++        }
++    }
++    #[test]
++    fn requester_and_cursors_fail_closed() {
++        for key in [
++            "a".repeat(64),
++            format!("04{}", "a".repeat(64)),
++            format!("02{}", "z".repeat(64)),
++        ] {
++            assert!(validate("kaspa", &key, 10, None, None).is_err());
++        }
++        for cursor in [
++            "",
++            "1",
++            "1_hex",
++            "1_0",
++            "-1_2",
++            "1_2_3",
++            "9223372036854775808_1",
++        ] {
++            assert!(validate("kaspa", &viewer(), 10, Some(cursor), None).is_err());
++        }
++        assert!(validate("kaspa", &viewer(), 10, Some("1791491000000_5"), None).is_ok());
++        assert!(validate("kaspa", &viewer(), 10, Some("1_2"), Some("2_3")).is_err());
++    }
++    #[test]
++    fn predicate_uses_bound_literal_substring() {
++        let sql = condition(4);
++        assert!(sql.contains("lower($4)"));
++        assert!(sql.contains("strpos("));
++        assert!(!sql.contains("ILIKE"));
++        assert!(sql.contains("CASE WHEN"));
++    }
++}
+--- /dev/null
++++ b/K-webserver/src/search_contract_tests.rs
+@@ -0,0 +1,317 @@
++// Executes the actual production API handler and SQL query against a disposable
++// database. Only connection-local temporary tables are created or written.
++use crate::{api_handlers::ApiHandlers, database_postgres_impl::PostgresDbManager};
++use sqlx::postgres::PgPoolOptions;
++use std::sync::Arc;
++use tower::ServiceExt;
++
++#[tokio::test]
++async fn production_search_database_contract() {
++    let url =
++        std::env::var("SOCIAL_SEARCH_TEST_DATABASE_URL").expect("isolated test database required");
++    let pool = PgPoolOptions::new()
++        .max_connections(1)
++        .acquire_timeout(std::time::Duration::from_secs(5))
++        .connect(&url)
++        .await
++        .unwrap();
++    let database: String = sqlx::query_scalar("SELECT current_database()")
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++    assert_eq!(
++        database, "social_search_contract",
++        "refuse non-test database"
++    );
++    for sql in [
++        "SET statement_timeout='5s'",
++        "CREATE TEMP TABLE k_contents (id bigint, transaction_id bytea, block_time bigint, sender_pubkey bytea, sender_signature bytea, base64_encoded_message text, content_type text, referenced_content_id bytea)",
++        "CREATE TEMP TABLE k_blocks (sender_pubkey bytea, blocked_user_pubkey bytea)",
++        "CREATE TEMP TABLE k_votes (post_id bytea, sender_pubkey bytea, vote text)",
++        "CREATE TEMP TABLE k_mentions (content_id bytea, content_type text, mentioned_pubkey bytea)",
++        "CREATE TEMP TABLE k_broadcasts (sender_pubkey bytea, base64_encoded_nickname text, base64_encoded_profile_image text)",
++    ] {
++        sqlx::query(sql).execute(&pool).await.unwrap();
++    }
++    let viewer = format!("02{}", "a".repeat(64));
++    let author = format!("03{}", "b".repeat(64));
++    let blocked = format!("02{}", "c".repeat(64));
++    async fn insert(
++        pool: &sqlx::PgPool,
++        id: i64,
++        stamp: i64,
++        key: &str,
++        bytes: &[u8],
++        kind: &str,
++        parent: Option<&str>,
++    ) {
++        sqlx::query("INSERT INTO k_contents VALUES($1,decode(lpad(to_hex($1),64,'0'),'hex'),$2,decode($3,'hex'),decode(repeat('00',64),'hex'),encode($4,'base64'),$5,decode($6,'hex'))")
++            .bind(id).bind(stamp).bind(key).bind(bytes).bind(kind).bind(parent).execute(pool).await.unwrap();
++    }
++    insert(&pool, 1, 100, &author, b"Kaspa 100%_ literal", "post", None).await;
++    insert(
++        &pool,
++        2,
++        100,
++        &author,
++        "日本 🌊 Kaspa".as_bytes(),
++        "quote",
++        Some(&format!("{:064x}", 1)),
++    )
++    .await;
++    insert(&pool, 3, 101, &blocked, b"Kaspa hidden", "post", None).await;
++    insert(
++        &pool,
++        4,
++        102,
++        &author,
++        b"Kaspa reply",
++        "reply",
++        Some(&format!("{:064x}", 1)),
++    )
++    .await;
++    insert(
++        &pool,
++        5,
++        103,
++        &author,
++        b"unrelated newest row",
++        "post",
++        None,
++    )
++    .await;
++    for (i, bytes) in [
++        vec![0xff],
++        vec![0xc0, 0xaf],
++        vec![0xed, 0xa0, 0x80],
++        vec![0xf4, 0x90, 0x80, 0x80],
++        vec![0],
++        vec![0xe2, 0x82],
++    ]
++    .iter()
++    .enumerate()
++    {
++        let mut text = b"Kaspa ".to_vec();
++        text.extend(bytes);
++        insert(
++            &pool,
++            10 + i as i64,
++            200 + i as i64,
++            &author,
++            &text,
++            "post",
++            None,
++        )
++        .await;
++    }
++    sqlx::query("UPDATE k_contents SET base64_encoded_message='!!!!' WHERE id=5")
++        .execute(&pool)
++        .await
++        .unwrap();
++    sqlx::query("INSERT INTO k_blocks VALUES(decode($1,'hex'),decode($2,'hex'))")
++        .bind(&viewer)
++        .bind(&blocked)
++        .execute(&pool)
++        .await
++        .unwrap();
++    sqlx::query("INSERT INTO k_broadcasts VALUES(decode($1,'hex'),encode(convert_to('Little kas','UTF8'),'base64'),NULL)").bind(&author).execute(&pool).await.unwrap();
++    sqlx::query(
++        "INSERT INTO k_votes VALUES(decode(lpad('1',64,'0'),'hex'),decode($1,'hex'),'upvote')",
++    )
++    .bind(&viewer)
++    .execute(&pool)
++    .await
++    .unwrap();
++    let api = ApiHandlers::new(Arc::new(PostgresDbManager { pool: pool.clone() }));
++    macro_rules! run {
++        ($q:expr, $limit:expr, $before:expr) => {
++            api.search_posts_paginated(&viewer, $q, $limit, $before, None)
++        };
++    }
++    // Filter precedes LIMIT, block rules remain viewer-specific, malformed rows
++    // cannot abort the query, and equal-time pages preserve numeric row cursors.
++    let first: serde_json::Value =
++        serde_json::from_str(&run!("kaspa", 1, None).await.unwrap()).unwrap();
++    assert_eq!(first["posts"].as_array().unwrap().len(), 1);
++    assert_eq!(first["posts"][0]["id"], format!("{:064x}", 2));
++    assert_eq!(first["pagination"]["nextCursor"], "100_2");
++    assert_eq!(first["posts"][0]["userNickname"], "TGl0dGxlIGthcw==");
++    assert_eq!(
++        first["posts"][0]["quote"]["referencedContentId"],
++        format!("{:064x}", 1)
++    );
++    let next: serde_json::Value =
++        serde_json::from_str(&run!("kaspa", 1, Some("100_2".into())).await.unwrap()).unwrap();
++    assert_eq!(next["posts"][0]["id"], format!("{:064x}", 1));
++    assert_eq!(next["posts"][0]["repliesCount"], 1);
++    assert_eq!(next["posts"][0]["upVotesCount"], 1);
++    assert_eq!(next["posts"][0]["isUpvoted"], true);
++    assert_eq!(next["pagination"]["hasMore"], false);
++    for q in ["100%_", "日本", "🌊 Kaspa"] {
++        let data: serde_json::Value =
++            serde_json::from_str(&run!(q, 10, None).await.unwrap()).unwrap();
++        assert_eq!(data["posts"].as_array().unwrap().len(), 1, "{q}");
++    }
++    let absent: serde_json::Value =
++        serde_json::from_str(&run!("%_x", 10, None).await.unwrap()).unwrap();
++    assert_eq!(absent["posts"].as_array().unwrap().len(), 0);
++    assert!(run!("kaspa", 10, Some("bad_cursor".into())).await.is_err());
++    let other: serde_json::Value = serde_json::from_str(
++        &api.search_posts_paginated(&author, "kaspa", 10, None, None)
++            .await
++            .unwrap(),
++    )
++    .unwrap();
++    assert_eq!(
++        other["posts"].as_array().unwrap().len(),
++        3,
++        "block exclusion is requester scoped"
++    );
++    let after: serde_json::Value = serde_json::from_str(
++        &api.search_posts_paginated(&viewer, "kaspa", 10, None, Some("100_1".into()))
++            .await
++            .unwrap(),
++    )
++    .unwrap();
++    assert_eq!(after["posts"].as_array().unwrap().len(), 1);
++    assert_eq!(after["posts"][0]["id"], format!("{:064x}", 2));
++    for q in ["' OR 1=1 --", "100__", "%literal%"] {
++        let data: serde_json::Value =
++            serde_json::from_str(&run!(q, 10, None).await.unwrap()).unwrap();
++        assert!(
++            data["posts"].as_array().unwrap().is_empty(),
++            "literal query {q}"
++        );
++    }
++    // Cover each UTF-8 width and critical boundary rather than accepting only
++    // the Japanese and emoji fixture. All bytes come from valid Rust strings.
++    for (i, text) in [
++        "edge \u{1}",
++        "edge \u{7f}",
++        "edge \u{80}",
++        "edge \u{7ff}",
++        "edge \u{800}",
++        "edge \u{d7ff}",
++        "edge \u{e000}",
++        "edge \u{ffff}",
++        "edge \u{10000}",
++        "edge \u{10ffff}",
++    ]
++    .iter()
++    .enumerate()
++    {
++        insert(
++            &pool,
++            30 + i as i64,
++            300 + i as i64,
++            &author,
++            text.as_bytes(),
++            "post",
++            None,
++        )
++        .await;
++    }
++    let edges: serde_json::Value =
++        serde_json::from_str(&run!("edge", 100, None).await.unwrap()).unwrap();
++    assert_eq!(edges["posts"].as_array().unwrap().len(), 10);
++    for (i, b64) in [
++        "a", "aaa", "a===", "====", "a=aa", "AAAA=", "AA=A", "AAA!", "AA==AAAA",
++    ]
++    .iter()
++    .enumerate()
++    {
++        insert(
++            &pool,
++            50 + i as i64,
++            400,
++            &author,
++            b"placeholder",
++            "post",
++            None,
++        )
++        .await;
++        sqlx::query("UPDATE k_contents SET base64_encoded_message=$1 WHERE id=$2")
++            .bind(b64)
++            .bind(50 + i as i64)
++            .execute(&pool)
++            .await
++            .unwrap();
++    }
++    // Actual Axum router extraction/status/serialization against the same real
++    // production database, without opening an HTTP socket.
++    let server = crate::web_server::WebServer::new(
++        Arc::new(PostgresDbManager { pool: pool.clone() }),
++        crate::config::ServerConfig {
++            bind_address: "unused".into(),
++            request_timeout: 5,
++            rate_limit: 1000,
++        },
++    )
++    .await;
++    let router = server.create_router();
++    for (suffix, status, count) in [
++        (
++            format!("query=kaspa&requesterPubkey={viewer}&limit=1"),
++            200,
++            Some(1),
++        ),
++        (
++            format!("query=100%25_&requesterPubkey={viewer}"),
++            200,
++            Some(1),
++        ),
++        (
++            format!("query=%E6%97%A5%E6%9C%AC&requesterPubkey={viewer}"),
++            200,
++            Some(1),
++        ),
++        (
++            format!("query=kaspa&requesterPubkey={viewer}&before=100_2"),
++            200,
++            Some(1),
++        ),
++        (
++            format!("query=kaspa&requesterPubkey={viewer}&before=garbage"),
++            400,
++            None,
++        ),
++        (
++            format!("query=kaspa&requesterPubkey={viewer}&limit=0"),
++            400,
++            None,
++        ),
++        (
++            format!("query=kaspa&requesterPubkey={viewer}&limit=101"),
++            400,
++            None,
++        ),
++        (
++            format!("query=kaspa&requesterPubkey={viewer}&limit=nope"),
++            400,
++            None,
++        ),
++        (format!("query=x&requesterPubkey={viewer}"), 400, None),
++        (format!("requesterPubkey={viewer}"), 400, None),
++        ("query=kaspa".into(), 400, None),
++        ("query=kaspa&requesterPubkey=bad".into(), 400, None),
++    ] {
++        let request = axum::http::Request::builder()
++            .uri(format!("/search-posts?{suffix}"))
++            .extension(axum::extract::ConnectInfo(
++                "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
++            ))
++            .body(axum::body::Body::empty())
++            .unwrap();
++        let response = router.clone().oneshot(request).await.unwrap();
++        assert_eq!(response.status().as_u16(), status, "{suffix}");
++        if let Some(count) = count {
++            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
++                .await
++                .unwrap();
++            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
++            assert_eq!(json["posts"].as_array().unwrap().len(), count, "{suffix}");
++            assert!(json["pagination"].is_object());
++        }
++    }
++    pool.close().await;
++}
+--- a/K-webserver/src/web_server.rs
++++ b/K-webserver/src/web_server.rs
+@@ -65,6 +65,16 @@
+ }
+ 
+ #[derive(Debug, Deserialize)]
++struct SearchPostsQuery {
++    query: Option<String>,
++    #[serde(rename = "requesterPubkey")]
++    requester_pubkey: Option<String>,
++    limit: Option<u32>,
++    before: Option<String>,
++    after: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
+ struct GetPostsWatchingQuery {
+     #[serde(rename = "requesterPubkey")]
+     requester_pubkey: Option<String>,
+@@ -246,6 +256,7 @@
+             .route("/get-post-details", get(handle_get_post_details))
+             .route("/get-vote-details", get(handle_get_vote_details))
+             .route("/get-posts-watching", get(handle_get_posts_watching))
++            .route("/search-posts", get(handle_search_posts))
+             .route(
+                 "/get-contents-following",
+                 get(handle_get_contents_following),
+@@ -2153,3 +2164,52 @@
+         }
+     }
+ }
++
++async fn handle_search_posts(
++    ConnectInfo(addr): ConnectInfo<SocketAddr>,
++    State(app_state): State<Arc<AppState>>,
++    Query(params): Query<SearchPostsQuery>,
++) -> Result<Json<PaginatedPostsResponse>, (StatusCode, Json<ApiError>)> {
++    check_rate_limit(&app_state, addr).await?;
++    let query = params.query.as_deref().unwrap_or("");
++    let requester = params.requester_pubkey.as_deref().unwrap_or("");
++    let limit = params.limit.unwrap_or(10);
++    crate::search::validate(
++        query,
++        requester,
++        limit,
++        params.before.as_deref(),
++        params.after.as_deref(),
++    )
++    .map_err(|message| {
++        (
++            StatusCode::BAD_REQUEST,
++            Json(ApiError {
++                error: message.to_string(),
++                code: "INVALID_SEARCH".to_string(),
++            }),
++        )
++    })?;
++    let result = app_state
++        .api_handlers
++        .search_posts_paginated(requester, query, limit, params.before, params.after)
++        .await
++        .map_err(|_| {
++            (
++                StatusCode::INTERNAL_SERVER_ERROR,
++                Json(ApiError {
++                    error: "Could not search posts.".to_string(),
++                    code: "DATABASE_ERROR".to_string(),
++                }),
++            )
++        })?;
++    serde_json::from_str(&result).map(Json).map_err(|_| {
++        (
++            StatusCode::INTERNAL_SERVER_ERROR,
++            Json(ApiError {
++                error: "Could not serialize posts.".to_string(),
++                code: "SERIALIZATION_ERROR".to_string(),
++            }),
++        )
++    })
++}
+--- a/K-webserver/Cargo.toml
++++ b/K-webserver/Cargo.toml
+@@ -18,4 +18,7 @@
+ hex = "0.4"
+ clap = { version = "4.5.48", features = ["derive"] }
+ axum-prometheus = "0.9"
+-base64ct = "1.8.0"
+\ No newline at end of file
++base64ct = "1.8.0"
++
++[features]
++search-contract = []

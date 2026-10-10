@@ -1,0 +1,6 @@
+# Insert inside miniapps.kasanova.io, before file_server; validate before reload.
+# BEGIN KSNV-411 Social PROD API
+handle_path /social-api/* {
+    reverse_proxy social_indexer_prod_web:3001
+}
+# END KSNV-411 Social PROD API
