@@ -155,6 +155,28 @@ The 121-event DEV validation covers all 120 observed source event types and the
 newest event boundary. It does not certify the full PROD backfill, current-profile
 restoration, future SDK identity continuity, chart/cohort parity or replay playback.
 
+## Recreate archived behavioral cohorts
+
+`recreate_analytics_cohorts.py` recreates the six audited PROD cohort definitions
+using normal owner-authenticated PostHog APIs. It does not call Amplitude or write
+PROD events. Keep its archived cohort/taxonomy inputs and evidence private.
+Run `plan`, then `validate-dev`, then `apply-prod` with the same inputs and evidence
+directory. PROD creation requires the matching successful DEV certificate.
+
+The native catch-all action `All analytics events` matches future event names too.
+Each dynamic cohort uses a supported behavioral filter with a HogQL event filter
+for rolling windows, first-ever activity and the 14-to-less-than-15-day retention
+bracket. It excludes archived inactive event types from activity, while first-seen
+activity includes them. Native calculations refresh through PostHog's existing
+cohort scheduler. Membership is computed from imported history, not copied from
+an unavailable vendor membership export; older cached vendor counts need not match.
+
+DEV acceptance uses explicitly named synthetic identities and temporary validation
+cohorts, checks positive/negative membership and retention boundaries through native
+queries, and checks that no fixtures reached PROD. Owned objects are reused on
+retries; unrelated actions and cohorts are preserved. The completed evidence contains
+native definitions and counts. Recreating cohorts does not switch the app connector.
+
 ## Numeric precision
 
 The original capture image used `serde_json` 1.0.149 with its default best-effort
