@@ -100,6 +100,20 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
     def count():
         return int(query('SELECT uniqExact(uuid) AS n FROM posthog.events WHERE team_id=' + str(team))[0]['n'])
 
+    def persisted_progress():
+        # A repair keeps the same UUIDs, so the existing unique count cannot
+        # measure newly persisted batches. Require ingestion versions from this
+        # repair instead, including when resuming its acknowledged checkpoint.
+        cutoff = state.get('repair_ingestion_cutoff')
+        if cutoff:
+            parsed = dt.datetime.fromisoformat(cutoff)
+            if parsed.tzinfo != dt.timezone.utc:
+                raise RuntimeError('Invalid repair ingestion cutoff')
+            sql_time = parsed.strftime('%Y-%m-%d %H:%M:%S')
+            return int(query('SELECT uniqExact(uuid) AS n FROM posthog.events WHERE team_id=' + str(team)
+                + " AND _timestamp >= toDateTime('" + sql_time + "', 'UTC')")[0]['n'])
+        return count()
+
     with (ROOT / 'operations/.backup.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if repair_unaccepted:
@@ -115,7 +129,8 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
             state.setdefault('repair_attempts', []).append({'started_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                 'previous_acknowledged_records': state['acknowledged_records'],
                 'strategy': 'Reingest identical UUID/name/timestamp/distinct_id tuples after the parser correction; newer _timestamp versions replace prior values'})
-            state.update(acknowledged_records=0, state='repair_prepared')
+            state.update(acknowledged_records=0, state='repair_prepared',
+                repair_ingestion_cutoff=(dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=2)).isoformat())
             atomic_json(state_path, state)
         if state['acknowledged_records'] == 0 and not state_path.exists() and count() != 0:
             raise RuntimeError('Fresh offline backfill requires empty PROD')
@@ -177,7 +192,7 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
                         print(json.dumps({'acknowledged_records': state['acknowledged_records'], 'expected_records': total}), flush=True)
                         # Bound outstanding ingestion work on the shared host.
                         for attempt in range(180):
-                            if count() >= state['acknowledged_records'] - 5000: break
+                            if persisted_progress() >= state['acknowledged_records'] - 5000: break
                             time.sleep(2)
                         else: raise RuntimeError('Ingestion backlog did not drain; import paused')
 
@@ -190,7 +205,7 @@ def main(directory, evidence, verify_only=False, repair_unaccepted=False):
                             send(batch); batch = []
                     if batch: send(batch)
             for attempt in range(180):
-                if count() >= total: break
+                if persisted_progress() >= total: break
                 time.sleep(2)
             else: raise RuntimeError('Acknowledged events are not fully queryable')
             state['state'] = 'verifying_persisted_fields'
