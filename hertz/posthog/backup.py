@@ -128,7 +128,7 @@ def main():
                                             ('redis7', 'valkey', 'objectstorage', 'seaweedfs', 'elasticsearch'), ('db',))]
             for group in (proxy, apps, *ordered_stores):
                 if group:
-                    run(['docker', 'stop', '--time', '15' if group == proxy else '30' if group == apps else '120', *group])
+                    run(['docker', 'stop', '--time', '15' if group == proxy else '90' if group == apps else '120', *group])
             states = json.loads(run(['docker', 'inspect', *ids]))
             report['shutdown_exit_codes'] = {c['Config']['Labels']['com.docker.compose.service']: c['State']['ExitCode'] for c in states}
             save(backup / 'shutdown-results.json', report['shutdown_exit_codes'])

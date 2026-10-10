@@ -40,8 +40,13 @@ Create the DNS A record for this hostname pointing to Hertz.
 Only the PostHog gateway joins `caddy_caddy_net`. Databases and supporting APIs
 have no published ports. The gateway also binds `127.0.0.1:18084` for host health
 checks. `/_health` and `/login` must respond successfully over public HTTPS.
-Verify a dedicated setup project can ingest and query a diagnostic event, and
+Verify DEV can ingest and query a diagnostic event, and
 verify DEV and PROD project keys and data are separate before app integration.
+The installed hobby build refuses additional projects through its normal API.
+The existing PROD and DEV projects have passed capture/query isolation checks;
+this does not establish that multiple projects are a supported free deployment.
+Resolve that deployment constraint before connector cutover. Do not enable paid
+features by changing license data or create a paid subscription implicitly.
 
 ## Data and operations
 
@@ -70,6 +75,39 @@ steady-state ingestion draining or recurring backup after importing history or
 connecting clients; those remain requirements before connector cutover.
 The generated SeaweedFS bucket bootstrap wrapper forwards shutdown signals to
 the storage process so its persistent volume can be checkpointed cleanly.
+Rust services replace their entrypoint shell with the actual binary using `exec`;
+this delivers Docker's stop signal to the service instead of forcing termination
+after a shell ignores it. Allow 90 seconds for their coordinated shutdown.
+
+## Prepare and validate historical events
+
+`prepare_amplitude_import.py` prepares a new private import directory from sealed
+PROD source components and the audited canonical identity map. It checks original
+export hashes, record counts and UUID uniqueness, and sorts events chronologically.
+It preserves event names, UUIDs, timestamps and original typed event properties.
+Each envelope includes the complete original record bytes and their checksum;
+event-time user properties and original session/device fields remain recoverable.
+Native session IDs are deterministic UUIDv7 values. Preparation never sends data.
+
+`validate_amplitude_import.py` captures a representative sample and compares the
+persisted UUID, name, timestamp, identity, source bytes, event/user properties and
+session mapping. A separate project is preferred but the hobby API currently
+rejects that creation. `--existing-dev-fixtures` requires explicit fixture markers
+and separate test identities; fixture UUIDs must also be distinct from source
+UUIDs. Those fixtures still contain private original source records. Keep their
+files and evidence private, and record that DEV contains migration test fixtures.
+The validator checks that fixture UUIDs are absent from PROD and does not resend
+an acknowledged sample when resumed with the same evidence directory.
+
+Run the offline contract checks with:
+
+```sh
+python3 -m unittest discover -s . -p test_amplitude_import.py -v
+```
+
+The 121-event DEV validation covers all 120 observed source event types and the
+newest event boundary. It does not certify the full PROD backfill, current-profile
+restoration, future SDK identity continuity, chart/cohort parity or replay playback.
 
 PostHog describes this self-hosted deployment as unsupported and offers no data
 loss guarantee. Installation acceptance does not certify migration parity,

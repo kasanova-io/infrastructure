@@ -238,6 +238,8 @@ services:
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
       GRANIAN_WORKERS: "2"
   capture:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -246,6 +248,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   capture-logs:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -254,6 +258,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   replay-capture:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -262,6 +268,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   property-defs-rs:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -270,6 +278,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   property-defs-ai:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -286,6 +296,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   personhog-replica:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -294,6 +306,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   personhog-router:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -302,6 +316,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   feature-flags:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -310,6 +326,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   hypercache-server:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -326,6 +344,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   cymbal:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
@@ -334,6 +354,8 @@ services:
       io.kasanova.service: posthog
       io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?Set DEPLOYMENT_REVISION}
   cymbal-resolution:
+    entrypoint: ["/bin/sh", "-c", "exec /usr/local/bin/$$BIN"]
+    stop_grace_period: 90s
     cgroup_parent: kasanova-posthog.slice
     restart: unless-stopped
     build: !reset null
