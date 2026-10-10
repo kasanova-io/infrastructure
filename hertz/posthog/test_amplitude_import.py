@@ -5,6 +5,7 @@ import unittest
 import uuid
 
 from prepare_amplitude_import import RAW, SHA, USER, convert, session_key, session_uuid, time_us
+from import_amplitude_events import compare
 
 class ImportContractTest(unittest.TestCase):
     def setUp(self):
@@ -52,5 +53,29 @@ class ImportContractTest(unittest.TestCase):
         self.source['session_id']=-1
         _,n=self.native();self.assertNotIn('$session_id',n['properties'])
         self.assertEqual(json.loads(n['properties'][RAW])['session_id'],-1)
+    def persisted(self, expected):
+        return {'event':expected['event'],'distinct_id':expected['distinct_id'],
+                'timestamp_us':str(time_us(expected['timestamp'])),
+                'properties':json.dumps(expected['properties'])}
+    def test_full_reconciliation_accepts_preserved_native_record(self):
+        _,expected=self.native()
+        compare(self.persisted(expected),expected)
+    def test_full_reconciliation_rejects_timestamp_or_identity_drift(self):
+        _,expected=self.native()
+        for field,value in [('timestamp_us',time_us(expected['timestamp'])+1),('distinct_id','another-user')]:
+            persisted=self.persisted(expected);persisted[field]=value
+            with self.assertRaises(RuntimeError):compare(persisted,expected)
+    def test_full_reconciliation_rejects_boolean_number_coercion(self):
+        self.source['event_properties']['bool']=True
+        _,expected=self.native();persisted=self.persisted(expected)
+        properties=json.loads(persisted['properties']);properties['bool']=1
+        persisted['properties']=properties
+        with self.assertRaises(RuntimeError):compare(persisted,expected)
+    def test_full_reconciliation_rejects_raw_record_or_session_drift(self):
+        _,expected=self.native()
+        for field,value in [(RAW,expected['properties'][RAW].rstrip()),('$session_id',str(uuid.uuid4()))]:
+            persisted=self.persisted(expected);properties=json.loads(persisted['properties'])
+            properties[field]=value;persisted['properties']=properties
+            with self.assertRaises(RuntimeError):compare(persisted,expected)
 
 if __name__=='__main__':unittest.main()

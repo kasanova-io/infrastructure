@@ -70,7 +70,12 @@ volume copies, compare content and ownership, and query isolated PostgreSQL,
 ClickHouse and ZooKeeper containers without connecting to live data mounts.
 Copy the sealed checkpoint to independent storage and verify its hashes too.
 
-This checkpoint command requires an empty PROD project. It does not certify
+The initial checkpoint requires an empty PROD project. After a fully reconciled
+offline event backfill, `--offline-import-reconciliation <reconciliation.json>`
+allows that imported history to be checkpointed too. It stops the public gateway
+and capture services, requires clean capture/ingestion exits and zero lag for
+every consumer group, and rejects events that change during the drain.
+It does not certify
 steady-state ingestion draining or recurring backup after importing history or
 connecting clients; those remain requirements before connector cutover.
 The generated SeaweedFS bucket bootstrap wrapper forwards shutdown signals to
@@ -99,10 +104,20 @@ files and evidence private, and record that DEV contains migration test fixtures
 The validator checks that fixture UUIDs are absent from PROD and does not resend
 an acknowledged sample when resumed with the same evidence directory.
 
+`import_amplitude_events.py <prepared directory> <evidence directory>` performs
+an offline PROD backfill. It checks the entire compressed source before sending,
+requires empty PROD on the first invocation, retains acknowledged offsets, bounds
+ingestion backlog and stops on uncertain delivery. Resume with the identical
+source and evidence directory; deterministic source UUIDs support deduplication.
+It then compares every logical persisted event with its original envelope through
+the owned ClickHouse container, including exact original record bytes, typed
+properties and microsecond timestamps. `--verify-only` repeats comparison without
+capturing events. The importer and backup share an exclusive runtime lock.
+
 Run the offline contract checks with:
 
 ```sh
-python3 -m unittest discover -s . -p test_amplitude_import.py -v
+python3 -m unittest discover -s . -p 'test_*.py' -v
 ```
 
 The 121-event DEV validation covers all 120 observed source event types and the
