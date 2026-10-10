@@ -56,11 +56,11 @@ services:
       start_period: 60s
   processor:
     <<: *service
-    image: kasanova/social-processor:${SOURCE_REVISION:?required}
+    image: ${SOCIAL_PROCESSOR_IMAGE:?tested immutable image ID required}
     pull_policy: never
     build:
-      context: ../../vendor/k-indexer
-      dockerfile: docker/DEV/Dockerfile.K-transaction-processor
+      context: ../social-indexer-processor/.processor-build
+      dockerfile: Dockerfile
       labels:
         org.opencontainers.image.revision: ${SOURCE_REVISION:?required}
     command: [--upgrade-db, --network, '${SOCIAL_NETWORK:?required}', --db-host, database, --db-port, '5432', --db-name, social, --db-user, social, --db-password, '${DB_PASSWORD:?required}', --db-max-connections, '6', --workers, '2']

@@ -1,0 +1,76 @@
+--- a/K-transaction-processor/src/k_protocol.rs
++++ b/K-transaction-processor/src/k_protocol.rs
+@@ -1138,19 +1138,46 @@
+         let sender_pubkey_bytes = hex::decode(&k_broadcast.sender_pubkey)?;
+         let sender_signature_bytes = hex::decode(&k_broadcast.sender_signature)?;
+ 
+-        // Use a single query to delete existing records and insert the new one atomically (skip if transaction already exists)
++        // Lock the table before the owner. The additive importer holds only its
++        // global table lock, so it never waits for an owner lock in reverse order.
++        // READ COMMITTED gives the write a fresh snapshot after either lock wait.
++        let mut transaction_scope = self.db_pool.begin().await?;
++        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
++            .execute(&mut *transaction_scope).await?;
++        sqlx::query("LOCK TABLE k_broadcasts IN ROW EXCLUSIVE MODE")
++            .execute(&mut *transaction_scope).await?;
++        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1::bytea, 'hex'), 730411))")
++            .bind(&sender_pubkey_bytes)
++            .execute(&mut *transaction_scope).await?;
++
++        // Only strictly newer original chain time replaces an incumbent.
++        // Different IDs at equal chain time have no proven order: retain the
++        // incumbent rather than inventing a winner. Exact replays are no-ops.
+         let result = sqlx::query(
+             r#"
+             WITH deleted AS (
+                 DELETE FROM k_broadcasts
+                 WHERE sender_pubkey = $3 AND transaction_id != $1
++                  AND block_time < $2
++                  AND NOT EXISTS (SELECT 1 FROM k_broadcasts known WHERE known.transaction_id = $1)
++                  AND NOT EXISTS (
++                    SELECT 1 FROM k_broadcasts incumbent
++                    WHERE incumbent.sender_pubkey = $3
++                      AND (incumbent.block_time >= $2 OR incumbent.transaction_id = $1)
++                  )
+                 RETURNING transaction_id
+             )
+             INSERT INTO k_broadcasts (
+                 transaction_id, block_time, sender_pubkey, sender_signature,
+                 base64_encoded_nickname, base64_encoded_profile_image, base64_encoded_message
+-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+-            ON CONFLICT (transaction_id) DO NOTHING
++            )
++            SELECT $1, $2, $3, $4, $5, $6, $7
++            WHERE NOT EXISTS (SELECT 1 FROM k_broadcasts known WHERE known.transaction_id = $1)
++              AND NOT EXISTS (
++                SELECT 1 FROM k_broadcasts incumbent
++                WHERE incumbent.sender_pubkey = $3
++                  AND (incumbent.block_time >= $2 OR incumbent.transaction_id = $1)
++            )
+             "#,
+         )
+         .bind(&transaction_id_bytes)
+@@ -1160,19 +1187,14 @@
+         .bind(k_broadcast.base64_encoded_nickname)
+         .bind(k_broadcast.base64_encoded_profile_image)
+         .bind(k_broadcast.base64_encoded_message)
+-        .execute(&self.db_pool)
++        .execute(&mut *transaction_scope)
+         .await?;
++        transaction_scope.commit().await?;
+ 
+         if result.rows_affected() == 0 {
+-            info!(
+-                "Broadcast transaction {} already exists, skipping",
+-                transaction_id
+-            );
++            info!("Broadcast {} is already indexed or is not newer; current profile retained", transaction_id);
+         } else {
+-            info!(
+-                "Saved K broadcast: {} (replaced any existing broadcasts for sender)",
+-                transaction_id
+-            );
++            info!("Saved strictly newer K broadcast: {}", transaction_id);
+         }
+         Ok(())
+     }
