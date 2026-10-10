@@ -12,7 +12,8 @@ import time
 import uuid
 
 from import_amplitude_events import atomic_json, compare, json_values_equal
-from prepare_amplitude_import import RAW, digest, time_us
+from prepare_amplitude_import import RAW, convert, digest, time_us
+import urllib.request
 
 ROOT = Path(__file__).resolve().parent
 CREDENTIALS = Path('/home/ren/Kasanova/secrets/posthog/bootstrap.json')
@@ -61,10 +62,37 @@ def main(prod):
                         events.append(e)
             if len(events) != 4: raise RuntimeError('Unexpected missing-IP source count')
         else:
-            events = [e for e in json.loads((ROOT / 'operations/missing-ip-validation/events.json').read_text())
-                if e['properties']['case'] == 'omitted']
-            if len(events) != 1 or '$ip' in events[0]['properties']:
-                raise RuntimeError('Unexpected synthetic missing-IP fixture')
+            fixture = EVIDENCE / 'aligned-synthetic-event.json'
+            if not fixture.exists():
+                stamp = dt.datetime.now(dt.timezone.utc)
+                stamp = stamp.replace(microsecond=stamp.microsecond // 1000 * 1000).isoformat()
+                original = {'app': 1, 'amplitude_id': 1, 'uuid': str(uuid.uuid4()),
+                    'event_type': 'posthog_missing_ip_queue_validation', 'event_time': stamp,
+                    'ip_address': None, 'device_id': 'missing-ip-validation-device', 'session_id': -1,
+                    'event_properties': {'synthetic': True, 'nested': {'value': 42}}, 'user_properties': {}}
+                e = convert((json.dumps(original) + '\n').encode(),
+                    {'canonical_map': {'1': '1'}, 'user_ids': {'1': 'posthog-missing-ip-validation:queue'}}, {})
+                e['properties']['__amplitude_validation_fixture'] = True
+                atomic_json(fixture, [e])
+            events = json.loads(fixture.read_text())
+            baseline = EVIDENCE / 'aligned-http-baseline.json'
+            if not baseline.exists():
+                request = urllib.request.Request(credentials['url'] + '/batch/',
+                    data=json.dumps({'api_key': target['api_key'], 'historical_migration': True, 'batch': events}).encode(),
+                    headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    result = json.loads(response.read())
+                    if response.status != 200 or result.get('status') not in ('Ok', 1): raise RuntimeError('DEV baseline rejected')
+                atomic_json(baseline, {'acknowledged': True})
+                # Wait for its earlier ingestion version before replacing it.
+                sql = "SELECT count() FROM posthog.sharded_events WHERE team_id=" + str(int(target['id'])) + " AND uuid='" + str(uuid.UUID(events[0]['uuid'])) + "'"
+                for attempt in range(90):
+                    if int(subprocess.check_output(['docker', 'exec', CH, 'clickhouse-client', '--query', sql])) == 1: break
+                    time.sleep(2)
+                else: raise RuntimeError('DEV baseline did not persist')
+                time.sleep(2)  # ReplacingMergeTree versions have whole-second precision.
+        if any(time_us(e['timestamp']) % 1000 for e in events):
+            raise RuntimeError('Selected source timestamps exceed the installed ingestion millisecond precision')
         marker = evidence / 'missing-ip-queue-checkpoint.json'
         checkpoint = json.loads(marker.read_text()) if marker.exists() else {'acknowledged_uuids': [], 'prod': prod}
         if checkpoint['prod'] != prod: raise RuntimeError('Repair environment differs')
@@ -104,13 +132,7 @@ def main(prod):
         if {r['uuid'] for r in rows} != set(expected): raise RuntimeError('Repair UUID set differs')
         for row in rows:
             e = expected[row['uuid']]
-            if prod: compare(row, e)
-            else:
-                p = json.loads(row['properties'])
-                if row['event'] != e['event'] or row['distinct_id'] != e['distinct_id'] or int(row['timestamp_us']) != time_us(e['timestamp']):
-                    raise RuntimeError('DEV fixture identity/name/time changed')
-                if any(not json_values_equal(p.get(k), v) for k, v in e['properties'].items()):
-                    raise RuntimeError('DEV fixture properties changed')
+            compare(row, e)
         report = {'verified_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'prod': prod,
             'records': len(rows), 'target_project_id': target['id'],
             'missing_ip_preserved_through_real_ingestion': True, 'original_event_fields_unchanged': True,
