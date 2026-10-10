@@ -130,12 +130,13 @@ def main():
                 if group:
                     run(['docker', 'stop', '--time', '15' if group == proxy else '30' if group == apps else '120', *group])
             states = json.loads(run(['docker', 'inspect', *ids]))
+            report['shutdown_exit_codes'] = {c['Config']['Labels']['com.docker.compose.service']: c['State']['ExitCode'] for c in states}
+            save(backup / 'shutdown-results.json', report['shutdown_exit_codes'])
             if any(c['State']['Running'] or c['State']['OOMKilled'] for c in states):
                 raise RuntimeError('An owned process remains running or was OOM-killed')
             if any(c['State']['ExitCode'] == 137 for c in states
                    if c['Config']['Labels']['com.docker.compose.service'] in STORAGE):
                 raise RuntimeError('Clean shutdown was not achieved; do not certify checkpoint')
-            report['shutdown_exit_codes'] = {c['Config']['Labels']['com.docker.compose.service']: c['State']['ExitCode'] for c in states}
             report['scope'] = 'Initial empty-PROD checkpoint; persistent services must stop cleanly. Stateless setup services may require termination; no live PROD capture is connected.'
             report['backup_program_sha256'] = sha(Path(__file__))
             report.update(state='all_owned_writers_stopped', stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
@@ -163,6 +164,10 @@ def main():
             report['archives'][credentials.name] = {'sha256': sha(credentials), 'bytes': credentials.stat().st_size}
             report.update(state='cold_checkpoint_complete', completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
             save(backup / 'manifest.json', report)
+        except BaseException as error:
+            report.update(state='rejected_checkpoint', failure_type=type(error).__name__)
+            save(backup / 'manifest.json', report)
+            raise
         finally:
             if stopped:
                 storage_names = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in STORAGE]
