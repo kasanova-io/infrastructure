@@ -26,9 +26,13 @@ def main():
         or image['Config']['Labels'].get('io.kasanova.capture.source-revision') != manifest['source']['revision']):
         raise RuntimeError('Precise capture image identity differs')
     # Check loader/runtime compatibility without service credentials or networking.
-    subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--memory', '256m', '--cpus', '1',
-        '--entrypoint', '/usr/local/bin/capture', image_id, '--help'], check=True,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # This revision has no CLI help path: it immediately reads configuration.
+    # With no credentials/network, reaching its exact missing-REDIS error proves
+    # the executable loaded; it does not establish service acceptance.
+    loader = subprocess.run(['docker', 'run', '--rm', '--network', 'none', '--memory', '256m', '--cpus', '1',
+        '--entrypoint', '/usr/local/bin/capture', image_id], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if loader.returncode != 101 or b'EnvVarMissing { name: "REDIS_URL" }' not in loader.stdout:
+        raise RuntimeError('Precise capture did not reach its expected configuration boundary')
     with (ROOT / 'operations/.backup.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         before = json.loads(subprocess.check_output(COMPOSE + ['config', '--format', 'json']))
