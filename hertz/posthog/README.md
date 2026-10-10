@@ -123,6 +123,12 @@ acknowledged, the recorded count matches, no successful reconciliation exists,
 and the corrected capture image is running. It reuses source event identities;
 ClickHouse's newer `_timestamp` versions replace the earlier event properties.
 Validate that behavior on DEV first; never delete the original source archives.
+Repair backlog checks count newly persisted ingestion versions, since an unchanged
+UUID count alone cannot show whether replacement batches have arrived. Run
+`verify_native_event_counts.py <prepared directory> <evidence directory>` after
+complete field reconciliation. It uses the normal authenticated PostHog query API
+to compare every event type's count, total rows, UUIDs and absence of DEV fixtures;
+extra physical versions must finish merging before normal query counts can pass.
 
 Run the offline contract checks with:
 
@@ -151,6 +157,17 @@ base images, limits compilation to two cores/eight GiB, mounts no app credential
 and does not deploy the result. Validate the resulting image on DEV, preserve its
 image archive and immutable ID, then repair and reconcile the entire offline PROD
 backfill. The current unaccepted backfill must not authorize connector cutover.
+
+`verify_capture_precision.py <evidence directory>` first captures 600 synthetic DEV
+events with the original image and records the drift. After compilation,
+`deploy_precise_capture.py` verifies executable loading, exports the exact image
+under `custom-images/`, retains its checksum and restore instructions, and changes
+only the capture service's immutable image pin. That image archive is included in
+the runtime checkpoint; isolated restore checks its identity and checksum too.
+Run the DEV validator again with `--corrected`: the same UUIDs must retain every
+number exactly and acquire the new validation phase. The verified live DEV test
+found 74 changed values before the correction and zero after it. Synthetic fixtures
+remain in DEV; no original PROD UUIDs are used in the precision test.
 
 PostHog describes this self-hosted deployment as unsupported and offers no data
 loss guarantee. Installation acceptance does not certify migration parity,
