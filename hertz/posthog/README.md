@@ -29,7 +29,10 @@ Record each pulled image's immutable repository digest in `images.lock.yaml`,
 with a `services` mapping that overrides every service's `image`. Start with
 all three files and `up -d --no-build`. Continue using the lock file for all
 subsequent commands; upgrading requires a new explicit source/image selection
-and a backup first. Install the managed block in `Caddyfile` only after bootstrap
+and a backup first. Run `prepare.py` again after the gateway starts, then repeat
+`up -d --no-build`; this binds Django's trusted proxy chain to the actual gateway
+IP addresses. Repeat this after recreating either gateway.
+Install the managed block in `Caddyfile` only after bootstrap
 and local acceptance; validate the entire live Caddy configuration before reload.
 Create the DNS A record for this hostname pointing to Hertz.
 

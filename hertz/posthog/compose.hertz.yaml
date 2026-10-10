@@ -64,7 +64,7 @@ services:
       OPT_OUT_CAPTURE: "true"
       DISABLE_SECURE_SSL_REDIRECT: "true"
       IS_BEHIND_PROXY: "true"
-      TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
+      TRUSTED_PROXIES: ${POSTHOG_TRUSTED_PROXIES:?Run prepare.py}
       SECURE_COOKIES: "true"
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
       GRANIAN_WORKERS: "2"
@@ -81,7 +81,7 @@ services:
       OPT_OUT_CAPTURE: "true"
       DISABLE_SECURE_SSL_REDIRECT: "true"
       IS_BEHIND_PROXY: "true"
-      TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
+      TRUSTED_PROXIES: ${POSTHOG_TRUSTED_PROXIES:?Run prepare.py}
       SECURE_COOKIES: "true"
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
       GRANIAN_WORKERS: "2"
@@ -233,7 +233,7 @@ services:
       OPT_OUT_CAPTURE: "true"
       DISABLE_SECURE_SSL_REDIRECT: "true"
       IS_BEHIND_PROXY: "true"
-      TRUSTED_PROXIES: "172.18.0.0/16,127.0.0.1"
+      TRUSTED_PROXIES: ${POSTHOG_TRUSTED_PROXIES:?Run prepare.py}
       SECURE_COOKIES: "true"
       ALLOWED_HOSTS: "posthog.kasanova.io,localhost,127.0.0.1,web"
       GRANIAN_WORKERS: "2"

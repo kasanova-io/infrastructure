@@ -7,6 +7,7 @@ import os
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
+import subprocess
 import tarfile
 import urllib.request
 
@@ -43,6 +44,15 @@ def main():
         write_private(env, ''.join(k + '=' + v + '\n' for k, v in values.items()))
     elif 'DEPLOYMENT_REVISION=' + revision not in env.read_text().splitlines():
         raise RuntimeError('Existing deployment identity differs; preserve configuration for explicit upgrade')
+    outer = json.loads(subprocess.check_output(['docker', 'inspect', 'caddy']))[0]
+    outer_ip = outer['NetworkSettings']['Networks']['caddy_caddy_net']['IPAddress']
+    inner = subprocess.run(['docker', 'inspect', 'kasanova_posthog-proxy-1'], capture_output=True)
+    trusted_ips = ['127.0.0.1', outer_ip]
+    if inner.returncode == 0:
+        trusted_ips.append(json.loads(inner.stdout)[0]['NetworkSettings']['Networks']['kasanova_posthog_default']['IPAddress'])
+    settings = dict(line.split('=', 1) for line in env.read_text().splitlines() if '=' in line)
+    settings.update(POSTHOG_OUTER_PROXY_IP=outer_ip, POSTHOG_TRUSTED_PROXIES=','.join(trusted_ips))
+    write_private(env, ''.join(k + '=' + v + '\n' for k, v in settings.items()))
     replacements = {'postgres://posthog:posthog@db': 'postgres://posthog:${POSTGRES_PASSWORD}@db',
                     'POSTGRES_PASSWORD: posthog': 'POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}',
                     'POSTGRES_PWD=posthog': 'POSTGRES_PWD=${POSTGRES_PASSWORD}',
@@ -59,7 +69,7 @@ def main():
             content = content.replace('                ${CADDY_TLS_BLOCK:-}',
                                       '                ${CADDY_TLS_BLOCK:-}\n'
                                       '                    servers {\n'
-                                      '                        trusted_proxies static 172.18.0.0/16\n'
+                                      '                        trusted_proxies static ${POSTHOG_OUTER_PROXY_IP}\n'
                                       '                    }')
         write_private(ROOT / target, content)
     archive = ROOT / 'upstream-source.tar.gz'
