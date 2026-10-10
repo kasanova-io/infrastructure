@@ -121,9 +121,14 @@ def main():
             proxy = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] == 'proxy']
             apps = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] not in STORAGE | {'proxy'}]
             stores = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in STORAGE]
-            for group in (proxy, apps, stores):
+            # ClickHouse's replicated/Kafka engines need their dependencies alive
+            # while shutting down. Stop it before Kafka, ZooKeeper and Postgres.
+            ordered_stores = [[services[s]['Name'] for s in group if services[s]['State']['Running']]
+                              for group in (('clickhouse',), ('kafka',), ('zookeeper',),
+                                            ('redis7', 'valkey', 'objectstorage', 'seaweedfs', 'elasticsearch'), ('db',))]
+            for group in (proxy, apps, *ordered_stores):
                 if group:
-                    run(['docker', 'stop', '--time', '30' if group == apps else '120', *group])
+                    run(['docker', 'stop', '--time', '15' if group == proxy else '30' if group == apps else '120', *group])
             states = json.loads(run(['docker', 'inspect', *ids]))
             if any(c['State']['Running'] or c['State']['OOMKilled'] for c in states):
                 raise RuntimeError('An owned process remains running or was OOM-killed')
