@@ -118,6 +118,11 @@ It then compares every logical persisted event with its original envelope throug
 the owned ClickHouse container, including exact original record bytes, typed
 properties and microsecond timestamps. `--verify-only` repeats comparison without
 capturing events. The importer and backup share an exclusive runtime lock.
+`--repair-unaccepted-backfill` is allowed only after every original event was
+acknowledged, the recorded count matches, no successful reconciliation exists,
+and the corrected capture image is running. It reuses source event identities;
+ClickHouse's newer `_timestamp` versions replace the earlier event properties.
+Validate that behavior on DEV first; never delete the original source archives.
 
 Run the offline contract checks with:
 

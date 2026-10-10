@@ -65,7 +65,7 @@ def compare(native, expected):
             raise RuntimeError('Persisted native session/device/IP mapping differs')
 
 
-def main(directory, evidence, verify_only=False):
+def main(directory, evidence, verify_only=False, repair_unaccepted=False):
     os.umask(0o077)
     preparation = json.loads((directory / 'preparation.json').read_text())
     source = directory / 'events.ndjson.gz'
@@ -102,6 +102,21 @@ def main(directory, evidence, verify_only=False):
 
     with (ROOT / 'operations/.backup.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if repair_unaccepted:
+            if verify_only or not state_path.exists() or (evidence / 'reconciliation.json').exists():
+                raise RuntimeError('Repair requires a recorded, unaccepted backfill and no successful reconciliation')
+            if state['acknowledged_records'] != preparation['records'] or count() != preparation['records']:
+                raise RuntimeError('Repair requires the recorded complete event count in the unaccepted backfill')
+            capture = json.loads(subprocess.check_output(['docker', 'inspect', 'kasanova_posthog-capture-1']))[0]
+            if (capture['Config']['Labels'].get('com.docker.compose.project') != 'kasanova_posthog'
+                or capture['Config']['Labels'].get('io.kasanova.capture.float-roundtrip') != 'true'
+                or not capture['State']['Running']):
+                raise RuntimeError('Repair requires the running, owned capture image with the precise parser')
+            state.setdefault('repair_attempts', []).append({'started_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+                'previous_acknowledged_records': state['acknowledged_records'],
+                'strategy': 'Reingest identical UUID/name/timestamp/distinct_id tuples after the parser correction; newer _timestamp versions replace prior values'})
+            state.update(acknowledged_records=0, state='repair_prepared')
+            atomic_json(state_path, state)
         if state['acknowledged_records'] == 0 and not state_path.exists() and count() != 0:
             raise RuntimeError('Fresh offline backfill requires empty PROD')
         index = evidence / 'verification.sqlite'
@@ -215,6 +230,11 @@ def main(directory, evidence, verify_only=False):
             state.update(state='persisted_fields_verified', completed_at=report['verified_at'])
             atomic_json(state_path, state)
             print(json.dumps(report), flush=True)
+        except BaseException as error:
+            state['last_failure'] = {'at': dt.datetime.now(dt.timezone.utc).isoformat(),
+                                     'stage': state['state'], 'error_type': type(error).__name__}
+            atomic_json(state_path, state)
+            raise
         finally:
             con.close()
             if index.exists(): index.unlink()
@@ -225,5 +245,6 @@ if __name__ == '__main__':
     parser.add_argument('prepared_directory', type=Path)
     parser.add_argument('evidence_directory', type=Path)
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--repair-unaccepted-backfill', action='store_true')
     args = parser.parse_args()
-    main(args.prepared_directory, args.evidence_directory, args.verify_only)
+    main(args.prepared_directory, args.evidence_directory, args.verify_only, args.repair_unaccepted_backfill)
