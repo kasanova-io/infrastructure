@@ -29,9 +29,9 @@ def prepare():
         shutil.rmtree(target)
     shutil.copytree(SOURCE / "K-webserver/src", target)
     shutil.copy2(HERE / "Dockerfile.web", destination / "Dockerfile")
-    for patch in ["historical-author-keys.patch", "exact-vote-details.patch"]:
+    for patch in ["historical-author-keys.patch", "exact-vote-details.patch", "content-search.patch"]:
         shutil.copy2(HERE / "patches" / patch, destination / patch)
-    (destination / ".dockerignore").write_text("**\n!Dockerfile\n!Cargo.toml\n!K-webserver/\n!K-webserver/Cargo.toml\n!K-webserver/src/\n!K-webserver/src/**\n!historical-author-keys.patch\n!exact-vote-details.patch\n")
+    (destination / ".dockerignore").write_text("**\n!Dockerfile\n!Cargo.toml\n!K-webserver/\n!K-webserver/Cargo.toml\n!K-webserver/src/\n!K-webserver/src/**\n!historical-author-keys.patch\n!exact-vote-details.patch\n!content-search.patch\n")
     print(destination)
 
 
