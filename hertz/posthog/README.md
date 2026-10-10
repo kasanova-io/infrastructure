@@ -82,7 +82,9 @@ The generated SeaweedFS bucket bootstrap wrapper forwards shutdown signals to
 the storage process so its persistent volume can be checkpointed cleanly.
 Rust services replace their entrypoint shell with the actual binary using `exec`;
 this delivers Docker's stop signal to the service instead of forcing termination
-after a shell ignores it. Allow 90 seconds for their coordinated shutdown.
+after a shell ignores it. Docker's init process forwards signals and reaps child
+processes, including auxiliary binaries without a custom SIGTERM handler. Allow
+90 seconds for coordinated shutdown.
 
 ## Prepare and validate historical events
 
