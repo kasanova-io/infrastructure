@@ -13,6 +13,7 @@ import gzip
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import threading
 import time
@@ -226,7 +227,11 @@ def serve(journal, host, port):
             except Exception:
                 # Preserve the client queue on any ambiguous/unsupported input or disk failure.
                 self.respond(503, {'code': 503, 'error': 'Journal unavailable; retry'})
-    return ThreadingHTTPServer((host, port), Handler)
+    server = ThreadingHTTPServer((host, port), Handler)
+    # Acknowledged records and requests already accepted must finish before a
+    # live checkpoint can stop the journal writer.
+    server.daemon_threads = False
+    return server
 
 
 def main():
@@ -244,16 +249,29 @@ def main():
     if args.seed_import:
         print(json.dumps({'history_seeded': journal.seed_history(args.seed_import, args.seed_project)}))
         return
+    stopping = threading.Event()
     def worker():
-        while True:
+        while not stopping.is_set():
             try:
                 if journal.deliver(args.posthog_host):
                     continue
             except Exception:
                 pass
-            time.sleep(2)
-    threading.Thread(target=worker, daemon=True).start()
-    serve(journal, args.listen, args.port).serve_forever()
+            stopping.wait(2)
+    server = serve(journal, args.listen, args.port)
+    def terminate(signum, frame):
+        # Python runs as container PID1, where the default SIGTERM disposition
+        # is ignored. Exit the serving loop and drain its existing writers.
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, terminate)
+    delivery = threading.Thread(target=worker)
+    delivery.start()
+    try:
+        server.serve_forever()
+    finally:
+        stopping.set()
+        server.server_close()
+        delivery.join()
 
 
 if __name__ == '__main__':
