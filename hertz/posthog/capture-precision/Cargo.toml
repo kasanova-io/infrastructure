@@ -1,0 +1,10 @@
+[package]
+name = "kasanova-capture-precision-check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "=1.0.149"
+
+[features]
+precise = ["serde_json/float_roundtrip"]
