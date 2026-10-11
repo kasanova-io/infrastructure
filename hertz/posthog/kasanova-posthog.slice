@@ -1,0 +1,8 @@
+[Unit]
+Description=Kasanova PostHog resource budget
+
+[Slice]
+CPUQuota=400%
+MemoryMax=22G
+MemorySwapMax=2G
+TasksMax=8192

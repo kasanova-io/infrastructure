@@ -1,0 +1,5 @@
+# BEGIN KASANOVA POSTHOG
+posthog.kasanova.io {
+    reverse_proxy kasanova_posthog_gateway:80
+}
+# END KASANOVA POSTHOG
