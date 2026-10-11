@@ -20,6 +20,9 @@ from contextlib import closing
 ROOT = Path(__file__).resolve().parent
 PROJECT = 'kasanova_posthog'
 BACKUPS = Path('/home/ren/kasanova-archives/posthog')
+RESTORES = Path('/home/ren/kasanova-archives/posthog-restores')
+PRODUCTION_RESERVE_BYTES = 10 * 1024**3
+SNAPSHOT_OVERHEAD_BYTES = 2 * 1024**3
 STORAGE = {'db', 'clickhouse', 'zookeeper', 'kafka', 'redis7', 'valkey',
            'objectstorage', 'seaweedfs', 'elasticsearch'}
 CAPTURE = {'capture', 'capture-logs', 'replay-capture'}
@@ -137,6 +140,69 @@ def snapshot_journal(source, destination):
     return before
 
 
+def logical_bytes(base):
+    return sum(p.lstat().st_size for p in [base, *base.rglob('*')]
+               if p.is_file() and not p.is_symlink())
+
+
+def space_anchor(path):
+    while not path.exists():
+        path = path.parent
+    return path
+
+
+def capacity_requirements(allocations):
+    required = {}
+    for device, amount in allocations:
+        required[device] = required.get(device, 0) + amount
+    return {device: amount + PRODUCTION_RESERVE_BYTES for device, amount in required.items()}
+
+
+def require_filesystem_capacity(allocations):
+    anchors = [(space_anchor(path), amount) for path, amount in allocations]
+    required = capacity_requirements([(path.stat().st_dev, amount) for path, amount in anchors])
+    for anchor, _ in anchors:
+        if shutil.disk_usage(anchor).free < required[anchor.stat().st_dev]:
+            raise RuntimeError('Insufficient space for checkpoint plus isolated restore and production reserve')
+    return [path.stat().st_dev for path, _ in anchors]
+
+
+def require_live_capacity(checkpoint, restores, docker_storage, volume_bytes, runtime_bytes, journal_bytes):
+    # Docker's new isolated volumes are allocated on DockerRootDir, while the
+    # extracted runtime uses the restore directory. Sum every simultaneous copy
+    # on its actual filesystem; never assume either shares the checkpoint disk.
+    checkpoint_bytes = (volume_bytes + runtime_bytes + journal_bytes) * 11 // 10 + SNAPSHOT_OVERHEAD_BYTES
+    restore_runtime_bytes = runtime_bytes + SNAPSHOT_OVERHEAD_BYTES
+    restore_volume_bytes = volume_bytes + SNAPSHOT_OVERHEAD_BYTES
+    devices = require_filesystem_capacity([(checkpoint, checkpoint_bytes),
+        (restores, restore_runtime_bytes), (docker_storage, restore_volume_bytes)])
+    return {'checkpoint_bytes_budgeted': checkpoint_bytes,
+            'restore_runtime_bytes_budgeted': restore_runtime_bytes,
+            'restore_volume_bytes_budgeted': restore_volume_bytes,
+            'production_reserve_bytes': PRODUCTION_RESERVE_BYTES,
+            'all_copies_share_filesystem': len(set(devices)) == 1}
+
+
+def owned_stack_ready(ingress, health_base='http://127.0.0.1:18084'):
+    try:
+        current = json.loads(run(['docker', 'inspect', ingress]))[0]
+        labels, state = current['Config']['Labels'], current['State']
+        if (labels.get('com.docker.compose.project') != PROJECT
+            or labels.get('com.docker.compose.service') != 'analytics-ingress'
+            or not state['Running'] or state.get('Restarting') or state['OOMKilled']):
+            return False
+        for path in ('/_health', '/kasanova-ingest/health'):
+            req = urllib.request.Request(health_base + path, headers={'Host': 'posthog.kasanova.io'})
+            with urllib.request.urlopen(req, timeout=3) as response:
+                if response.status != 200:
+                    return False
+                if path.endswith('ingest/health') and json.load(response).get('status') != 'ok':
+                    return False
+        return True
+    except (subprocess.CalledProcessError, OSError, ValueError, KeyError):
+        return False
+
+
 def interrupt_operation(signum, frame):
     raise InterruptedError('Owned backup/restore interrupted')
 
@@ -210,13 +276,19 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
         os.chown(backup, owner.st_uid, owner.st_gid)
         BACKUPS.chmod(0o700)
         if live:
-            # No automatic archive deletion: reject before pausing writers if the
-            # checkpoint filesystem cannot hold an uncompressed copy plus margin.
-            allocated = sum(p.lstat().st_blocks * 512
-                            for base in [ROOT, *(Path(v) for v in volumes.values())]
-                            for p in [base, *base.rglob('*')] if not p.is_symlink())
-            if shutil.disk_usage(backup).free < allocated + 2 * 1024**3:
-                raise RuntimeError('Insufficient free space for an owned live checkpoint')
+            mounts = [m for m in services['analytics-ingress']['Mounts']
+                      if m['Type'] == 'volume' and m['Destination'] == '/var/lib/analytics']
+            if len(mounts) != 1 or mounts[0]['Name'] not in volumes:
+                raise RuntimeError('Unexpected analytics journal mount')
+            docker_storage = Path(json.loads(run(['docker', 'info', '--format', '{{json .DockerRootDir}}']))) / 'volumes'
+            if not docker_storage.is_absolute() or not docker_storage.is_dir():
+                raise RuntimeError('Unexpected Docker restore storage root')
+            capacity = require_live_capacity(backup, RESTORES, docker_storage,
+                sum(logical_bytes(Path(v)) for v in volumes.values()), logical_bytes(ROOT),
+                logical_bytes(Path(mounts[0]['Source'])))
+            for source in [ROOT, *(Path(v) for v in volumes.values())]:
+                if shutil.disk_usage(source).free < PRODUCTION_RESERVE_BYTES:
+                    raise RuntimeError('Production filesystem reserve is insufficient before live checkpoint')
         baseline = {
             'postgres': json.loads(run(['docker', 'exec', services['db']['Name'], 'psql', '-U', 'posthog', '-d', 'posthog', '-At', '-c',
                 "SELECT json_build_object('users',(SELECT json_agg(json_build_object('id',id,'email',email)) FROM posthog_user),'teams',(SELECT json_agg(json_build_object('id',id,'name',name)) FROM posthog_team));"])),
@@ -257,6 +329,8 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
         report = {'started_at': dt.datetime.now(dt.timezone.utc).isoformat(), 'project': PROJECT,
                   'backup_path': str(backup), 'state': 'prepared', 'containers': rows, 'volumes': volumes,
                   'baseline': baseline, 'archives': {}}
+        if live:
+            report['capacity_budget'] = capacity
         if import_proof:
             # Freeze proof bytes in the checkpoint. Later verification runs may
             # update the operational reports at their original mutable paths.
@@ -422,7 +496,15 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
                 finally:
                     if other_names:
                         run(['docker', 'start', *other_names])
-                save(backup / 'restart.json', {'original_running_containers_restarted': original_names,
+                if live:
+                    for attempt in range(60):
+                        if owned_stack_ready(services['analytics-ingress']['Name']):
+                            break
+                        time.sleep(2)
+                    else:
+                        raise RuntimeError('Owned gateway and analytics ingress did not recover after restart')
+                save(backup / 'restart.json', {'owned_gateway_and_ingress_ready': True if live else None,
+                     'original_running_containers_restarted': original_names,
                      'completed_at': dt.datetime.now(dt.timezone.utc).isoformat()})
                 print(json.dumps({'owned_services_restarted': len(original_names)}), flush=True)
         if verify_restore:

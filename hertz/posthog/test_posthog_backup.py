@@ -1,6 +1,12 @@
 import unittest
 from contextlib import closing
 import json
+import gzip
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
+from types import SimpleNamespace
 import sqlite3
 import tempfile
 import shutil
@@ -8,7 +14,7 @@ from pathlib import Path
 
 from analytics_ingress import Journal
 
-from backup import ingestion_drained, parse_group_lags, journal_inventory, snapshot_journal, main
+from backup import ingestion_drained, parse_group_lags, journal_inventory, snapshot_journal, main, capacity_requirements, require_live_capacity, PRODUCTION_RESERVE_BYTES, owned_stack_ready
 
 
 class ConsumerDrainTest(unittest.TestCase):
@@ -107,6 +113,84 @@ class LiveJournalBackupTest(unittest.TestCase):
     def test_live_scope_cannot_borrow_offline_import_certificate(self):
         with self.assertRaisesRegex(RuntimeError, 'mutually exclusive'):
             main(Path('offline.json'), live=True)
+
+
+class LiveCapacityTest(unittest.TestCase):
+    def test_same_filesystem_budgets_checkpoint_and_simultaneous_restore(self):
+        gib = 1024**3
+        self.assertEqual(capacity_requirements([(1, 10*gib), (1, 12*gib)]),
+                         {1: 22*gib + PRODUCTION_RESERVE_BYTES})
+        self.assertEqual(capacity_requirements([(1, 10*gib), (2, 12*gib)]),
+                         {1: 10*gib + PRODUCTION_RESERVE_BYTES,
+                          2: 12*gib + PRODUCTION_RESERVE_BYTES})
+
+    def test_runtime_and_docker_volume_filesystems_are_distinct_allocations(self):
+        gib = 1024**3
+        self.assertEqual(capacity_requirements([(1, 11*gib), (2, 2*gib), (3, 12*gib)]),
+                         {1: 11*gib + PRODUCTION_RESERVE_BYTES,
+                          2: 2*gib + PRODUCTION_RESERVE_BYTES,
+                          3: 12*gib + PRODUCTION_RESERVE_BYTES})
+        self.assertEqual(capacity_requirements([(1, 11*gib), (2, 2*gib), (1, 12*gib)]),
+                         {1: 23*gib + PRODUCTION_RESERVE_BYTES,
+                          2: 2*gib + PRODUCTION_RESERVE_BYTES})
+
+    def test_real_incompressible_archive_and_restore_are_both_reserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / 'incompressible'
+            original.write_bytes(os.urandom(2*1024**2))
+            archive = root / 'archive.gz'
+            with original.open('rb') as src, gzip.open(archive, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+            with patch('backup.shutil.disk_usage', return_value=SimpleNamespace(free=100*1024**3)):
+                plan = require_live_capacity(root / 'checkpoints', root / 'restores', root / 'docker', original.stat().st_size, 0, 0)
+            self.assertTrue(plan['all_copies_share_filesystem'])
+            self.assertGreaterEqual(plan['checkpoint_bytes_budgeted'], archive.stat().st_size)
+            self.assertGreaterEqual(plan['restore_volume_bytes_budgeted'], original.stat().st_size)
+
+    def test_old_single_copy_free_space_now_rejected_before_pause(self):
+        gib = 1024**3
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch('backup.shutil.disk_usage', return_value=SimpleNamespace(free=int(12.5*gib))):
+                with self.assertRaisesRegex(RuntimeError, 'checkpoint plus isolated restore'):
+                    require_live_capacity(root, root / 'restores', root / 'docker', 10*gib, 0, 0)
+
+
+class LiveRestartHealthTest(unittest.TestCase):
+    def test_running_state_and_real_gateway_ingress_http_required(self):
+        class Handler(BaseHTTPRequestHandler):
+            ingress_code = 503
+            paths = []
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                self.paths.append(self.path)
+                self.send_response(self.ingress_code if self.path.endswith('ingest/health') else 200)
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            record = {'Config': {'Labels': {'com.docker.compose.project': 'kasanova_posthog',
+                       'com.docker.compose.service': 'analytics-ingress'}},
+                      'State': {'Running': True, 'Restarting': False, 'OOMKilled': False}}
+            host = 'http://127.0.0.1:' + str(server.server_port)
+            with patch('backup.run', side_effect=lambda args: json.dumps([record]).encode()):
+                self.assertFalse(owned_stack_ready('owned-ingress', host))
+                Handler.ingress_code = 200
+                self.assertTrue(owned_stack_ready('owned-ingress', host))
+                self.assertIn('/_health', Handler.paths)
+                self.assertIn('/kasanova-ingest/health', Handler.paths)
+                record['State']['Restarting'] = True
+                previous = list(Handler.paths)
+                self.assertFalse(owned_stack_ready('owned-ingress', host))
+                self.assertEqual(Handler.paths, previous)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == '__main__':

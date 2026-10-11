@@ -12,7 +12,7 @@ import signal
 import subprocess
 import time
 
-from backup import inventory, sha, journal_inventory, interrupt_operation
+from backup import inventory, sha, journal_inventory, interrupt_operation, require_filesystem_capacity
 
 
 def run(args):
@@ -52,6 +52,13 @@ def main():
             raise RuntimeError('Checkpoint inventory checksum mismatch')
     restore_id = 'ph_restore_' + checkpoint.name.lower()
     work = Path('/home/ren/kasanova-archives/posthog-restores') / checkpoint.name
+    if manifest.get('live_checkpoint'):
+        docker_storage = Path(json.loads(run(['docker', 'info', '--format', '{{json .DockerRootDir}}']))) / 'volumes'
+        if not docker_storage.is_absolute() or not docker_storage.is_dir():
+            raise RuntimeError('Unexpected Docker restore storage root')
+        require_filesystem_capacity([
+            (work.parent, manifest['capacity_budget']['restore_runtime_bytes_budgeted']),
+            (docker_storage, manifest['capacity_budget']['restore_volume_bytes_budgeted'])])
     work.mkdir(parents=True, mode=0o700, exist_ok=False)
     uid, gid = checkpoint.stat().st_uid, checkpoint.stat().st_gid
     os.chown(work, uid, gid)

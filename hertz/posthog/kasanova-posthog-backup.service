@@ -9,4 +9,4 @@ WorkingDirectory=/home/ren/Kasanova/tools/posthog
 ExecStart=/usr/bin/python3 /home/ren/Kasanova/tools/posthog/backup.py --live --verify-restore
 UMask=0077
 TimeoutStartSec=2h
-TimeoutStopSec=10min
+TimeoutStopSec=30min

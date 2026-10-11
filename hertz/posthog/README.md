@@ -285,8 +285,12 @@ All exclusively owned native/queue/object-storage volumes, including the live
 journal volume, are archived. Original services restart before isolated restore
 verification. A gateway recovery failure or incomplete journal/native restore
 fails the command. Nothing deletes source history, journal rows or prior backups.
-Capacity admission reserves the current allocated source bytes plus two GiB on
-the checkpoint filesystem before pausing writers. A rejected checkpoint keeps
+Capacity admission budgets incompressible checkpoint archives plus simultaneous
+uncompressed isolated restore, consolidated SQLite/runtime overhead and ten GiB
+of production reserve. Budgets combine on a shared filesystem and are checked
+separately across actual destination devices, with another extraction-space
+check before restore. Gateway and ingress readiness are checked after every
+original service has restarted before a live backup can report success. A rejected checkpoint keeps
 its failure evidence and restores the original running services.
 
 After one real successful live checkpoint, independent storage copy and isolated
