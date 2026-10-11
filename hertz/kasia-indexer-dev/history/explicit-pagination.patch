@@ -1,0 +1,304 @@
+--- a/indexer/src/api/v1/pagination.rs
++++ b/indexer/src/api/v1/pagination.rs
+@@ -1,4 +1,44 @@
++use axum::{
++    Json,
++    http::{HeaderName, HeaderValue},
++    response::{IntoResponse, Response},
++};
+ use indexer_db::FromBytes;
++use serde::Serialize;
++
++const HAS_MORE_HEADER: HeaderName = HeaderName::from_static("x-kasia-has-more");
++const NEXT_CURSOR_HEADER: HeaderName = HeaderName::from_static("x-kasia-next-cursor");
++
++/// Return an exact page boundary without changing the legacy JSON list body.
++///
++/// Callers fetch one extra row. This function removes that lookahead row and
++/// exposes whether another request is required through response headers.
++pub(super) fn paginated_response<T: Serialize>(
++    mut rows: Vec<T>,
++    limit: usize,
++    cursor: impl for<'a> Fn(&'a T) -> &'a str,
++) -> Response {
++    let has_more = rows.len() > limit;
++    if has_more {
++        rows.truncate(limit);
++    }
++    let next_cursor = has_more
++        .then(|| rows.last().map(|row| cursor(row).to_owned()))
++        .flatten();
++
++    let mut response = Json(rows).into_response();
++    response.headers_mut().insert(
++        HAS_MORE_HEADER,
++        HeaderValue::from_static(if has_more { "true" } else { "false" }),
++    );
++    if let Some(next_cursor) = next_cursor {
++        response.headers_mut().insert(
++            NEXT_CURSOR_HEADER,
++            HeaderValue::from_str(&next_cursor).expect("encoded cursor is an HTTP header value"),
++        );
++    }
++    response
++}
+ 
+ /// Versioned, route-bound native keys preserve ordering even when timestamps tie.
+ /// Tokens are opaque to clients; they must return the last row's token unchanged.
+--- a/indexer/src/api/v1/handshakes.rs
++++ b/indexer/src/api/v1/handshakes.rs
+@@ -1,5 +1,5 @@
+ use indexer_db::messages::handshake::{HandshakeKeyBySender, HandshakeKeyByReceiver};
+-use super::pagination::{decode_cursor, encode_cursor};
++use super::pagination::{decode_cursor, encode_cursor, paginated_response};
+ use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+@@ -152,7 +152,7 @@
+                         && hs.block_time.get() >= from_block_time
+                         && cursor_key.as_ref().is_none_or(|cursor| hs.as_bytes() > cursor.as_bytes())
+                 })
+-                    .take(limit)
++                    .take(limit.saturating_add(1))
+                     .map(|handshake| {
+                         let block_time = handshake.block_time.into();
+ 
+@@ -223,7 +223,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(handshakes)) => Ok(Json(handshakes)),
++        Ok(Ok(handshakes)) => Ok(paginated_response(handshakes, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+@@ -304,7 +304,7 @@
+                         && hs_key_payload_tuple.0.block_time.get() >= from_block_time
+                         && cursor_key.as_ref().is_none_or(|cursor| hs_key_payload_tuple.0.as_bytes() > cursor.as_bytes())
+                 })
+-                    .take(limit)
++                    .take(limit.saturating_add(1))
+                     .map(|handshake_key_payload_tuple| {
+                         let (handshake, sender_payload) = handshake_key_payload_tuple;
+ 
+@@ -378,7 +378,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(handshakes)) => Ok(Json(handshakes)),
++        Ok(Ok(handshakes)) => Ok(paginated_response(handshakes, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+--- a/indexer/src/api/v1/contextual_messages.rs
++++ b/indexer/src/api/v1/contextual_messages.rs
+@@ -1,4 +1,4 @@
+-use super::pagination::{decode_cursor, encode_cursor};
++use super::pagination::{decode_cursor, encode_cursor, paginated_response};
+ use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+@@ -282,7 +282,7 @@
+                         && message.block_time.get() >= from_block_time
+                         && cursor_key.as_ref().is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+                 })
+-                    .take(limit)
++                    .take(limit.saturating_add(1))
+                     .map(|message_key| {
+                         let block_time = message_key.block_time.into();
+ 
+@@ -339,7 +339,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(messages)) => Ok(Json(messages)),
++        Ok(Ok(messages)) => Ok(paginated_response(messages, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+--- a/indexer/src/api/v1/payments.rs
++++ b/indexer/src/api/v1/payments.rs
+@@ -1,5 +1,5 @@
+ use indexer_db::messages::payment::{PaymentKeyBySender, PaymentKeyByReceiver};
+-use super::pagination::{decode_cursor, encode_cursor};
++use super::pagination::{decode_cursor, encode_cursor, paginated_response};
+ use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+@@ -151,7 +151,7 @@
+                     seen_tx_ids.insert(payment.tx_id)
+                         && payment.block_time.get() >= from_block_time
+                         && cursor_key.as_ref().is_none_or(|cursor| payment.as_bytes() > cursor.as_bytes())
+-                }).take(limit).map(|key| {
++                }).take(limit.saturating_add(1)).map(|key| {
+                 let payment_data = match state.tx_id_to_payment_partition.get_rtx(&rtx, &key.tx_id) {
+                     Ok(Some(data)) => data,
+                     Ok(None) => bail!("Payment data inconsistency: tx_id {} found in payment_by_sender but not in tx_id_to_payment", faster_hex::hex_string(&key.tx_id)),
+@@ -200,7 +200,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(payments)) => Ok(Json(payments)),
++        Ok(Ok(payments)) => Ok(paginated_response(payments, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+@@ -279,7 +279,7 @@
+                     seen_tx_ids.insert(payment.0.tx_id)
+                         && payment.0.block_time.get() >= from_block_time
+                         && cursor_key.as_ref().is_none_or(|cursor| payment.0.as_bytes() > cursor.as_bytes())
+-                }).take(limit).map(|(key, sender_payload)| {
++                }).take(limit.saturating_add(1)).map(|(key, sender_payload)| {
+ 
+                 let payment_data = match state.tx_id_to_payment_partition.get_rtx(&rtx, &key.tx_id) {
+                     Ok(Some(data)) => data,
+@@ -334,7 +334,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(payments)) => Ok(Json(payments)),
++        Ok(Ok(payments)) => Ok(paginated_response(payments, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+--- a/indexer/src/api/v1/self_stash.rs
++++ b/indexer/src/api/v1/self_stash.rs
+@@ -1,5 +1,5 @@
+ use indexer_db::messages::self_stash::{SelfStashKeyByOwner};
+-use super::pagination::{decode_cursor, encode_cursor};
++use super::pagination::{decode_cursor, encode_cursor, paginated_response};
+ use indexer_db::IntoBytes;
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
+@@ -234,7 +234,7 @@
+                             accepting_daa_score,
+                         }))
+                     })
+-                    .take(limit)
++                    .take(limit.saturating_add(1))
+                     .collect::<Result<Vec<_>, _>>()
+             })
+             .flatten()
+@@ -249,7 +249,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(messages)) => Ok(Json(messages)),
++        Ok(Ok(messages)) => Ok(paginated_response(messages, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+--- a/indexer/src/api/v1/group_messages.rs
++++ b/indexer/src/api/v1/group_messages.rs
+@@ -1,5 +1,6 @@
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
++use super::pagination::paginated_response;
+ use anyhow::Context;
+ use axum::extract::{Query, State};
+ use axum::http::StatusCode;
+@@ -180,7 +181,7 @@
+                             .as_ref()
+                             .is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
+                 })
+-                .take(limit)
++                .take(limit.saturating_add(1))
+                 .map(|(key, sender_payload)| {
+                     let block_time = key.block_time.get();
+                     let sender = to_rpc_address(&sender_payload, state.context.network_type)
+@@ -234,7 +235,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(messages)) => Ok(Json(messages)),
++        Ok(Ok(messages)) => Ok(paginated_response(messages, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+--- a/indexer/src/api/v1/group_control.rs
++++ b/indexer/src/api/v1/group_control.rs
+@@ -1,5 +1,6 @@
+ use crate::api::to_rpc_address;
+ use crate::context::IndexerContext;
++use super::pagination::paginated_response;
+ use anyhow::bail;
+ use axum::extract::{Query, State};
+ use axum::http::StatusCode;
+@@ -187,7 +188,7 @@
+                             .as_ref()
+                             .is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+                 })
+-                .take(limit)
++                .take(limit.saturating_add(1))
+                 .map(|message_key| {
+                     let block_time = message_key.block_time.into();
+ 
+@@ -247,7 +248,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(messages)) => Ok(Json(messages)),
++        Ok(Ok(messages)) => Ok(paginated_response(messages, limit, |row| &row.cursor)),
+         Ok(Err(e)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+@@ -356,7 +357,7 @@
+                             .as_ref()
+                             .is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+                 })
+-                .take(limit)
++                .take(limit.saturating_add(1))
+                 .map(|(message_key, sender_payload)| {
+                     let sender = to_rpc_address(&sender_payload, state.context.network_type)?
+                         .map(|address| address.to_string())
+@@ -407,7 +408,7 @@
+     }
+ 
+     match result {
+-        Ok(Ok(messages)) => Ok(Json(messages)),
++        Ok(Ok(messages)) => Ok(paginated_response(messages, limit, |row| &row.cursor)),
+         Ok(Err(error)) => Err((
+             StatusCode::INTERNAL_SERVER_ERROR,
+             Json(ErrorResponse {
+--- a/indexer/src/api/v1/personal_pagination_tests.rs
++++ b/indexer/src/api/v1/personal_pagination_tests.rs
+@@ -287,6 +287,39 @@
+ }
+ 
+ #[tokio::test]
++async fn continuation_headers_are_exact_and_match_the_last_returned_row()
++-> anyhow::Result<()> {
++    let fixture = Fixture::new()?;
++    for route in ROUTES {
++        let first = fixture.read(route, 50, None, None).await;
++        assert_eq!(first.headers()["x-kasia-has-more"], "true", "{route}");
++        let next = first.headers()["x-kasia-next-cursor"]
++            .to_str()?
++            .to_owned();
++        let first_rows = rows(first).await?;
++        assert_eq!(first_rows.len(), 50, "{route}");
++        assert_eq!(first_rows.last().unwrap()["cursor"], next, "{route}");
++
++        let last = fixture.read(route, 50, Some(next), None).await;
++        assert_eq!(last.headers()["x-kasia-has-more"], "false", "{route}");
++        assert!(
++            last.headers().get("x-kasia-next-cursor").is_none(),
++            "{route}"
++        );
++        assert_eq!(rows(last).await?.len(), 12, "{route}");
++
++        let exact = fixture.read(route, 1, None, Some(102)).await;
++        assert_eq!(exact.headers()["x-kasia-has-more"], "false", "{route}");
++        assert!(
++            exact.headers().get("x-kasia-next-cursor").is_none(),
++            "{route}"
++        );
++        assert_eq!(rows(exact).await?.len(), 1, "{route}");
++    }
++    Ok(())
++}
++
++#[tokio::test]
+ async fn all_personal_routes_page_through_timestamp_ties_without_repeated_transactions()
+ -> anyhow::Result<()> {
+     let fixture = Fixture::new()?;

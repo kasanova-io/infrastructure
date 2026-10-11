@@ -1,0 +1,134 @@
+--- a/indexer/src/api/v1/group_messages.rs
++++ b/indexer/src/api/v1/group_messages.rs
+@@ -168,13 +168,17 @@
+ 
+         state
+             .group_message_by_blinded_group_id_partition
+-            .iter_by_blinded_group_id_from_block_time_rtx(&rtx, &blinded_group_id, from_block_time)
++            .iter_by_blinded_group_id_from_block_time_rtx(&rtx, &blinded_group_id, 0)
+             .process_results(|iter| {
+                 iter.filter(|(key, _sender)| {
+-                    cursor_key
+-                        .as_ref()
+-                        .is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
+-                        && seen_tx_ids.insert(key.tx_id)
++                    // Register all earlier sightings before applying page boundaries.
++                    // Otherwise a second block containing a prior-page transaction
++                    // appears again when this request starts with an empty set.
++                    seen_tx_ids.insert(key.tx_id)
++                        && key.block_time.get() >= from_block_time
++                        && cursor_key
++                            .as_ref()
++                            .is_none_or(|cursor| key.as_bytes() > cursor.as_bytes())
+                 })
+                 .take(limit)
+                 .map(|(key, sender_payload)| {
+@@ -245,3 +249,64 @@
+         )),
+     }
+ }
++
++#[cfg(test)]
++mod pagination_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn repeated_block_sightings_do_not_repeat_across_pages() -> anyhow::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let db = fjall::Config::new(temp.path().join("db")).open_transactional()?;
++        let index = GroupMessageByBlindedGroupIdPartition::new(&db)?;
++        let payloads = TxIdToGroupMessagePartition::new(&db)?;
++        let accepted = TxIDToAcceptancePartition::new(&db)?;
++        let mut wtx = db.write_tx()?;
++        // Three original transactions share a timestamp. A fourth arrives later.
++        // Repeated sightings straddle page boundaries and have later timestamps.
++        for (id, stamp, hash) in [(1, 100u64, 1), (2, 100, 2), (1, 100, 3),
++                                  (3, 100, 4), (1, 101, 5), (4, 102, 6), (2, 103, 7)] {
++            index.insert_wtx(&mut wtx, &GroupMessageKeyByBlindedGroupId {
++                blinded_group_id: [9; 32], block_time: stamp.into(),
++                block_hash: [hash; 32], version: 1, tx_id: [id; 32],
++            }, None)?;
++            payloads.insert_wtx(&mut wtx, &[id; 32], &[id]);
++        }
++        wtx.commit()?.map_err(|_| anyhow::anyhow!("fixture conflict"))?;
++        let config = serde_json::from_value(serde_json::json!({
++            "kasia_indexer_db_root": temp.path().join("context"),
++            "kaspa_node_wborsh_url": "ws://127.0.0.1:1"
++        }))?;
++        let context = crate::context::get_indexer_context(&config)?;
++        let api = GroupMessageApi::new(db, index, accepted, payloads,
++            std::sync::Arc::new(indexer_actors::metrics::IndexerMetrics::new()), context);
++        for limit in [1, 2, 3] {
++            let mut cursor = None;
++            let mut ids = Vec::new();
++            for _ in 0..10 {
++                let response = get_group_messages_by_blinded_group_id(State(api.clone()),
++                    Query(GroupMessagePaginationParams { limit: Some(limit),
++                        block_time: None, cursor: cursor.clone(),
++                        blinded_group_id: "09".repeat(32) })).await.into_response();
++                assert_eq!(response.status(), StatusCode::OK);
++                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await?;
++                let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes)?;
++                if rows.is_empty() { break; }
++                for row in &rows { ids.push(row["tx_id"].as_str().unwrap().to_owned()); }
++                let next = rows.last().unwrap()["cursor"].as_str().unwrap().to_owned();
++                assert_ne!(cursor.as_ref(), Some(&next));
++                cursor = Some(next);
++            }
++            assert_eq!(ids, [1u8, 2, 3, 4].map(|id| faster_hex::hex_string(&[id; 32])));
++        }
++        // A timestamp-only resume must not return an old transaction's later sighting.
++        let response = get_group_messages_by_blinded_group_id(State(api),
++            Query(GroupMessagePaginationParams { limit: Some(50), block_time: Some(101),
++                cursor: None, blinded_group_id: "09".repeat(32) })).await.into_response();
++        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await?;
++        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes)?;
++        assert_eq!(rows.len(), 1);
++        assert_eq!(rows[0]["tx_id"], "04".repeat(32));
++        Ok(())
++    }
++}
+--- a/indexer/src/api/v1/group_control.rs
++++ b/indexer/src/api/v1/group_control.rs
+@@ -177,13 +177,15 @@
+ 
+         state
+             .group_control_by_sender_partition
+-            .get_by_sender_from_block_time(&rtx, &sender, from_block_time)
++            .get_by_sender_from_block_time(&rtx, &sender, 0)
+             .process_results(|iter| {
+                 iter.filter(|message| {
+-                    cursor_key
+-                        .as_ref()
+-                        .is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+-                        && seen_tx_ids.insert(message.tx_id)
++                    // Deduplicate before the boundary, including prior-page sightings.
++                    seen_tx_ids.insert(message.tx_id)
++                        && message.block_time.get() >= from_block_time
++                        && cursor_key
++                            .as_ref()
++                            .is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+                 })
+                 .take(limit)
+                 .map(|message_key| {
+@@ -344,13 +346,15 @@
+ 
+         state
+             .group_control_by_recipient_partition
+-            .get_by_recipient_from_block_time(&rtx, &recipient, from_block_time)
++            .get_by_recipient_from_block_time(&rtx, &recipient, 0)
+             .process_results(|iter| {
+                 iter.filter(|(message, _sender)| {
+-                    cursor_key
+-                        .as_ref()
+-                        .is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+-                        && seen_tx_ids.insert(message.tx_id)
++                    // Deduplicate before the boundary, including prior-page sightings.
++                    seen_tx_ids.insert(message.tx_id)
++                        && message.block_time.get() >= from_block_time
++                        && cursor_key
++                            .as_ref()
++                            .is_none_or(|cursor| message.as_bytes() > cursor.as_bytes())
+                 })
+                 .take(limit)
+                 .map(|(message_key, sender_payload)| {

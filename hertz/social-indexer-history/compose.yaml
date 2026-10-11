@@ -1,0 +1,43 @@
+# Independent staging only: no shared networks, public ports, live volumes or node.
+name: ${HISTORY_PROJECT:?required}
+services:
+  database:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_USER: social_history
+      POSTGRES_DB: social_history_staging
+      POSTGRES_PASSWORD: ${HISTORY_DB_PASSWORD:?required}
+    command: [-c, shared_preload_libraries=pg_stat_statements]
+    volumes:
+      - history_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/00-history.sql:ro
+    networks: [history]
+    mem_limit: 512m
+    cpus: 1
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U social_history -d social_history_staging]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  processor:
+    image: ${SOCIAL_PROCESSOR_IMAGE:?immutable local image required}
+    pull_policy: never
+    command: [--upgrade-db, --network, '${SOCIAL_NETWORK:?required}', --db-host, database, --db-port, '5432', --db-name, social_history_staging, --db-user, social_history, --db-password, '${HISTORY_DB_PASSWORD:?required}', --db-max-connections, '3', --workers, '1']
+    depends_on:
+      database: {condition: service_healthy}
+    networks: [history]
+    mem_limit: 768m
+    cpus: 1
+  web:
+    image: ${SOCIAL_WEB_IMAGE:?immutable local image required}
+    pull_policy: never
+    command: [--db-host, database, --db-port, '5432', --db-name, social_history_staging, --db-user, social_history, --db-password, '${HISTORY_DB_PASSWORD:?required}', --bind-address, '0.0.0.0:3001', --worker-threads, '1', --db-max-connections, '3']
+    depends_on:
+      database: {condition: service_healthy}
+    networks: [history]
+    mem_limit: 256m
+    cpus: 0.5
+networks:
+  history: {internal: true}
+volumes:
+  history_data: {}
