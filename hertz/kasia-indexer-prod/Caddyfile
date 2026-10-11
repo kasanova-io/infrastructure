@@ -1,19 +1,17 @@
-# BEGIN KSNV-304 DEV KASIA INDEXER
-dev-indexer.kasanova.io {
-    # Upstream exposes unauthenticated maintenance operations. Keep them off
-    # the public route; migrations run through SSH against the private port.
+# BEGIN KASANOVA PROD CHATS INDEXER
+indexer.kasanova.io {
     @maintenance path /history-import /history-import/* /contextual-messages/import /contextual-messages/import/* /internal /internal/* /export /export/* /import-file /import-file/* /personal/* /self-stash-gc-orphans /self-stash-gc-orphans/*
     respond @maintenance 404
 
     handle /healthz {
         rewrite * /metrics
-        reverse_proxy chats_indexer_dev:8080
+        reverse_proxy kasia_indexer_prod:8080
     }
 
-    reverse_proxy chats_indexer_dev:8080 {
+    reverse_proxy kasia_indexer_prod:8080 {
         health_uri /metrics
         health_interval 30s
         health_timeout 5s
     }
 }
-# END KSNV-304 DEV KASIA INDEXER
+# END KASANOVA PROD CHATS INDEXER

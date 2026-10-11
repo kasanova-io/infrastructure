@@ -1,0 +1,8 @@
+# Temporary override while importing verified historical mainnet transactions.
+# Remove this override and recreate the service after migration verification.
+services:
+  kasia_indexer_prod:
+    environment:
+      KASANOVA_HISTORY_IMPORT_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18082:8080"

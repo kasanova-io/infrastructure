@@ -1,11 +1,10 @@
-name: chats_indexer_dev
+name: chats_indexer_candidate
 
 services:
-  chats_indexer_dev:
-    image: ${CHATS_INDEXER_IMAGE:?CHATS_INDEXER_IMAGE must be the tested immutable image ID}
-    container_name: chats_indexer_dev
-    restart: unless-stopped
+  indexer:
+    image: ${CHATS_INDEXER_IMAGE:?CHATS_INDEXER_IMAGE must be the tested image ID}
     pull_policy: never
+    restart: unless-stopped
     environment:
       KASIA_INDEXER_DB_ROOT: /app/data
       KASPA_NODE_WBORSH_URL: ws://kaspad-testnet10:17210
@@ -21,35 +20,26 @@ services:
       APNS_TOPIC: io.kasanova.wallet
       APNS_ENVIRONMENT: sandbox
       APNS_KEY_PATH: /run/secrets/apns-key.p8
-      RUST_BACKTRACE: "1"
       RUST_LOG: info
-    expose:
-      - "8080"
+    # Candidate is only accessible over SSH/loopback, never the public route.
+    ports:
+      - "127.0.0.1:18080:8080"
     volumes:
-      - chats_indexer_dev_data:/app/data
+      - candidate_data:/app/data
       - ${FCM_SERVICE_ACCOUNT_HOST_PATH:?FCM_SERVICE_ACCOUNT_HOST_PATH is required}:/run/secrets/firebase-service-account.json:ro
       - ${APNS_KEY_HOST_PATH:?APNS_KEY_HOST_PATH is required}:/run/secrets/apns-key.p8:ro
     networks:
       - caddy_caddy_net
     stop_signal: SIGINT
     stop_grace_period: 90s
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/metrics"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 90s
-    labels:
-      io.kasanova.environment: dev
-      io.kasanova.component: chats
-      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?DEPLOYMENT_REVISION is required}
     mem_limit: 2g
-    cpus: 1
+    cpus: 2
+    labels:
+      io.kasanova.environment: dev-candidate
+      io.kasanova.source-revision: ${DEPLOYMENT_REVISION:?DEPLOYMENT_REVISION is required}
 
 volumes:
-  chats_indexer_dev_data:
-    external: true
-    name: ${CHATS_INDEXER_DB_VOLUME:?CHATS_INDEXER_DB_VOLUME must name the verified migrated volume}
+  candidate_data:
 
 networks:
   caddy_caddy_net:
