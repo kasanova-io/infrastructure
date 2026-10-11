@@ -1,0 +1,29 @@
+--- a/indexer/src/api/v1.rs
++++ b/indexer/src/api/v1.rs
+@@ -35,6 +35,7 @@
+ 
+ pub mod contextual_messages;
+ pub mod export;
++pub mod history;
+ pub mod group_control;
+ pub mod group_messages;
+ pub mod handshakes;
+@@ -242,6 +243,7 @@
+                 "/metrics/prometheus",
+                 get(get_prometheus_metrics).with_state(self.metrics.clone()),
+             )
++            .route("/history-import", post(history::import_history).layer(DefaultBodyLimit::max(8 * 1024 * 1024)).with_state(self.export_api.clone()))
+             // KaChat fork: full-store export + import-file (large-body).
+             .route(
+                 "/export",
+--- a/indexer/src/api/v1/export.rs
++++ b/indexer/src/api/v1/export.rs
+@@ -35,7 +35,7 @@
+ 
+ #[derive(Clone)]
+ pub struct ExportApi {
+-    tx_keyspace: TxKeyspace,
++    pub(super) tx_keyspace: TxKeyspace,
+ }
+ 
+ impl ExportApi {
