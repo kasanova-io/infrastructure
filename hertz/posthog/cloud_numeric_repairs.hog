@@ -1,0 +1,15 @@
+// Restore original binary64 values carried as decimal strings.
+// Applied only to events with the owned repair marker.
+if (empty(event.properties?.__kasanova_numeric_repairs)) {
+    return event
+}
+let result := event
+let repairs := jsonParse(event.properties.__kasanova_numeric_repairs)
+for (let repair in repairs) {
+    let node := result.properties
+    for (let i := 1; i < length(repair.path); i := i + 1) {
+        node := node[repair.path[i]]
+    }
+    node[repair.path[length(repair.path)]] := toFloat(repair.value)
+}
+return result
