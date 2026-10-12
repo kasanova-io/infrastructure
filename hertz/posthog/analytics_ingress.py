@@ -322,6 +322,8 @@ class Journal:
                 if native['event'] != original['event_type'] or not native['event'] or native['event'].startswith('$'):
                     raise ValueError('History source event name differs')
                 occurrence = dt.datetime.fromisoformat(original['event_time'].replace('Z', '+00:00'))
+                if occurrence.tzinfo is None:
+                    occurrence = occurrence.replace(tzinfo=dt.timezone.utc)
                 if dt.datetime.fromisoformat(native['timestamp'].replace('Z', '+00:00')) != occurrence:
                     raise ValueError('History source occurrence timestamp differs')
                 if original.get('user_properties'):
