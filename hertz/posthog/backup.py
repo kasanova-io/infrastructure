@@ -207,6 +207,51 @@ def interrupt_operation(signum, frame):
     raise InterruptedError('Owned backup/restore interrupted')
 
 
+def restart_owned_services(running, services, live, backup, save):
+    """Start all original dependencies before waiting for their gateway."""
+    if any(c['Config']['Labels'].get('com.docker.compose.project') != PROJECT for c in running):
+        raise RuntimeError('Refuse recovery of another project')
+    original_names = [c['Name'] for c in running]
+    if len(set(original_names)) != len(original_names):
+        raise RuntimeError('Duplicate recovery target')
+    storage_names = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in STORAGE]
+    core_names = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in {'web', 'proxy'}]
+    other_names = [c['Name'] for c in running if c['Name'] not in storage_names + core_names]
+    try:
+        if storage_names:
+            run(['docker', 'start', *storage_names])
+        if core_names:
+            run(['docker', 'start', *core_names])
+    finally:
+        # Web/gateway startup depends on services in this group. Waiting first
+        # strands them offline until the health timeout's recovery finally block.
+        if other_names:
+            run(['docker', 'start', *other_names])
+    for attempt in range(120):
+        try:
+            req = urllib.request.Request('http://127.0.0.1:18084/_health', headers={'Host': 'posthog.kasanova.io'})
+            with urllib.request.urlopen(req, timeout=3) as response:
+                if response.status == 200:
+                    break
+        except Exception:
+            pass
+        time.sleep(2)
+    else:
+        if live:
+            raise RuntimeError('Owned gateway did not recover after live backup')
+    if live:
+        for attempt in range(60):
+            if owned_stack_ready(services['analytics-ingress']['Name']):
+                break
+            time.sleep(2)
+        else:
+            raise RuntimeError('Owned gateway and analytics ingress did not recover after restart')
+    save(backup / 'restart.json', {'owned_gateway_and_ingress_ready': True if live else None,
+         'original_running_containers_restarted': original_names,
+         'completed_at': dt.datetime.now(dt.timezone.utc).isoformat()})
+    print(json.dumps({'owned_services_restarted': len(original_names)}), flush=True)
+
+
 def main(offline_import_reconciliation=None, live=False, verify_restore=False):
     if verify_restore and not live:
         raise RuntimeError('Automatic restore verification requires live checkpoint scope')
@@ -473,40 +518,7 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
             raise
         finally:
             if stopped:
-                storage_names = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in STORAGE]
-                core_names = [c['Name'] for c in running if c['Config']['Labels']['com.docker.compose.service'] in {'web', 'proxy'}]
-                other_names = [c['Name'] for c in running if c['Name'] not in storage_names + core_names]
-                try:
-                    if storage_names:
-                        run(['docker', 'start', *storage_names])
-                    if core_names:
-                        run(['docker', 'start', *core_names])
-                    for attempt in range(120):
-                        try:
-                            req = urllib.request.Request('http://127.0.0.1:18084/_health', headers={'Host': 'posthog.kasanova.io'})
-                            with urllib.request.urlopen(req, timeout=3) as response:
-                                if response.status == 200:
-                                    break
-                        except Exception:
-                            pass
-                        time.sleep(2)
-                    else:
-                        if live:
-                            raise RuntimeError('Owned gateway did not recover after live backup')
-                finally:
-                    if other_names:
-                        run(['docker', 'start', *other_names])
-                if live:
-                    for attempt in range(60):
-                        if owned_stack_ready(services['analytics-ingress']['Name']):
-                            break
-                        time.sleep(2)
-                    else:
-                        raise RuntimeError('Owned gateway and analytics ingress did not recover after restart')
-                save(backup / 'restart.json', {'owned_gateway_and_ingress_ready': True if live else None,
-                     'original_running_containers_restarted': original_names,
-                     'completed_at': dt.datetime.now(dt.timezone.utc).isoformat()})
-                print(json.dumps({'owned_services_restarted': len(original_names)}), flush=True)
+                restart_owned_services(running, services, live, backup, save)
         if verify_restore:
             result = json.loads(run(['python3', str(ROOT / 'verify_backup_restore.py'), str(backup)]))
             if result.get('analytics_journal_all_rows_and_pending_verified') is not True:
