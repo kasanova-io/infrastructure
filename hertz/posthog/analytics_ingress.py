@@ -215,7 +215,7 @@ class Journal:
                 break
             selected = [row for row in rows if row[0] == project]
             route = next(r for r in self.routes.values() if str(r['project_id']) == project)
-            body = canonical({'api_key': route['project_token'],
+            body = precise_json({'api_key': route['project_token'],
                               'batch': [json.loads(row[2]) for row in selected]}).encode()
             request = urllib.request.Request(host.rstrip('/') + '/batch/', data=body,
                                              headers={'Content-Type': 'application/json'})
@@ -266,20 +266,104 @@ class Journal:
                 'ORDER BY received,id LIMIT 100', (project, destination)).fetchall()
         if not rows:
             return 0
-        body = precise_json({'api_key': cloud['project_token'],
-                          'batch': [cloud_event(json.loads(row[1])) for row in rows]}).encode()
-        request = urllib.request.Request(host + '/batch/', data=body,
-                                         headers={'Content-Type': 'application/json'})
-        if stopping is not None and stopping.is_set():
-            return 0
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.load(response)
-            if result.get('status') not in (1, 'Ok'):
-                raise RuntimeError('Cloud capture did not acknowledge batch')
+        boundary = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=48)
+        groups = {True: [], False: []}
+        for row in rows:
+            event = json.loads(row[1])
+            historical = dt.datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')) <= boundary
+            groups[historical].append((row[0], event))
+        delivered = 0
+        for historical, selected in groups.items():
+            if not selected:
+                continue
+            payload = {'api_key': cloud['project_token'],
+                       'batch': [cloud_event(event) for _, event in selected]}
+            if historical:
+                payload['historical_migration'] = True
+            request = urllib.request.Request(host + '/batch/', data=precise_json(payload).encode(),
+                                             headers={'Content-Type': 'application/json'})
+            if stopping is not None and stopping.is_set():
+                break
+            with urllib.request.urlopen(request, timeout=30) as response:
+                result = json.load(response)
+                if result.get('status') not in (1, 'Ok'):
+                    raise RuntimeError('Cloud capture did not acknowledge batch')
+            with self.connect() as con:
+                con.executemany('UPDATE records SET cloud_destination=? WHERE project=? AND id=?',
+                                [(destination, project, identifier) for identifier, _ in selected])
+            delivered += len(selected)
+        return delivered
+
+    def enqueue_history(self, events, project):
+        """Own source events durably before suppressing matching SDK retries.
+
+        The same transaction holds the original Amplitude payload, unchanged
+        native UUID/envelope and retry identity. Delivery uses the existing
+        independent Hertz/Cloud workers; an outage never loses a reservation.
+        Historical person-property writes require a separate supported importer.
+        """
+        project = str(project)
+        route = next((r for r in self.routes.values() if str(r['project_id']) == project), None)
+        if route is None:
+            raise ValueError('Unknown history project')
+        queued = []
         with self.connect() as con:
-            con.executemany('UPDATE records SET cloud_destination=? WHERE project=? AND id=?',
-                            [(destination, project, row[0]) for row in rows])
-        return len(rows)
+            con.execute('BEGIN IMMEDIATE')
+            for native in events:
+                properties = native['properties']
+                raw = properties['__amplitude_original_record']
+                original = json.loads(raw)
+                if hashlib.sha256(raw.encode()).hexdigest() != properties['__amplitude_record_sha256']:
+                    raise ValueError('Original history digest differs')
+                if str(original['app']) != str(route['legacy_app']):
+                    raise ValueError('History source project differs')
+                if native['uuid'] != original['uuid'] or str(uuid.UUID(native['uuid'])) != native['uuid']:
+                    raise ValueError('History source UUID differs')
+                if native['event'] != original['event_type'] or not native['event'] or native['event'].startswith('$'):
+                    raise ValueError('History source event name differs')
+                occurrence = dt.datetime.fromisoformat(original['event_time'].replace('Z', '+00:00'))
+                if dt.datetime.fromisoformat(native['timestamp'].replace('Z', '+00:00')) != occurrence:
+                    raise ValueError('History source occurrence timestamp differs')
+                if original.get('user_properties'):
+                    raise ValueError('Historical person snapshots need a supported import')
+                for key, value in (original.get('event_properties') or {}).items():
+                    if key not in properties or canonical(properties[key]) != canonical(value):
+                        raise ValueError('History source property differs')
+                if properties.get('$set') or properties.get('$set_once') or properties.get('$unset'):
+                    raise ValueError('Historical person updates need a supported import')
+                if NUMERIC_REPAIRS in properties:
+                    raise ValueError('Reserved numeric repair collision')
+                source_id = original.get('$insert_id')
+                if not source_id:
+                    raise ValueError('History needs an original retry identifier')
+                sdk_id = str(uuid.uuid5(NAMESPACE, project + ':' + str(source_id)))
+                existing = con.execute('SELECT id,native FROM records WHERE project=? AND id IN (?,?)',
+                                       (project, sdk_id, native['uuid'])).fetchall()
+                if existing:
+                    # A concurrently committed SDK event already owns delivery.
+                    if any(identifier == sdk_id for identifier, _ in existing):
+                        queued.append(json.loads(next(payload for identifier, payload in existing if identifier == sdk_id)))
+                        continue
+                    if any(payload != canonical(native) for _, payload in existing):
+                        raise ValueError('Previously queued history envelope differs')
+                    queued.append(native)
+                    continue
+                if con.execute('SELECT 1 FROM history WHERE project=? AND source_id=?',
+                               (project, str(source_id))).fetchone():
+                    continue
+                device = original.get('device_id')
+                if device:
+                    known = con.execute('SELECT distinct_id FROM identities WHERE project=? AND device=?',
+                                        (project, device)).fetchone()
+                    if known and known[0] != native['distinct_id']:
+                        raise ValueError('History would change an existing device identity')
+                    con.execute('INSERT OR IGNORE INTO identities VALUES (?,?,?)',
+                                (project, device, native['distinct_id']))
+                con.execute('INSERT INTO records(project,id,raw,native,received) VALUES (?,?,?,?,?)',
+                            (project, native['uuid'], raw, canonical(native), time.time()))
+                con.execute('INSERT INTO history VALUES (?,?)', (project, str(source_id)))
+                queued.append(native)
+        return queued
 
     def seed_history(self, source, project):
         """Bind archived device identities and skip SDK retries already imported."""
