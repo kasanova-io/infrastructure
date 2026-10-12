@@ -73,7 +73,9 @@ class DailyRefillTest(unittest.TestCase):
             def __init__(self,*args):self.record=['screen_viewed','wallet-id','2026-10-10T18:00:00Z',{'value':0.2}];self.captured=[]
             def query(self,sql):
                 assert 'argMax' in sql and 'created_at' in sql
-                return [[row['uuid'],self.record]]
+                created='2026-10-12 01:00:00.123456'
+                record=self.record+[created] if 'timestamp,properties' in sql else self.record[:3]+[created]
+                return [[row['uuid'],record]]
             def capture(self,events,**kwargs):
                 self.captured.extend(events);e=events[0];self.record=[e['event'],e['distinct_id'],e['timestamp'],e['properties']]
         client=Client();config={**self.config,'cloud_credentials':'private','native_delta_floor':'2026-10-10T00:00:00+00:00'}
@@ -105,7 +107,8 @@ class DailyRefillTest(unittest.TestCase):
         from unittest.mock import MagicMock
         client=MagicMock();client.query.return_value=[[native['uuid'],[native['event'],native['distinct_id'],native['timestamp'],{**native['properties'],'$ip':'cloud-backend'}]]]
         config={**self.config,'ingress_config':str(ingress),'cloud_credentials':'private','native_delta_floor':'2026-10-10T00:00:00+00:00'}
-        with patch.object(daily_refill,'CloudClient',return_value=client),patch.object(daily_refill,'source_query',return_value=[row]):
+        with patch.object(daily_refill,'CloudClient',return_value=client),patch.object(daily_refill,'source_query',return_value=[row]), \
+             patch.object(daily_refill,'cloud_readback',return_value=dict(client.query.return_value)):
             result=daily_refill.cloud_gap(config,{'native_cutoff':'2026-10-10T00:00:00+00:00'},'prod',self.root,dt.datetime.now(dt.timezone.utc))
         client.capture.assert_not_called();self.assertEqual(result['existing_versions_repaired_and_verified'],0)
 
@@ -119,6 +122,44 @@ class DailyRefillTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):daily_refill.run(config_path)
         self.assertEqual(json.loads(state_path.read_text()),state)
         self.assertEqual(self.identity.read_bytes(),before)
+
+    def test_bounded_fields_include_newer_wrong_timestamp_and_keep_latest_version(self):
+        from unittest.mock import MagicMock
+        uid='00000000-0000-4000-8000-000000000001'
+        source={'uuid':uid,'timestamp_us':daily_refill.time_us('2026-10-10T18:00:00.999999Z')}
+        header=['wrong_event','wrong-id','2026-10-12T23:00:00.000001Z','2026-10-12 23:01:00.000001']
+        fields=header[:3]+[{'wrong':'property'},header[3]]
+        client=MagicMock();client.query.side_effect=[[[uid,header]],[[uid,fields]],[[uid,header]]]
+        self.assertEqual(daily_refill.cloud_readback(client,[source]),{uid:fields[:4]})
+        sql=client.query.call_args_list[1].args[0]
+        self.assertIn("'2026-10-10 17:59:59'",sql)
+        self.assertIn("'2026-10-12 23:00:02'",sql)
+        self.assertNotIn('event IN',sql)
+
+    def test_newer_outside_bound_version_during_read_retries_before_certifying(self):
+        from unittest.mock import MagicMock
+        uid='00000000-0000-4000-8000-000000000001'
+        source={'uuid':uid,'timestamp_us':daily_refill.time_us('2026-10-10T18:00:00Z')}
+        old=['event','id','2026-10-10T18:00:00Z','2026-10-12 00:00:00']
+        new=['event','id','2026-10-15T18:00:00Z','2026-10-12 00:00:01']
+        old_fields=old[:3]+[{'old':True},old[3]];new_fields=new[:3]+[{'new':True},new[3]]
+        client=MagicMock();client.query.side_effect=[[[uid,old]],[[uid,old_fields]],[[uid,new]],[[uid,new]],[[uid,new_fields]],[[uid,new]]]
+        with patch.object(daily_refill.time,'sleep'):
+            actual=daily_refill.cloud_readback(client,[source])
+        self.assertEqual(actual,{uid:new_fields[:4]});self.assertEqual(client.query.call_count,6)
+        self.assertIn("'2026-10-15 18:00:02'",client.query.call_args_list[4].args[0])
+
+    def test_incomplete_or_wrong_body_version_never_certifies_after_bounded_attempts(self):
+        from unittest.mock import MagicMock
+        uid='00000000-0000-4000-8000-000000000001'
+        source={'uuid':uid,'timestamp_us':daily_refill.time_us('2026-10-10T18:00:00Z')}
+        header=['event','id','2026-10-10T18:00:00Z','2026-10-12 00:00:01']
+        old_fields=header[:3]+[{},'2026-10-12 00:00:00']
+        for body in ([],[[uid,old_fields]]):
+            client=MagicMock();client.query.side_effect=[[[uid,header]],body,[[uid,header]]]*3
+            with patch.object(daily_refill.time,'sleep'),self.assertRaisesRegex(RuntimeError,'latest UUID versions'):
+                daily_refill.cloud_readback(client,[source])
+            self.assertEqual(client.query.call_count,9)
 
 
 if __name__=='__main__':unittest.main()
