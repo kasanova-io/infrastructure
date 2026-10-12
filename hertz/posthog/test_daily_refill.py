@@ -115,6 +115,38 @@ class DailyRefillTest(unittest.TestCase):
         client.capture.assert_not_called();self.assertEqual(result['existing_versions_repaired_and_verified'],0)
         self.assertEqual(readback.call_count,1)
 
+    def test_faithful_person_operations_with_cloud_enrichment_are_not_replayed(self):
+        from unittest.mock import MagicMock
+        properties={'$set':{'version':'1','nested':{'exact':[True,1,None]}},'$set_once':{'first_version':'1'}}
+        row={'uuid':'00000000-0000-4000-8000-000000000003','event':'$identify','distinct_id':'wallet-id','timestamp_us':daily_refill.time_us('2026-10-10T18:00:00Z'),'properties':json.dumps(properties)}
+        actual=['$identify','wallet-id','2026-10-10T18:00:00Z',{'$set':{**properties['$set'],'$geoip_city_name':'Cloud city'},'$set_once':{**properties['$set_once'],'$initial_geoip_city_name':'Cloud city'}}]
+        client=MagicMock();config={**self.config,'cloud_credentials':'private','native_delta_floor':'2026-10-10T00:00:00+00:00'}
+        with patch.object(daily_refill,'CloudClient',return_value=client),patch.object(daily_refill,'source_query',return_value=[row]),patch.object(daily_refill,'cloud_readback',return_value={row['uuid']:actual}):
+            result=daily_refill.cloud_gap(config,{'native_cutoff':'2026-10-10T00:00:00+00:00'},'dev',self.root,dt.datetime.now(dt.timezone.utc))
+        client.capture.assert_not_called();self.assertEqual(result['source_events_checked'],1)
+        self.assertEqual(result['existing_versions_repaired_and_verified'],0)
+
+    def test_person_operation_source_values_and_other_fields_remain_exact(self):
+        from unittest.mock import MagicMock
+        properties={'$set':{'nested':{'value':[True,1,None]}},'$set_once':{'first':'kept'},'$unset':['removed'],'custom':{'exact':1}}
+        row={'uuid':'00000000-0000-4000-8000-000000000003','event':'$identify','distinct_id':'wallet-id','timestamp_us':daily_refill.time_us('2026-10-10T18:00:00Z'),'properties':json.dumps(properties)}
+        invalid=[]
+        for key in ('$set','$set_once'):
+            missing=json.loads(json.dumps(properties));missing[key]={};invalid.append(missing)
+            wrong_type=json.loads(json.dumps(properties));wrong_type[key]=[];invalid.append(wrong_type)
+        nested=json.loads(json.dumps(properties));nested['$set']['nested']['extra']='not source';invalid.append(nested)
+        typed=json.loads(json.dumps(properties));typed['$set']['nested']['value'][0]=1;invalid.append(typed)
+        once=json.loads(json.dumps(properties));once['$set_once']['first']='changed';invalid.append(once)
+        unset=json.loads(json.dumps(properties));unset['$unset'].append('other');invalid.append(unset)
+        custom=json.loads(json.dumps(properties));custom['custom']['extra']=1;invalid.append(custom)
+        config={**self.config,'cloud_credentials':'private','native_delta_floor':'2026-10-10T00:00:00+00:00'}
+        for props in invalid:
+            with self.subTest(props=props):
+                client=MagicMock();actual=['$identify','wallet-id','2026-10-10T18:00:00Z',props]
+                with patch.object(daily_refill,'CloudClient',return_value=client),patch.object(daily_refill,'source_query',return_value=[row]),patch.object(daily_refill,'cloud_readback',return_value={row['uuid']:actual}),self.assertRaisesRegex(RuntimeError,'person updates'):
+                    daily_refill.cloud_gap(config,{'native_cutoff':'2026-10-10T00:00:00+00:00'},'dev',self.root,dt.datetime.now(dt.timezone.utc))
+                client.capture.assert_not_called()
+
     def test_failed_cloud_leg_does_not_advance_any_shared_watermark_or_identity_map(self):
         runtime=self.root/'runtime';(runtime/'operations').mkdir(parents=True)
         state_path=self.root/'state.json';state={'amplitude_project_id':734469,'amplitude_upload_cutoff':'2026-10-10T17:00:00+00:00','native_cutoff':'2026-10-12T01:00:00+00:00'}
