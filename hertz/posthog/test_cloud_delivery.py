@@ -9,7 +9,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from analytics_ingress import Journal, precise_json
+from analytics_ingress import Journal, precise_json, cloud_event, NUMERIC_REPAIRS
 from backup import journal_inventory, snapshot_journal
 
 
@@ -44,7 +44,7 @@ class CloudDeliveryTest(unittest.TestCase):
             body = json.loads(send.call_args.args[0].data)
             with self.journal.connect() as con:
                 original = json.loads(con.execute('SELECT native FROM records').fetchone()[0])
-            self.assertEqual(body['batch'], [original])
+            self.assertEqual(body['batch'], [cloud_event(original)])
             self.assertEqual(body['api_key'], 'cloud-prod')
             self.assertEqual(send.call_args.args[0].full_url, 'https://us.i.posthog.com/batch/')
             restarted = Journal(self.path, self.routes)
@@ -65,10 +65,35 @@ class CloudDeliveryTest(unittest.TestCase):
         request = next(call.args[0] for call in send.call_args_list if json.loads(call.args[0].data)['api_key']=='cloud-dev')
         self.assertIn(str(Decimal.from_float(value)).encode(),request.data)
         actual=json.loads(request.data)['batch'][0]
-        self.assertEqual(actual,json.loads(original[1]))
+        self.assertEqual(actual,cloud_event(json.loads(original[1])))
         self.assertEqual(actual['properties']['fraction'],value)
         with self.journal.connect() as con:
             self.assertEqual(con.execute("SELECT raw,native FROM records WHERE project='2'").fetchone(),original)
+
+    def test_reserved_numeric_marker_rejected_before_ack_with_no_partial_batch(self):
+        bad = {**self.event, 'insert_id': 'marker-collision',
+               'event_properties': {NUMERIC_REPAIRS: 'spoofed'}}
+        good = {**self.event, 'insert_id': 'valid-before-collision'}
+        with self.assertRaises(ValueError):
+            self.journal.accept({'api_key': 'dev', 'events': [good, bad]})
+        with self.journal.connect() as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM records WHERE project='2'").fetchone()[0], 0)
+
+    def test_numeric_repairs_preserve_originals_types_and_nested_paths(self):
+        properties = {'price': 0.10000000000000002, 'nested': [{'price': 0.09081934846989141}],
+                      'zero': -0.0, 'integer': 9007199254740991, 'boolean': True, 'null': None}
+        event = {'properties': properties, 'uuid': 'original'}
+        result = cloud_event(event)
+        self.assertNotIn(NUMERIC_REPAIRS, properties)
+        self.assertEqual(result['uuid'], event['uuid'])
+        repairs = json.loads(result['properties'][NUMERIC_REPAIRS])
+        self.assertEqual([r['path'] for r in repairs], [['price'], ['nested', 1, 'price'], ['zero']])
+        self.assertEqual([r['value'] for r in repairs], [repr(properties['price']), repr(properties['nested'][0]['price']), '-0.0'])
+        for key in properties:
+            self.assertEqual(result['properties'][key], properties[key])
+        self.assertIs(cloud_event({'properties': {'integer': 1}})['properties']['integer'], 1)
+        with self.assertRaises(ValueError): cloud_event({'properties': {NUMERIC_REPAIRS: 'spoofed'}})
+        with self.assertRaises(ValueError): cloud_event({'properties': {'price': float('inf')}})
 
     def test_precise_json_retains_numeric_boolean_null_and_string_types(self):
         value={'nested':[0.09081934846989141,True,None,'0.09081934846989141'],
