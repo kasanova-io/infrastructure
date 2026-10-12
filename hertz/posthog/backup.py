@@ -15,6 +15,7 @@ import re
 import sqlite3
 import signal
 import shutil
+import math
 from contextlib import closing
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +33,102 @@ INGESTION = {'ingestion-general', 'ingestion-sessionreplay', 'ingestion-error-tr
 # manual commit call. Broker "lag" is not a persistence acknowledgment for them.
 # Their Kafka and Redis bytes are still included in every checkpoint.
 NON_COMMITTING_PREVIEW_GROUPS = {'livestream', 'livestream-session-recordings'}
+PROPERTY_DEFS_IMAGE = 'ghcr.io/posthog/posthog/property-defs-rs@sha256:b9cdc736af1a3af143392e1fad73cac1c7eb218165c15added8fec026985e0a0'
+# OCI source 000ac49165c9c4083726f54c298ba33c688db591, common/kafka
+# Offset.store(): stores message.offset(), not the next offset. This is a
+# capability of this exact binary, not permission to ignore consumer backlog.
+
+
+def property_tail_offsets(output):
+    rows, header = [], False
+    for line in output.splitlines():
+        fields = line.split()
+        if fields[:2] == ['TOPIC', 'PARTITION']:
+            if fields[:6] != ['TOPIC', 'PARTITION', 'CURRENT-OFFSET', 'LOG-START-OFFSET', 'LOG-END-OFFSET', 'LAG']:
+                raise RuntimeError('Unrecognized property-definition offsets')
+            header = True
+        elif header and fields:
+            if len(fields) < 6 or fields[0] != 'clickhouse_events_json' or any(not v.isdigit() for v in fields[1:6]):
+                raise RuntimeError('Unknown property-definition partition')
+            partition, current, start, end, lag = map(int, fields[1:6])
+            if end < start or current < start or end - current != lag:
+                raise RuntimeError('Invalid property-definition consumer offset')
+            rows.append([fields[0], partition, current, end, lag])
+    if not rows or len({(r[0], r[1]) for r in rows}) != len(rows):
+        raise RuntimeError('Missing or duplicate property-definition offsets')
+    return sorted(rows)
+
+
+def property_metrics(output):
+    result = {}
+    for line in output.splitlines():
+        if not line or line.startswith('#'):
+            continue
+        fields = line.split()
+        if len(fields) != 2:
+            raise RuntimeError('Unknown property-definition metrics')
+        name, value = fields
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise RuntimeError('Invalid property-definition metric')
+        key = name.split('{', 1)[0]
+        result[key] = result.get(key, 0) + value
+    required = {'prop_defs_events_received', 'prop_defs_seen_updates',
+        'prop_defs_batch_acquire_time_ms_count', 'prop_defs_channel_capacity',
+        'prop_defs_channel_capacity_total', 'prop_defs_channel_messages_in_flight'}
+    if not required.issubset(result):
+        raise RuntimeError('Missing property-definition drain metrics')
+    return result
+
+
+def property_drain_sample(container, kafka):
+    c = json.loads(run(['docker', 'inspect', container]))[0]
+    if (c['Config']['Labels'].get('com.docker.compose.project') != PROJECT
+        or c['Config']['Labels'].get('com.docker.compose.service') != 'property-defs-rs'
+        or c['Config']['Image'] != PROPERTY_DEFS_IMAGE
+        or not c['State']['Running'] or c['State']['OOMKilled'] or c['State']['Restarting']):
+        raise RuntimeError('Property-definition binary or ownership drift')
+    env = dict(v.split('=', 1) for v in c['Config']['Env'])
+    if env.get('MAX_ISSUE_PERIOD', '300') != '300' or env.get('PRODUCER_DRAIN_INTERVAL_SECS', '10') != '10':
+        raise RuntimeError('Property-definition batching configuration drift')
+    networks = [n['IPAddress'] for name, n in c['NetworkSettings']['Networks'].items()
+                if name.startswith(PROJECT + '_') and n.get('IPAddress')]
+    if len(networks) != 1:
+        raise RuntimeError('Unknown owned property-definition network')
+    base = 'http://' + networks[0] + ':' + env.get('BIND_PORT', '3301')
+    for path in ('/_readiness', '/_liveness'):
+        with urllib.request.urlopen(base + path, timeout=5) as response:
+            if response.status != 200:
+                raise RuntimeError('Property-definition worker is unhealthy')
+    with urllib.request.urlopen(base + '/metrics', timeout=5) as response:
+        metrics = property_metrics(response.read().decode())
+    offsets = property_tail_offsets(run(['docker', 'exec', kafka, 'rpk', 'group', 'describe', 'property-defs-rs']).decode())
+    return {'offsets': offsets, 'metrics': metrics, 'image': PROPERTY_DEFS_IMAGE}
+
+
+def property_batch_drained(first, latest):
+    a, b = first['metrics'], latest['metrics']
+    if first['offsets'] != latest['offsets']:
+        return False
+    for key in ('prop_defs_events_received', 'prop_defs_seen_updates'):
+        if a[key] != b[key]:
+            return False
+    for key in ('prop_defs_issue_failed', 'prop_defs_event_parse_error', 'prop_defs_offset_store_failures'):
+        if a.get(key, 0) != b.get(key, 0):
+            raise RuntimeError('Property-definition processing failed during drain')
+    # This binary has one update_consumer_loop. Its next acquisition starts only
+    # after process_batch awaits every database write. Two completed acquisitions
+    # after stable producer input cover the 10s producer buffer and the 300s
+    # partial batch, including an empty cycle after the final completed write.
+    return (b['prop_defs_batch_acquire_time_ms_count'] >= a['prop_defs_batch_acquire_time_ms_count'] + 2
+            and b['prop_defs_channel_messages_in_flight'] == 0
+            and b['prop_defs_channel_capacity'] == b['prop_defs_channel_capacity_total'])
+
+
+def property_tail_preserved(before, after):
+    return (len(before) == len(after) and all(
+        a[:2] == b[:2] and a[3] == b[3] and a[2] <= b[2] <= b[3]
+        for a, b in zip(before, after)))
 
 
 def run(args):
@@ -91,10 +188,13 @@ def consumer_lags(kafka):
     return parse_group_lags(summary, groups)
 
 
-def ingestion_drained(lags):
+def ingestion_drained(lags, property_tail=None):
     if not {'group1', 'clickhouse-ingestion', 'clickhouse-ingestion-historical'}.issubset(lags):
         raise RuntimeError('Required ingestion groups are absent')
-    return all(lag == 0 for group, lag in lags.items() if group not in NON_COMMITTING_PREVIEW_GROUPS)
+    return all(lag == 0 or (group == 'property-defs-rs' and property_tail is not None
+               and all(row[4] in (0, 1) for row in property_tail)
+               and lag == sum(row[4] for row in property_tail))
+               for group, lag in lags.items() if group not in NON_COMMITTING_PREVIEW_GROUPS)
 
 
 def journal_inventory(path):
@@ -433,11 +533,27 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
             if any(c['State']['ExitCode'] != 0 or c['State']['Running'] or c['State']['OOMKilled'] for c in capture_states):
                 raise RuntimeError('Capture did not drain and stop cleanly')
             consecutive = 0
+            property_first = None
+            property_latest = None
+            property_errors = None
             report['ingestion_drain_samples'] = []
-            for attempt in range(90):
+            for attempt in range(450):
                 lags = consumer_lags(services['kafka']['Name'])
-                report['ingestion_drain_samples'].append({'at': dt.datetime.now(dt.timezone.utc).isoformat(), 'group_lags': lags})
-                consecutive = consecutive + 1 if ingestion_drained(lags) else 0
+                property_latest = property_drain_sample(services['property-defs-rs']['Name'], services['kafka']['Name'])
+                errors = {k: property_latest['metrics'].get(k, 0) for k in
+                    ('prop_defs_issue_failed', 'prop_defs_event_parse_error', 'prop_defs_offset_store_failures')}
+                if property_errors is not None and errors != property_errors:
+                    raise RuntimeError('Property-definition processing failed during drain')
+                property_errors = errors
+                report['ingestion_drain_samples'].append({'at': dt.datetime.now(dt.timezone.utc).isoformat(),
+                    'group_lags': lags, 'property_definitions': property_latest})
+                if not ingestion_drained(lags, property_latest['offsets']):
+                    property_first = None
+                elif property_first is None or any(property_first['metrics'][k] != property_latest['metrics'][k]
+                        for k in ('prop_defs_events_received', 'prop_defs_seen_updates')) or property_first['offsets'] != property_latest['offsets']:
+                    property_first = property_latest
+                ready = property_first is not None and property_batch_drained(property_first, property_latest)
+                consecutive = consecutive + 1 if ready else 0
                 if consecutive >= 2: break
                 time.sleep(2)
             else:
@@ -445,8 +561,11 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
             if apps:
                 run(['docker', 'stop', '--time', '90', *apps])
             report['consumer_lags_after_app_shutdown'] = consumer_lags(services['kafka']['Name'])
-            if not ingestion_drained(report['consumer_lags_after_app_shutdown']):
+            frozen_tail = property_tail_offsets(run(['docker', 'exec', services['kafka']['Name'], 'rpk', 'group', 'describe', 'property-defs-rs']).decode())
+            if not property_tail_preserved(property_latest['offsets'], frozen_tail) or not ingestion_drained(report['consumer_lags_after_app_shutdown'], frozen_tail):
                 raise RuntimeError('App shutdown left pending ingestion work; checkpoint rejected')
+            report['property_definition_drain_proof'] = {'first': property_first, 'last': property_latest,
+                'frozen_offsets': frozen_tail, 'offsets_reset': False, 'database_batches_completed': True}
             # Capture a frozen event baseline with ClickHouse and its dependencies alive.
             frozen = json.loads(run(['docker', 'exec', services['clickhouse']['Name'], 'clickhouse-client', '--query',
                 "SELECT team_id,event,count() AS rows,uniqExact(uuid) AS unique_events FROM posthog.events GROUP BY team_id,event ORDER BY team_id,event FORMAT JSON"]))['data']
