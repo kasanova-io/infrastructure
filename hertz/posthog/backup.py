@@ -34,9 +34,9 @@ INGESTION = {'ingestion-general', 'ingestion-sessionreplay', 'ingestion-error-tr
 # Their Kafka and Redis bytes are still included in every checkpoint.
 NON_COMMITTING_PREVIEW_GROUPS = {'livestream', 'livestream-session-recordings'}
 PROPERTY_DEFS_IMAGE = 'ghcr.io/posthog/posthog/property-defs-rs@sha256:b9cdc736af1a3af143392e1fad73cac1c7eb218165c15added8fec026985e0a0'
-# OCI source 000ac49165c9c4083726f54c298ba33c688db591, common/kafka
-# Offset.store(): stores message.offset(), not the next offset. This is a
-# capability of this exact binary, not permission to ignore consumer backlog.
+# OCI source 000ac49165c9c4083726f54c298ba33c688db591 has a 10s producer
+# buffer and a 300s database batch. Broker lag must still be zero: rdkafka
+# 0.37.0 store_offset calls librdkafka's legacy offset_store, which adds one.
 
 
 def property_tail_offsets(output):
@@ -188,13 +188,10 @@ def consumer_lags(kafka):
     return parse_group_lags(summary, groups)
 
 
-def ingestion_drained(lags, property_tail=None):
+def ingestion_drained(lags):
     if not {'group1', 'clickhouse-ingestion', 'clickhouse-ingestion-historical'}.issubset(lags):
         raise RuntimeError('Required ingestion groups are absent')
-    return all(lag == 0 or (group == 'property-defs-rs' and property_tail is not None
-               and all(row[4] in (0, 1) for row in property_tail)
-               and lag == sum(row[4] for row in property_tail))
-               for group, lag in lags.items() if group not in NON_COMMITTING_PREVIEW_GROUPS)
+    return all(lag == 0 for group, lag in lags.items() if group not in NON_COMMITTING_PREVIEW_GROUPS)
 
 
 def journal_inventory(path):
@@ -547,7 +544,7 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
                 property_errors = errors
                 report['ingestion_drain_samples'].append({'at': dt.datetime.now(dt.timezone.utc).isoformat(),
                     'group_lags': lags, 'property_definitions': property_latest})
-                if not ingestion_drained(lags, property_latest['offsets']):
+                if not ingestion_drained(lags):
                     property_first = None
                 elif property_first is None or any(property_first['metrics'][k] != property_latest['metrics'][k]
                         for k in ('prop_defs_events_received', 'prop_defs_seen_updates')) or property_first['offsets'] != property_latest['offsets']:
@@ -562,7 +559,7 @@ def main(offline_import_reconciliation=None, live=False, verify_restore=False):
                 run(['docker', 'stop', '--time', '90', *apps])
             report['consumer_lags_after_app_shutdown'] = consumer_lags(services['kafka']['Name'])
             frozen_tail = property_tail_offsets(run(['docker', 'exec', services['kafka']['Name'], 'rpk', 'group', 'describe', 'property-defs-rs']).decode())
-            if not property_tail_preserved(property_latest['offsets'], frozen_tail) or not ingestion_drained(report['consumer_lags_after_app_shutdown'], frozen_tail):
+            if not property_tail_preserved(property_latest['offsets'], frozen_tail) or not ingestion_drained(report['consumer_lags_after_app_shutdown']):
                 raise RuntimeError('App shutdown left pending ingestion work; checkpoint rejected')
             report['property_definition_drain_proof'] = {'first': property_first, 'last': property_latest,
                 'frozen_offsets': frozen_tail, 'offsets_reset': False, 'database_batches_completed': True}
