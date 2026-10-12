@@ -271,6 +271,12 @@ def cloud_fields_match(event, record):
         if key=='$transformations_succeeded':
             archived=json.loads(props.get('__kasanova_posthog_original_event','{}'))
             if not json_values_equal(archived.get('properties',{}).get(key),value):return False
+        elif key in ('$set','$set_once') and isinstance(value,dict):
+            # Cloud adds its own person-property names (for example geo-IP).
+            # Preserve every source operation's complete typed value while
+            # allowing those additional backend properties on the same event.
+            got=props.get(key)
+            if not isinstance(got,dict) or any(k not in got or not json_values_equal(got[k],v) for k,v in value.items()):return False
         elif key not in props or not json_values_equal(props[key],value):return False
     return True
 
