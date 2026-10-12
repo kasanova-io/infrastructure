@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily missing-event reconciliation after the PostHog backup window
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 UTC
+Persistent=true
+AccuracySec=1m
+Unit=kasanova-posthog-refill.service
+
+[Install]
+WantedBy=timers.target
