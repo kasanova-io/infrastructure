@@ -165,7 +165,7 @@ class Journal:
     @staticmethod
     def convert(event, raw, record_id, distinct, route):
         props = dict(event.get('event_properties') or {})
-        if '__kasanova_transport_record' in props:
+        if '__kasanova_transport_record' in props or NUMERIC_REPAIRS in props:
             raise ValueError('Reserved transport property collision')
         props['__kasanova_transport_record'] = raw
         props.setdefault('$device_id', event.get('device_id'))

@@ -70,6 +70,15 @@ class CloudDeliveryTest(unittest.TestCase):
         with self.journal.connect() as con:
             self.assertEqual(con.execute("SELECT raw,native FROM records WHERE project='2'").fetchone(),original)
 
+    def test_reserved_numeric_marker_rejected_before_ack_with_no_partial_batch(self):
+        bad = {**self.event, 'insert_id': 'marker-collision',
+               'event_properties': {NUMERIC_REPAIRS: 'spoofed'}}
+        good = {**self.event, 'insert_id': 'valid-before-collision'}
+        with self.assertRaises(ValueError):
+            self.journal.accept({'api_key': 'dev', 'events': [good, bad]})
+        with self.journal.connect() as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM records WHERE project='2'").fetchone()[0], 0)
+
     def test_numeric_repairs_preserve_originals_types_and_nested_paths(self):
         properties = {'price': 0.10000000000000002, 'nested': [{'price': 0.09081934846989141}],
                       'zero': -0.0, 'integer': 9007199254740991, 'boolean': True, 'null': None}
