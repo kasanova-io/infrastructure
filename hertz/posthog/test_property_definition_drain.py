@@ -17,13 +17,14 @@ class PropertyDefinitionDrainTest(unittest.TestCase):
             'prop_defs_channel_messages_in_flight': 0,
             'prop_defs_channel_capacity': 1000, 'prop_defs_channel_capacity_total': 1000}}
 
-    def test_inclusive_offset_requires_exact_partition_evidence(self):
+    def test_every_storage_group_requires_zero_committed_lag(self):
         self.assertFalse(ingestion_drained(self.lags()))
-        self.assertTrue(ingestion_drained(self.lags(), property_tail_offsets(self.report())))
         lags = self.lags(); lags['property-defs-rs'] = 2
-        self.assertFalse(ingestion_drained(lags, property_tail_offsets(self.report(98))))
+        self.assertFalse(ingestion_drained(lags))
+        lags['property-defs-rs'] = 0
+        self.assertTrue(ingestion_drained(lags))
         lags['clickhouse-ingestion'] = 1
-        self.assertFalse(ingestion_drained(lags, property_tail_offsets(self.report())))
+        self.assertFalse(ingestion_drained(lags))
 
     def test_unknown_missing_and_duplicate_partition_fail_closed(self):
         for text in ('', self.report().replace('99', '-'), self.report().replace('clickhouse_events_json 0', 'other 0'),
