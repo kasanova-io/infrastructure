@@ -68,6 +68,29 @@ class RestartOrderTest(unittest.TestCase):
                 restart_owned_services(self.running, self.services, True, Path('/checkpoint'), self.fail)
         start.assert_not_called()
 
+    def test_realistic_cold_start_after_four_minutes_is_verified(self):
+        now = [0.0]
+        saved = []
+        def sleep(seconds):
+            now[0] += seconds
+        with patch('backup.run', return_value=b''), patch('backup.time.monotonic', side_effect=lambda: now[0]), \
+                patch('backup.time.sleep', side_effect=sleep), patch('backup.owned_stack_ready', side_effect=lambda *args: now[0] >= 300):
+            restart_owned_services(self.running, self.services, True, Path('/checkpoint'), lambda *x: saved.append(x))
+        self.assertEqual(now[0], 300)
+        self.assertTrue(saved[0][1]['owned_gateway_and_ingress_ready'])
+
+    def test_never_ready_cold_start_remains_bounded_and_has_no_success_receipt(self):
+        now = [0.0]
+        saved = []
+        def sleep(seconds):
+            now[0] += seconds
+        with patch('backup.run', return_value=b''), patch('backup.time.monotonic', side_effect=lambda: now[0]), \
+                patch('backup.time.sleep', side_effect=sleep), patch('backup.owned_stack_ready', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'did not recover'):
+                restart_owned_services(self.running, self.services, True, Path('/checkpoint'), lambda *x: saved.append(x))
+        self.assertEqual(now[0], 900)
+        self.assertEqual(saved, [])
+
 
 if __name__ == '__main__':
     unittest.main()
