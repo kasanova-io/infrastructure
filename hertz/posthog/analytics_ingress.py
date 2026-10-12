@@ -51,6 +51,41 @@ def precise_json(value):
     return json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False)
 
 
+NUMERIC_REPAIRS = '__kasanova_numeric_repairs'
+
+
+def cloud_event(event):
+    """Carry exact finite floats through the native Cloud transformation.
+
+    Repair metadata is a JSON string, so the capture parser cannot round its
+    decimal values. The transformation restores numeric types at their paths.
+    Source event and journal bytes remain unchanged.
+    """
+    properties = event.get('properties') or {}
+    if NUMERIC_REPAIRS in properties:
+        raise ValueError('Reserved Cloud numeric repair property collision')
+    repairs = []
+
+    def visit(value, path):
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError('Nonfinite JSON number')
+            repairs.append({'path': path, 'value': repr(value)})
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise ValueError('JSON object keys must be strings')
+                visit(item, path + [key])
+        elif isinstance(value, list):
+            for index, item in enumerate(value, 1):
+                visit(item, path + [index])  # Hog arrays are one-based.
+
+    visit(properties, [])
+    if not repairs:
+        return event
+    return {**event, 'properties': {**properties, NUMERIC_REPAIRS: canonical(repairs)}}
+
+
 class Journal:
     def __init__(self, path, routes):
         self.path, self.routes = str(path), routes
@@ -232,7 +267,7 @@ class Journal:
         if not rows:
             return 0
         body = precise_json({'api_key': cloud['project_token'],
-                          'batch': [json.loads(row[1]) for row in rows]}).encode()
+                          'batch': [cloud_event(json.loads(row[1])) for row in rows]}).encode()
         request = urllib.request.Request(host + '/batch/', data=body,
                                          headers={'Content-Type': 'application/json'})
         if stopping is not None and stopping.is_set():
