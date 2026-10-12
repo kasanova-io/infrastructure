@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -73,6 +74,35 @@ class CloudDeliveryTest(unittest.TestCase):
         for payload in payloads:
             self.assertEqual(payload['batch'][0]['properties']['__kasanova_transport_record'],
                              json.dumps(self.event, sort_keys=True, separators=(',', ':')))
+
+    def test_prod_cloud_failure_does_not_starve_dev(self):
+        self.journal.accept({'api_key': 'dev', 'events': [self.event]})
+        attempted = []
+        def capture(request, timeout):
+            token = json.loads(request.data)['api_key']
+            attempted.append(token)
+            if token == 'cloud-prod':
+                raise OSError('PROD rejected')
+            return self.ack(request, timeout)
+        with patch('analytics_ingress.urllib.request.urlopen', side_effect=capture):
+            self.assertEqual(self.journal.deliver_cloud(), 1)
+        self.assertEqual(attempted, ['cloud-prod', 'cloud-dev'])
+        with self.journal.connect() as con:
+            states = dict(con.execute('SELECT project,cloud_destination FROM records'))
+        self.assertIsNone(states['1'])
+        self.assertEqual(states['2'], 'https://us.i.posthog.com:102')
+
+    def test_shutdown_does_not_start_another_project_request(self):
+        self.journal.accept({'api_key': 'dev', 'events': [self.event]})
+        for operation in [lambda stop: self.journal.deliver('http://proxy', stop),
+                          self.journal.deliver_cloud]:
+            stopping = threading.Event()
+            def capture(request, timeout):
+                stopping.set()
+                return self.ack(request, timeout)
+            with patch('analytics_ingress.urllib.request.urlopen', side_effect=capture) as send:
+                self.assertEqual(operation(stopping), 1)
+                self.assertEqual(send.call_count, 1)
 
     def test_existing_schema_upgrade_retains_acknowledged_rows(self):
         legacy = self.root / 'legacy.sqlite'

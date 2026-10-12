@@ -146,18 +146,23 @@ class Journal:
         return {'event': event['event_type'], 'distinct_id': distinct,
                 'uuid': record_id, 'timestamp': timestamp, 'properties': props}
 
-    def deliver(self, host):
+    def deliver(self, host, stopping=None):
         with self.connect() as con:
             rows = con.execute('SELECT project,id,native FROM records WHERE sent=0 ORDER BY received LIMIT 100').fetchall()
         if not rows:
             return 0
+        delivered = 0
         for project in dict.fromkeys(row[0] for row in rows):
+            if stopping is not None and stopping.is_set():
+                break
             selected = [row for row in rows if row[0] == project]
             route = next(r for r in self.routes.values() if str(r['project_id']) == project)
             body = canonical({'api_key': route['project_token'],
                               'batch': [json.loads(row[2]) for row in selected]}).encode()
             request = urllib.request.Request(host.rstrip('/') + '/batch/', data=body,
                                              headers={'Content-Type': 'application/json'})
+            if stopping is not None and stopping.is_set():
+                break
             with urllib.request.urlopen(request, timeout=30) as response:
                 result = json.load(response)
                 if result.get('status') not in (1, 'Ok'):
@@ -165,44 +170,58 @@ class Journal:
             with self.connect() as con:
                 con.executemany('UPDATE records SET sent=1 WHERE project=? AND id=?',
                                 [(row[0], row[1]) for row in selected])
-        return len(rows)
+            delivered += len(selected)
+        return delivered
 
     def counts(self):
         with self.connect() as con:
             return dict(con.execute('SELECT sent,count(*) FROM records GROUP BY sent'))
 
-    def deliver_cloud(self):
+    def deliver_cloud(self, stopping=None):
         """Mirror durable events without changing Hertz delivery or client keys."""
         delivered = 0
+        failures = []
         for project in dict.fromkeys(str(route['project_id']) for route in self.routes.values()):
+            if stopping is not None and stopping.is_set():
+                break
             route = next(r for r in self.routes.values() if str(r['project_id']) == project)
             cloud = route.get('cloud')
             if not cloud:
                 continue
-            host = cloud['host'].rstrip('/')
-            if host not in ('https://us.i.posthog.com', 'https://eu.i.posthog.com'):
-                raise ValueError('Unexpected PostHog Cloud ingestion host')
-            destination = host + ':' + str(int(cloud['project_id']))
-            with self.connect() as con:
-                rows = con.execute(
-                    'SELECT id,native FROM records WHERE project=? '
-                    'AND (cloud_destination IS NULL OR cloud_destination != ?) '
-                    'ORDER BY received,id LIMIT 100', (project, destination)).fetchall()
-            if not rows:
-                continue
-            body = canonical({'api_key': cloud['project_token'],
-                              'batch': [json.loads(row[1]) for row in rows]}).encode()
-            request = urllib.request.Request(host + '/batch/', data=body,
-                                             headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(request, timeout=30) as response:
-                result = json.load(response)
-                if result.get('status') not in (1, 'Ok'):
-                    raise RuntimeError('Cloud capture did not acknowledge batch')
-            with self.connect() as con:
-                con.executemany('UPDATE records SET cloud_destination=? WHERE project=? AND id=?',
-                                [(destination, project, row[0]) for row in rows])
-            delivered += len(rows)
+            try:
+                delivered += self._deliver_cloud_project(project, cloud, stopping)
+            except Exception as error:
+                failures.append(error)  # An unavailable PROD must not starve DEV.
+        if failures and not delivered:
+            raise failures[0]
         return delivered
+
+    def _deliver_cloud_project(self, project, cloud, stopping=None):
+        host = cloud['host'].rstrip('/')
+        if host not in ('https://us.i.posthog.com', 'https://eu.i.posthog.com'):
+            raise ValueError('Unexpected PostHog Cloud ingestion host')
+        destination = host + ':' + str(int(cloud['project_id']))
+        with self.connect() as con:
+            rows = con.execute(
+                'SELECT id,native FROM records WHERE project=? '
+                'AND (cloud_destination IS NULL OR cloud_destination != ?) '
+                'ORDER BY received,id LIMIT 100', (project, destination)).fetchall()
+        if not rows:
+            return 0
+        body = canonical({'api_key': cloud['project_token'],
+                          'batch': [json.loads(row[1]) for row in rows]}).encode()
+        request = urllib.request.Request(host + '/batch/', data=body,
+                                         headers={'Content-Type': 'application/json'})
+        if stopping is not None and stopping.is_set():
+            return 0
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response)
+            if result.get('status') not in (1, 'Ok'):
+                raise RuntimeError('Cloud capture did not acknowledge batch')
+        with self.connect() as con:
+            con.executemany('UPDATE records SET cloud_destination=? WHERE project=? AND id=?',
+                            [(destination, project, row[0]) for row in rows])
+        return len(rows)
 
     def seed_history(self, source, project):
         """Bind archived device identities and skip SDK retries already imported."""
@@ -291,7 +310,10 @@ def main():
     def worker():
         while not stopping.is_set():
             delivered = 0
-            for operation in (lambda: journal.deliver(args.posthog_host), journal.deliver_cloud):
+            for operation in (lambda: journal.deliver(args.posthog_host, stopping),
+                              lambda: journal.deliver_cloud(stopping)):
+                if stopping.is_set():
+                    break
                 try:
                     delivered += operation()
                 except Exception:
