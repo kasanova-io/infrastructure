@@ -56,3 +56,26 @@ The search predicate runs before pagination and binds query text as a SQL parame
 `test_web_compat.py` applies all three patches and compiles the actual production validators. For the full production Rust/API/SQL contract, create a separate disposable PostgreSQL database named `social_search_contract`, set `SOCIAL_SEARCH_TEST_DATABASE_URL` to it, and run `python3 run-search-contract.py`. The runner verifies the pinned clean upstream source, applies patches in temporary source, runs all Rust tests with the `search-contract` feature, and builds the complete release binary. Supply isolated `CARGO_HOME`, `RUSTUP_HOME`, and `CARGO_TARGET_DIR` when required by the task environment. It neither provisions nor alters deployment databases; SQL fixtures use only connection-local temporary tables. The database test fails when the explicit connection or expected database name is absent. It exercises the actual Axum router, API handler and database query, including malformed encodings, Unicode boundaries, literal metacharacters, blocked authors, enriched results and tied-timestamp pagination.
 
 The Docker build runs the default Rust tests, including search validators, but cannot replace this separate real-database contract. A local release build is also distinct from a tested runtime image and live environment acceptance. No search image is selected or deployed by this source change.
+
+## Kasanova Social notifications
+
+Notifications connects over this project's existing isolated `social_indexer_dev_social`
+network using the database alias `social_notifications_db_dev`. Production uses its
+own `social_indexer_prod_social` network and `social_notifications_db_prod` alias.
+There is no database host port or cross-environment connection. Apply the matching
+Compose alias before deploying the Notifications consumer.
+
+Provision `SOCIAL_DATABASE_URL` in the matching Notifications environment file
+without printing or committing credentials. On first activation the consumer needs
+permission to create its `social_notifications` schema/functions and capture triggers
+on `k_contents`, `k_votes`, and `k_follows`; runtime reads those verified projections,
+mentions and blocks, and updates only its outbox. Startup verifies `k_vars` network
+and schema before installing anything. It preserves the initial activation time on
+restart and does not backfill notifications for imported historical records.
+
+Deploy DEV and personally verify real indexed interactions and device delivery before
+promotion. Notifications compose enables both DEV/TN10 and PROD/mainnet; supply the
+matching DSN/network/prefix, never the wallet/users connection. Roll back the consumer
+by disabling `SOCIAL_WORKER_ENABLED` while preserving the Social database/outbox and
+existing indexer services. Neither this setup nor notification capture establishes
+transaction finality; the existing indexer acceptance/reorg limitation still applies.
