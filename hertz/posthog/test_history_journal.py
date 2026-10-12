@@ -46,6 +46,24 @@ class HistoryJournalTest(unittest.TestCase):
         self.assertEqual(self.journal.counts(),{0:1})
         with self.journal.connect() as con:self.assertEqual(con.execute('SELECT count(*) FROM history').fetchone()[0],0)
 
+    def test_real_amplitude_timezone_free_utc_preserves_occurrence_and_raw_bytes(self):
+        original={**self.original,'event_time':'2026-10-10 18:00:00.774000'}
+        raw=json.dumps(original).encode()
+        native=convert(raw,{'canonical_map':{'1':'1'},'user_ids':{'1':'wallet'}},{})
+        self.assertEqual(self.journal.enqueue_history([native],1),[native])
+        self.assertEqual(native['timestamp'],'2026-10-10T18:00:00.774000+00:00')
+        with self.journal.connect() as con:
+            stored=json.loads(con.execute('SELECT native FROM records').fetchone()[0])
+            self.assertEqual(stored['properties']['__amplitude_original_record'],raw.decode())
+
+    def test_timezone_free_utc_still_rejects_changed_occurrence(self):
+        original={**self.original,'event_time':'2026-10-10 18:00:00.774000'}
+        native=convert(json.dumps(original).encode(),{'canonical_map':{'1':'1'},'user_ids':{'1':'wallet'}},{})
+        native['timestamp']='2026-10-10T18:00:00.775000+00:00'
+        with self.assertRaisesRegex(ValueError,'occurrence timestamp differs'):
+            self.journal.enqueue_history([native],1)
+        self.assertEqual(self.journal.counts(),{})
+
     def test_second_invalid_record_rolls_back_native_ownership_and_retry_binding(self):
         bad=copy.deepcopy(self.native);bad['event']='wrong-name'
         with self.assertRaises(ValueError):self.journal.enqueue_history([self.native,bad],1)
