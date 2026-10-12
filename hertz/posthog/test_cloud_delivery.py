@@ -1,5 +1,7 @@
 import io
 import json
+from decimal import Decimal
+import math
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -7,7 +9,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from analytics_ingress import Journal
+from analytics_ingress import Journal, precise_json
 from backup import journal_inventory, snapshot_journal
 
 
@@ -50,6 +52,35 @@ class CloudDeliveryTest(unittest.TestCase):
             self.assertEqual(restarted.deliver('http://proxy'), 1)
             self.assertEqual(restarted.counts(), {1: 1})
             self.assertEqual(restarted.deliver_cloud(), 0)
+
+    def test_cloud_wire_preserves_problematic_fraction_and_original_journal_bytes(self):
+        value = 0.09081934846989141
+        event = {**self.event, 'insert_id':'fraction-regression',
+                 'event_properties':{'fraction':value, 'nested':[value,True,None], 'integer':9007199254740991}}
+        self.journal.accept({'api_key':'dev','events':[event]})
+        with self.journal.connect() as con:
+            original = con.execute("SELECT raw,native FROM records WHERE project='2'").fetchone()
+        with patch('analytics_ingress.urllib.request.urlopen',side_effect=self.ack) as send:
+            self.journal.deliver_cloud()
+        request = next(call.args[0] for call in send.call_args_list if json.loads(call.args[0].data)['api_key']=='cloud-dev')
+        self.assertIn(str(Decimal.from_float(value)).encode(),request.data)
+        actual=json.loads(request.data)['batch'][0]
+        self.assertEqual(actual,json.loads(original[1]))
+        self.assertEqual(actual['properties']['fraction'],value)
+        with self.journal.connect() as con:
+            self.assertEqual(con.execute("SELECT raw,native FROM records WHERE project='2'").fetchone(),original)
+
+    def test_precise_json_retains_numeric_boolean_null_and_string_types(self):
+        value={'nested':[0.09081934846989141,True,None,'0.09081934846989141'],
+               'large_integer':9007199254740991,'negative':-0.10000000000000002}
+        self.assertEqual(json.loads(precise_json(value)),value)
+        for number in [-0.0,0.0,1.0,-1.0]:
+            parsed=json.loads(precise_json(number))
+            self.assertIs(type(parsed),float)
+            self.assertEqual(parsed,number)
+            self.assertEqual(math.copysign(1,parsed),math.copysign(1,number))
+        for bad in [float('nan'),float('inf'),float('-inf')]:
+            with self.assertRaises(ValueError):precise_json({'number':bad})
 
     def test_failed_or_rejected_cloud_delivery_never_marks_acknowledged(self):
         for failure in [OSError('offline'), io.BytesIO(b'{"status":0}')]:
