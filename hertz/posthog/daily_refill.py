@@ -287,6 +287,27 @@ def source_wire_envelope(row, config, source):
     return event
 
 
+def cloud_readback(client, selected):
+    """Read full fields with a bounded scan and stable global latest versions."""
+    ids=','.join(sql_quote(row['uuid']) for row in selected)
+    header_sql=f'SELECT uuid,argMax(tuple(event,distinct_id,timestamp,toString(created_at)),created_at) FROM events WHERE uuid IN ({ids}) GROUP BY uuid LIMIT 100'
+    for attempt in range(3):
+        headers={row[0]:row[1] for row in client.query(header_sql)}
+        stamps=[int(row['timestamp_us']) for row in selected]+[time_us(row[2]) for row in headers.values()]
+        lower=dt.datetime.fromtimestamp(min(stamps)//1000000-1,UTC).strftime('%Y-%m-%d %H:%M:%S')
+        upper=dt.datetime.fromtimestamp(max(stamps)//1000000+2,UTC).strftime('%Y-%m-%d %H:%M:%S')
+        bounds=f"timestamp >= toDateTime({sql_quote(lower)},'UTC') AND timestamp <= toDateTime({sql_quote(upper)},'UTC')"
+        fields_sql=f'SELECT uuid,argMax(tuple(event,distinct_id,timestamp,properties,toString(created_at)),created_at) FROM events WHERE {bounds} AND uuid IN ({ids}) GROUP BY uuid LIMIT 100'
+        fields={row[0]:row[1] for row in client.query(fields_sql)}
+        after={row[0]:row[1] for row in client.query(header_sql)}
+        if headers==after and headers.keys()==fields.keys() and all(
+                fields[uid][:3]==header[:3] and fields[uid][4]==header[3]
+                for uid,header in headers.items()):
+            return {uid:record[:4] for uid,record in fields.items()}
+        if attempt<2:time.sleep(1)
+    raise RuntimeError('Cloud latest UUID versions changed or full-field read was incomplete')
+
+
 def cloud_gap(config, state, environment, evidence, end):
     c=CloudClient(config['cloud_credentials'],environment,evidence);source=config['hertz_projects'][environment]['id']
     floor=max(dt.datetime.fromisoformat(config['native_delta_floor']),dt.datetime.fromisoformat(state['native_cutoff'])-dt.timedelta(hours=48))
@@ -297,9 +318,8 @@ def cloud_gap(config, state, environment, evidence, end):
         for row in rows:stream.write(canonical(row)+'\n')
     missing=0;repaired=0;checked=0
     for index in range(0,len(rows),100):
-        selected=rows[index:index+100];ids=','.join(sql_quote(e['uuid']) for e in selected)
-        sql=f'SELECT uuid,argMax(tuple(event,distinct_id,timestamp,properties),created_at) FROM events WHERE uuid IN ({ids}) GROUP BY uuid LIMIT 100'
-        actual={row[0]:row[1] for row in c.query(sql)}
+        selected=rows[index:index+100]
+        actual=cloud_readback(c,selected)
         expected=[];events=[];absent=0;stale=0
         for row in selected:
             wire=source_wire_envelope(row,config,source)
@@ -320,7 +340,7 @@ def cloud_gap(config, state, environment, evidence, end):
         if older:c.capture(older,historical=True)
         if newer:c.capture(newer)
         for attempt in range(30):
-            actual={r[0]:r[1] for r in c.query(sql)}
+            actual=cloud_readback(c,selected)
             if all(e['uuid'] in actual and cloud_fields_match(e,actual[e['uuid']]) for e in expected):break
             time.sleep(2)
         else:raise RuntimeError('Cloud native UUID or exact fields missing/stale after capture')
