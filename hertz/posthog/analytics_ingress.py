@@ -11,6 +11,8 @@ import datetime as dt
 import hashlib
 import gzip
 import json
+from decimal import Decimal
+import math
 import os
 from pathlib import Path
 import signal
@@ -26,6 +28,26 @@ NAMESPACE = uuid.UUID('dc627dfb-a129-4f8c-8043-5849ab31ff1a')
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def precise_json(value):
+    """Keep float values exact across Cloud's decimal-to-binary JSON boundary.
+
+    The shortest Python spelling can be parsed one ULP differently by Cloud.
+    Full decimal expansions retain the same JSON numeric type and binary value.
+    Original journal/source serialization remains unchanged.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError('Nonfinite JSON number')
+        return str(Decimal.from_float(value))
+    if isinstance(value, dict):
+        if any(not isinstance(k,str) for k in value):
+            raise ValueError('JSON object keys must be strings')
+        return '{' + ','.join(json.dumps(k,ensure_ascii=False)+':'+precise_json(value[k]) for k in sorted(value)) + '}'
+    if isinstance(value, list):
+        return '[' + ','.join(precise_json(item) for item in value) + ']'
+    return json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False)
 
 
 class Journal:
@@ -208,7 +230,7 @@ class Journal:
                 'ORDER BY received,id LIMIT 100', (project, destination)).fetchall()
         if not rows:
             return 0
-        body = canonical({'api_key': cloud['project_token'],
+        body = precise_json({'api_key': cloud['project_token'],
                           'batch': [json.loads(row[1]) for row in rows]}).encode()
         request = urllib.request.Request(host + '/batch/', data=body,
                                          headers={'Content-Type': 'application/json'})
