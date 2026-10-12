@@ -1,6 +1,7 @@
 import io
 import json
 from decimal import Decimal
+import math
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -73,6 +74,11 @@ class CloudDeliveryTest(unittest.TestCase):
         value={'nested':[0.09081934846989141,True,None,'0.09081934846989141'],
                'large_integer':9007199254740991,'negative':-0.10000000000000002}
         self.assertEqual(json.loads(precise_json(value)),value)
+        for number in [-0.0,0.0,1.0,-1.0]:
+            parsed=json.loads(precise_json(number))
+            self.assertIs(type(parsed),float)
+            self.assertEqual(parsed,number)
+            self.assertEqual(math.copysign(1,parsed),math.copysign(1,number))
         for bad in [float('nan'),float('inf'),float('-inf')]:
             with self.assertRaises(ValueError):precise_json({'number':bad})
 

@@ -40,7 +40,8 @@ def precise_json(value):
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError('Nonfinite JSON number')
-        return str(Decimal.from_float(value))
+        number = str(Decimal.from_float(value))
+        return number if '.' in number or 'e' in number.lower() else number + '.0'
     if isinstance(value, dict):
         if any(not isinstance(k,str) for k in value):
             raise ValueError('JSON object keys must be strings')
