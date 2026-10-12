@@ -24,6 +24,7 @@ BACKUPS = Path('/home/ren/kasanova-archives/posthog')
 RESTORES = Path('/home/ren/kasanova-archives/posthog-restores')
 PRODUCTION_RESERVE_BYTES = 10 * 1024**3
 SNAPSHOT_OVERHEAD_BYTES = 2 * 1024**3
+LIVE_RECOVERY_TIMEOUT_SECONDS = 15 * 60
 STORAGE = {'db', 'clickhouse', 'zookeeper', 'kafka', 'redis7', 'valkey',
            'objectstorage', 'seaweedfs', 'elasticsearch'}
 CAPTURE = {'capture', 'capture-logs', 'replay-capture'}
@@ -304,6 +305,31 @@ def interrupt_operation(signum, frame):
     raise InterruptedError('Owned backup/restore interrupted')
 
 
+def wait_owned_recovery(ingress, live):
+    # A real cold restart took more than the former four-minute retry window.
+    # Measure one bounded deadline while checking actual readiness, rather than
+    # declaring a correctly recovering stack failed just before web is ready.
+    deadline = time.monotonic() + (LIVE_RECOVERY_TIMEOUT_SECONDS if live else 240)
+    while True:
+        ready = False
+        if live:
+            ready = owned_stack_ready(ingress)
+        else:
+            try:
+                req = urllib.request.Request('http://127.0.0.1:18084/_health', headers={'Host': 'posthog.kasanova.io'})
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    ready = response.status == 200
+            except Exception:
+                pass
+        if ready:
+            return True
+        if time.monotonic() >= deadline:
+            if live:
+                raise RuntimeError('Owned gateway and analytics ingress did not recover after restart')
+            return False
+        time.sleep(2)
+
+
 def restart_owned_services(running, services, live, backup, save):
     """Start all original dependencies before waiting for their gateway."""
     if any(c['Config']['Labels'].get('com.docker.compose.project') != PROJECT for c in running):
@@ -324,25 +350,7 @@ def restart_owned_services(running, services, live, backup, save):
         # strands them offline until the health timeout's recovery finally block.
         if other_names:
             run(['docker', 'start', *other_names])
-    for attempt in range(120):
-        try:
-            req = urllib.request.Request('http://127.0.0.1:18084/_health', headers={'Host': 'posthog.kasanova.io'})
-            with urllib.request.urlopen(req, timeout=3) as response:
-                if response.status == 200:
-                    break
-        except Exception:
-            pass
-        time.sleep(2)
-    else:
-        if live:
-            raise RuntimeError('Owned gateway did not recover after live backup')
-    if live:
-        for attempt in range(60):
-            if owned_stack_ready(services['analytics-ingress']['Name']):
-                break
-            time.sleep(2)
-        else:
-            raise RuntimeError('Owned gateway and analytics ingress did not recover after restart')
+    wait_owned_recovery(services['analytics-ingress']['Name'] if live else None, live)
     save(backup / 'restart.json', {'owned_gateway_and_ingress_ready': True if live else None,
          'original_running_containers_restarted': original_names,
          'completed_at': dt.datetime.now(dt.timezone.utc).isoformat()})
