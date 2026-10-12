@@ -289,6 +289,9 @@ def source_wire_envelope(row, config, source):
 
 def cloud_readback(client, selected):
     """Read full fields with a bounded scan and stable global latest versions."""
+    if len(selected)>20:
+        return {uid:record for index in range(0,len(selected),20)
+                for uid,record in cloud_readback(client,selected[index:index+20]).items()}
     ids=','.join(sql_quote(row['uuid']) for row in selected)
     header_sql=f'SELECT uuid,argMax(tuple(event,distinct_id,timestamp,toString(created_at)),created_at) FROM events WHERE uuid IN ({ids}) GROUP BY uuid LIMIT 100'
     for attempt in range(3):
@@ -339,11 +342,12 @@ def cloud_gap(config, state, environment, evidence, end):
         newer=[e for e in events if e not in older]
         if older:c.capture(older,historical=True)
         if newer:c.capture(newer)
-        for attempt in range(30):
-            actual=cloud_readback(c,selected)
-            if all(e['uuid'] in actual and cloud_fields_match(e,actual[e['uuid']]) for e in expected):break
-            time.sleep(2)
-        else:raise RuntimeError('Cloud native UUID or exact fields missing/stale after capture')
+        if events:
+            for attempt in range(30):
+                actual=cloud_readback(c,selected)
+                if all(e['uuid'] in actual and cloud_fields_match(e,actual[e['uuid']]) for e in expected):break
+                time.sleep(2)
+            else:raise RuntimeError('Cloud native UUID or exact fields missing/stale after capture')
         checked+=len(selected);missing+=absent;repaired+=stale
         atomic_json(evidence/f'reconciliation-{index:06d}.json',{'source_uuids':[x['uuid'] for x in selected],'missing_captured':absent,'existing_versions_repaired':stale,'persisted_source_wire_fields_verified':True,'source_backend_metadata_retained_in_delta_archive':True,'latest_logical_uuid_readback':True})
     if missing or repaired:

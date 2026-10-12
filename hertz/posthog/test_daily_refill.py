@@ -70,8 +70,9 @@ class DailyRefillTest(unittest.TestCase):
         row={'uuid':'00000000-0000-4000-8000-000000000003','event':'screen_viewed','distinct_id':'wallet-id','timestamp_us':daily_refill.time_us('2026-10-10T18:00:00Z'),'properties':'{"value":0.1}'}
         class Client:
             project={'id':123};config={'api_host':'https://us.posthog.com'}
-            def __init__(self,*args):self.record=['screen_viewed','wallet-id','2026-10-10T18:00:00Z',{'value':0.2}];self.captured=[]
+            def __init__(self,*args):self.record=['screen_viewed','wallet-id','2026-10-10T18:00:00Z',{'value':0.2}];self.captured=[];self.queries=0
             def query(self,sql):
+                self.queries+=1
                 assert 'argMax' in sql and 'created_at' in sql
                 created='2026-10-12 01:00:00.123456'
                 record=self.record+[created] if 'timestamp,properties' in sql else self.record[:3]+[created]
@@ -87,6 +88,7 @@ class DailyRefillTest(unittest.TestCase):
             result=daily_refill.cloud_gap(config,{'native_cutoff':'2026-10-10T00:00:00+00:00'},'prod',self.root,dt.datetime.now(dt.timezone.utc))
         self.assertEqual(result['existing_versions_repaired_and_verified'],1)
         self.assertEqual(result['missing_events_captured_and_verified'],0);self.assertEqual(len(client.captured),1)
+        self.assertEqual(client.queries,6) # Fresh stable readback follows the capture.
         receipt=json.loads((self.root/'reconciliation-000000.json').read_text());self.assertTrue(receipt['persisted_source_wire_fields_verified'])
 
     def test_sdk_owned_native_payload_verifies_without_amplitude_envelope(self):
@@ -108,9 +110,10 @@ class DailyRefillTest(unittest.TestCase):
         client=MagicMock();client.query.return_value=[[native['uuid'],[native['event'],native['distinct_id'],native['timestamp'],{**native['properties'],'$ip':'cloud-backend'}]]]
         config={**self.config,'ingress_config':str(ingress),'cloud_credentials':'private','native_delta_floor':'2026-10-10T00:00:00+00:00'}
         with patch.object(daily_refill,'CloudClient',return_value=client),patch.object(daily_refill,'source_query',return_value=[row]), \
-             patch.object(daily_refill,'cloud_readback',return_value=dict(client.query.return_value)):
+             patch.object(daily_refill,'cloud_readback',return_value=dict(client.query.return_value)) as readback:
             result=daily_refill.cloud_gap(config,{'native_cutoff':'2026-10-10T00:00:00+00:00'},'prod',self.root,dt.datetime.now(dt.timezone.utc))
         client.capture.assert_not_called();self.assertEqual(result['existing_versions_repaired_and_verified'],0)
+        self.assertEqual(readback.call_count,1)
 
     def test_failed_cloud_leg_does_not_advance_any_shared_watermark_or_identity_map(self):
         runtime=self.root/'runtime';(runtime/'operations').mkdir(parents=True)
@@ -160,6 +163,21 @@ class DailyRefillTest(unittest.TestCase):
             with patch.object(daily_refill.time,'sleep'),self.assertRaisesRegex(RuntimeError,'latest UUID versions'):
                 daily_refill.cloud_readback(client,[source])
             self.assertEqual(client.query.call_count,9)
+
+    def test_global_header_subgroups_are_bounded_and_cover_every_uuid_once(self):
+        import re
+        from unittest.mock import MagicMock
+        rows=[{'uuid':f'00000000-0000-4000-8000-{i:012d}','timestamp_us':daily_refill.time_us('2026-10-10T18:00:00Z')} for i in range(57)]
+        client=MagicMock();bodies=[]
+        def query(sql):
+            ids=re.findall(r"'(00000000-0000-4000-8000-\d{12})'",sql)
+            self.assertLessEqual(len(ids),20)
+            header=['event','wallet','2026-10-10T18:00:00Z','2026-10-12 00:00:00']
+            if 'timestamp,properties' in sql:
+                bodies.extend(ids);return [[uid,header[:3]+[{'typed':[True,1,None]},header[3]]] for uid in ids]
+            return [[uid,header] for uid in ids]
+        client.query.side_effect=query;actual=daily_refill.cloud_readback(client,rows)
+        self.assertEqual(set(actual),{row['uuid'] for row in rows});self.assertEqual(bodies,[row['uuid'] for row in rows]);self.assertEqual(client.query.call_count,9)
 
 
 if __name__=='__main__':unittest.main()
