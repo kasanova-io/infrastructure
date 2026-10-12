@@ -5,6 +5,7 @@ services:
     entrypoint: ["python3", "/opt/kasanova/analytics_ingress.py"]
     command: ["--config", "/run/secrets/ingress.json", "--journal", "/var/lib/analytics/ingress.sqlite"]
     restart: unless-stopped
+    stop_grace_period: 90s
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
