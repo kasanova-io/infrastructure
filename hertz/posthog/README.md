@@ -316,3 +316,31 @@ integer occurrence time. Ingress uses it for the native event timestamp without
 changing event properties, original raw envelope, identity or existing session
 mapping. Missing or malformed metadata retains the legacy SDK time fallback;
 no new event type or client queue identity is introduced.
+
+## Daily missing-event reconciliation
+
+`daily_refill.py --config <private daily-refill.json>` exports overlapping
+Amplitude upload windows, restores missing originals through the durable journal,
+then verifies Hertz events against the matching Cloud PROD and DEV projects.
+The journal's original native payload is authoritative for its owned UUIDs;
+every original header and typed property must still agree with Hertz. Backend
+enrichment remains in the full private source delta archive. Capture receipts
+alone never advance either shared cutoff.
+
+Missing native events with old person-property operations retain the complete
+original envelope and SHA in Cloud, while replay disables those operations.
+Ordinary events use `$process_person_profile:false` and require the existing
+Cloud identity membership to match Hertz. Native `$identify` events use their
+recorded anonymous-ID relationship. Their old profile operations and SDK/campaign
+fields that PostHog automatically promotes to profiles are archived instead of
+reapplied; custom event fields, session, IDs and occurrence time remain native.
+An anonymous Cloud source may join its recorded target only when the resulting
+membership exactly matches Hertz and current custom profile values do not
+conflict. Normal target-property precedence, earliest creation time and the
+identified flag are verified afterward. No synthetic profile-update events or
+dangerous merges are generated. Unsupported identity/group changes fail closed.
+
+Each replay requires stored-field verification, the expected current profiles,
+and canonical event `person_id` readback. Already stored replay events repeat
+membership and canonical-person checks on retries, even when nothing is captured.
+Only complete success in both environments commits the shared watermarks.
