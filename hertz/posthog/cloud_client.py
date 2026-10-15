@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import re
 import time
+import traceback
 import urllib.error
 import urllib.request
 import uuid
@@ -162,6 +163,8 @@ class CloudClient:
                     cancellation['acknowledged']=True
                 except BaseException:
                     cancellation['outstanding_job_possible']=True
+            atomic_json(operation/'error-private.json',{'error_type':type(error).__name__,
+                       'traceback':traceback.format_exc()})
             atomic_json(operation/'failure.json',{'error_type':type(error).__name__,'no_completed_result_certified':True,
                        'no_poll_resubmission':True,'cancellation':cancellation})
             raise
