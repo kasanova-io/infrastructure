@@ -29,10 +29,27 @@ from analytics_ingress import Journal
 from cloud_client import CloudClient
 from import_amplitude_events import atomic_json, canonical, compare, json_values_equal
 from prepare_amplitude_import import convert, entries, session_key, session_uuid, time_us
-from prepare_cloud_import import envelope
+from prepare_cloud_import import envelope, retain_original, ORIGINAL, ORIGINAL_SHA
 from recreate_analytics_cohorts import Client as HertzClient
 
 UTC = dt.timezone.utc
+PROFILE_REPLAY = '__kasanova_profile_preserving_replay'
+PERSON_OPERATIONS = ('$set', '$set_once', '$unset')
+IDENTITY_EVENTS = ('$identify', '$create_alias', '$merge_dangerously', '$groupidentify', '$delete_person')
+# PostHog nodejs/src/common/persons/person-property-utils.ts, eventToPersonProperties.
+# Identify must use person processing; these historical SDK/UTM values would
+# otherwise generate new $set/$set_once operations. Retain them in the checked
+# original event instead. Activity/session/custom event fields stay native.
+IDENTIFY_PROFILE_FIELDS = frozenset((
+    '$app_build','$app_name','$app_namespace','$app_version','$browser','$browser_version',
+    '$device_type','$current_url','$pathname','$os','$os_name','$os_version',
+    '$referring_domain','$referrer','$screen_height','$screen_width','$viewport_height',
+    '$viewport_width','$raw_user_agent','utm_source','utm_medium','utm_campaign',
+    'utm_content','utm_name','utm_term','gclid','gad_source','gclsrc','dclid','gbraid',
+    'wbraid','fbclid','msclkid','twclid','li_fat_id','mc_cid','igshid','ttclid','rdt_cid',
+    'irclid','_kx','epik','qclid','sccid','oppref','bfcid',
+    # User-agent transformation aliases can regenerate the mapped SDK fields.
+    '$useragent','$user-agent','$user_agent','segment_userAgent'))
 
 
 def sha(path):
@@ -267,8 +284,31 @@ def cloud_fields_match(event, record):
     name,identity,stamp,props=record
     props=json.loads(props) if isinstance(props,str) else props
     if name!=event['event'] or identity!=event['distinct_id'] or time_us(stamp)!=time_us(event['timestamp']):return False
+    original=None
+    replay_mode=props.get(PROFILE_REPLAY)
+    if replay_mode is True or replay_mode=='identify':
+        if any(key in props for key in PERSON_OPERATIONS):return False
+        if replay_mode is True and props.get('$process_person_profile') is not False:return False
+        if replay_mode=='identify' and (name!='$identify' or props.get('$process_person_profile') is False or
+                props.get('$geoip_disable') is not True or props.get('$update_person_last_seen_at') is not False):return False
+        if replay_mode=='identify' and any(key in props for key in IDENTIFY_PROFILE_FIELDS):return False
+        raw=props.get(ORIGINAL)
+        if not isinstance(raw,str) or hashlib.sha256(raw.encode()).hexdigest()!=props.get(ORIGINAL_SHA):return False
+        try:
+            original=json.loads(raw)
+            original_stamp=time_us(original['timestamp'])
+        except (ValueError,TypeError,KeyError,OverflowError):return False
+        if (not isinstance(original,dict) or original.get('uuid')!=event['uuid'] or
+            original.get('event')!=name or original.get('distinct_id')!=identity or
+            original_stamp!=time_us(stamp) or not isinstance(original.get('properties'),dict)):return False
+        if any(key not in original['properties'] or not json_values_equal(value,original['properties'][key])
+               for key,value in event['properties'].items()):return False
     for key,value in event['properties'].items():
-        if key=='$transformations_succeeded':
+        if original is not None and key in (*PERSON_OPERATIONS,'$process_person_profile',
+                * (('$geoip_disable','$update_person_last_seen_at',*IDENTIFY_PROFILE_FIELDS) if replay_mode=='identify' else ())):
+            archived=original['properties']
+            if key not in archived or not json_values_equal(archived[key],value):return False
+        elif key=='$transformations_succeeded':
             archived=json.loads(props.get('__kasanova_posthog_original_event','{}'))
             if not json_values_equal(archived.get('properties',{}).get(key),value):return False
         elif key in ('$set','$set_once') and isinstance(value,dict):
@@ -281,8 +321,37 @@ def cloud_fields_match(event, record):
     return True
 
 
-def source_wire_envelope(row, config, source):
-    event=envelope(row);raw=event['properties'].get('__kasanova_transport_record')
+def journal_envelopes(config, source, rows):
+    """Read the original acknowledged payloads for this bounded source batch."""
+    if not config.get('journal'):return {}
+    placeholders=','.join('?' for _ in rows)
+    with closing(sqlite3.connect(Path(config['journal']).resolve().as_uri()+'?mode=ro',uri=True)) as journal:
+        records=journal.execute(f'SELECT id,native FROM records WHERE project=? AND id IN ({placeholders})',
+                                (str(source),*[row['uuid'] for row in rows])).fetchall()
+    result={}
+    for uid,raw in records:
+        native=json.loads(raw)
+        if native['uuid']!=uid:raise RuntimeError('Journal native UUID differs')
+        result[uid]=native
+    return result
+
+
+def source_wire_envelope(row, config, source, owned=None):
+    event=envelope(row)
+    native=(owned or {}).get(row['uuid'])
+    if native is not None:
+        # Both SDK traffic and restored Amplitude originals are journaled before
+        # delivery. Compare their exact original wire fields, not Hertz-only
+        # processing metadata added after ingestion. Keep the full Hertz row in
+        # the sealed delta archive. Source drift still fails before any replay.
+        if (native['event']!=event['event'] or native['distinct_id']!=event['distinct_id'] or
+            time_us(native['timestamp'])!=time_us(event['timestamp']) or
+            any(key not in event['properties'] or not json_values_equal(value,event['properties'][key])
+                for key,value in native['properties'].items())):
+            raise RuntimeError('Hertz fields differ from original journal payload')
+        event['properties']=native['properties']
+        return event
+    raw=event['properties'].get('__kasanova_transport_record')
     if raw:
         routes=json.loads(Path(config['ingress_config']).read_text())['routes']
         route=next(r for r in routes.values() if r['project_id']==source)
@@ -291,6 +360,108 @@ def source_wire_envelope(row, config, source):
         # source backend's added metadata, not any SDK or converted field.
         event['properties']=wire['properties']
     return event
+
+
+def profile_replay(event):
+    """Preserve old profile operations as event evidence without executing them."""
+    if (event['event'] in IDENTITY_EVENTS and event['event']!='$identify') or any(event['properties'].get(k) for k in ('$group_set','$group_set_once','$group_unset','$groups','$group_key')):
+        raise RuntimeError('Native identity/group updates require separate reconciliation')
+    if PROFILE_REPLAY in event['properties']:raise RuntimeError('Profile replay namespace collision')
+    replay=retain_original(event)
+    for key in PERSON_OPERATIONS:replay['properties'].pop(key,None)
+    identify=event['event']=='$identify'
+    replay['properties']['$process_person_profile']=identify
+    replay['properties'][PROFILE_REPLAY]='identify' if identify else True
+    if identify:
+        for key in IDENTIFY_PROFILE_FIELDS:replay['properties'].pop(key,None)
+        replay['properties']['$geoip_disable']=True
+        replay['properties']['$update_person_last_seen_at']=False
+    return replay
+
+
+def profile_replay_preflight(client, source, events, evidence, previous=None):
+    source_by_id={i:p for p in source_people(HertzClient(evidence),source) for i in p['distinct_ids']}
+    cloud_people=cloud_persons(client)
+    cloud_by_id={i:p for p in cloud_people for i in p['distinct_ids']}
+    verify_preserved_profiles(previous or {},cloud_people)
+    before=dict(previous or {});plans=[]
+    for event in sorted(events,key=lambda e:e['event']!='$identify'):
+        person=source_by_id.get(event['distinct_id']);got=cloud_by_id.get(event['distinct_id'])
+        if not person or not got:
+            raise RuntimeError('Profile-preserving refill requires existing matching identity membership')
+        if dt.datetime.now(UTC)-dt.datetime.fromisoformat(got['created_at'].replace('Z','+00:00'))<dt.timedelta(minutes=2):
+            raise RuntimeError('Profile-preserving refill waits for an established Cloud person')
+        if event['event']=='$identify':
+            anon=event['properties'].get('$anon_distinct_id')
+            if person.get('is_identified') is not True or (anon is not None and (not isinstance(anon,str) or not anon)):
+                raise RuntimeError('Native identify source person or anonymous identity is invalid')
+            other=cloud_by_id.get(anon) if isinstance(anon,str) else got
+            if (not other or set(person['distinct_ids'])!=set(got['distinct_ids'])|set(other['distinct_ids']) or
+                time_us(event['timestamp'])<time_us(min(got['created_at'],other['created_at']))):
+                raise RuntimeError('Native identify is not the recorded source identity relationship')
+            merged=json.loads(canonical(got))
+            if other['id']!=got['id']:
+                if other.get('is_identified') is not False:
+                    raise RuntimeError('Native identify cannot merge an already identified source')
+                conflicts={k for k in other['properties'].keys() & got['properties'].keys()
+                           if k!='$creator_event_uuid' and not json_values_equal(other['properties'][k],got['properties'][k])}
+                if conflicts:raise RuntimeError('Native identify has conflicting current Cloud profile values')
+                merged['properties']={**other['properties'],**got['properties']}
+                merged['distinct_ids']=sorted(set(got['distinct_ids'])|set(other['distinct_ids']))
+                merged['created_at']=min(got['created_at'],other['created_at'])
+                before.pop(other['id'],None)
+            merged['is_identified']=True
+            plans.append({'source_event':event,'target_before':got,'anonymous_before':other,'expected':merged})
+            got=merged
+            for identifier in got['distinct_ids']:cloud_by_id[identifier]=got
+        if set(person['distinct_ids'])!=set(got['distinct_ids']):
+            raise RuntimeError('Profile-preserving refill requires existing matching identity membership')
+        before[got['id']]=got
+    if plans:
+        atomic_json(evidence/f'identity-replay-plan-{time.time_ns()}-private.json',plans)
+    return before
+
+
+def verify_preserved_profiles(before, after):
+    by_id={p['id']:p for p in after}
+    for identifier,person in before.items():
+        got=by_id.get(identifier)
+        if (not got or set(got['distinct_ids'])!=set(person['distinct_ids']) or
+            not json_values_equal(got['properties'],person['properties']) or
+            got['created_at']!=person['created_at'] or got.get('is_identified')!=person.get('is_identified')):
+            raise RuntimeError('Cloud profile changed during profile-preserving refill')
+
+
+def verify_replay_memberships(client, source, events, evidence):
+    source_by_id={i:p for p in source_people(HertzClient(evidence),source) for i in p['distinct_ids']}
+    cloud_by_id={i:p for p in cloud_persons(client) for i in p['distinct_ids']}
+    result={}
+    for event in events:
+        wanted=source_by_id.get(event['distinct_id']);got=cloud_by_id.get(event['distinct_id'])
+        if not wanted or not got or set(wanted['distinct_ids'])!=set(got['distinct_ids']):
+            raise RuntimeError('Persisted replay identity membership differs from the native source')
+        if event['event']=='$identify' and got.get('is_identified') is not True:
+            raise RuntimeError('Persisted native identify did not restore identification state')
+        result[got['id']]=got
+    return result
+
+
+def verify_event_people(client, events, profiles, evidence):
+    by_id={i:p['id'] for p in profiles.values() for i in p['distinct_ids']}
+    for index in range(0,len(events),20):
+        selected=events[index:index+20];ids=','.join(sql_quote(e['uuid']) for e in selected)
+        stamps=[time_us(e['timestamp']) for e in selected]
+        lower=dt.datetime.fromtimestamp(min(stamps)//1000000-1,UTC).strftime('%Y-%m-%d %H:%M:%S')
+        upper=dt.datetime.fromtimestamp(max(stamps)//1000000+2,UTC).strftime('%Y-%m-%d %H:%M:%S')
+        bounds=f"timestamp >= toDateTime({sql_quote(lower)},'UTC') AND timestamp <= toDateTime({sql_quote(upper)},'UTC')"
+        sql=f'SELECT uuid,groupUniqArray(person_id) FROM events WHERE {bounds} AND uuid IN ({ids}) GROUP BY uuid LIMIT 100'
+        for attempt in range(30):
+            actual=dict(client.query(sql))
+            if all(actual.get(e['uuid'])==[by_id[e['distinct_id']]] for e in selected):break
+            time.sleep(2)
+        else:raise RuntimeError('Cloud replayed events do not resolve to the preserved canonical person')
+    atomic_json(evidence/f'event-person-verification-{time.time_ns()}.json',{
+        'events_verified':len(events),'canonical_person_id_verified':True})
 
 
 def cloud_readback(client, selected):
@@ -322,28 +493,45 @@ def cloud_gap(config, state, environment, evidence, end):
     floor=max(dt.datetime.fromisoformat(config['native_delta_floor']),dt.datetime.fromisoformat(state['native_cutoff'])-dt.timedelta(hours=48))
     predicate=f"_timestamp >= toDateTime({sql_quote(floor.strftime('%Y-%m-%d %H:%M:%S'))},'UTC') AND _timestamp < toDateTime({sql_quote(end.strftime('%Y-%m-%d %H:%M:%S'))},'UTC')"
     rows=source_query(source,'uuid,event,distinct_id,toUnixTimestamp64Micro(timestamp) AS timestamp_us,properties',predicate)
+    # Restore recorded native links before reading dependent event/person state.
+    rows.sort(key=lambda row:row['event']!='$identify')
     evidence.mkdir(parents=True,exist_ok=True,mode=0o700)
     with gzip.open(evidence/'native-source-delta-private.ndjson.gz','wt') as stream:
         for row in rows:stream.write(canonical(row)+'\n')
-    missing=0;repaired=0;checked=0
+    missing=0;repaired=0;checked=0;profile_preserved=0;profile_before={}
     for index in range(0,len(rows),100):
         selected=rows[index:index+100]
+        owned=journal_envelopes(config,source,selected)
         actual=cloud_readback(c,selected)
-        expected=[];events=[];absent=0;stale=0
+        expected=[];events=[];safe_events=[];persisted_replays=[];absent=0;stale=0
         for row in selected:
-            wire=source_wire_envelope(row,config,source)
+            wire=source_wire_envelope(row,config,source,owned)
             # Normal forwarding intentionally has Cloud's backend enrichment.
             # Do not replay an already faithful SDK event merely to add a blob.
             if row['uuid'] in actual and cloud_fields_match(wire,actual[row['uuid']]):
+                props=actual[row['uuid']][3]
+                props=json.loads(props) if isinstance(props,str) else props
+                if props.get(PROFILE_REPLAY) is True or props.get(PROFILE_REPLAY)=='identify':
+                    persisted_replays.append(wire)
                 expected.append(wire);continue
             event=envelope(row);original=canonical(event);props=event['properties']
-            if props.get('$set') or props.get('$set_once') or props.get('$unset'):
-                raise RuntimeError('Missing/stale native person updates require profile-preserving reconciliation')
+            if any(props.get(k) for k in ('$group_set','$group_set_once','$group_unset','$groups','$group_key')):
+                raise RuntimeError('Missing/stale native group fields require separate reconciliation')
+            if event['event'] in IDENTITY_EVENTS and event['event']!='$identify':
+                raise RuntimeError('Missing/stale native identity/group events require separate reconciliation')
+            if event['event']=='$identify' or any(props.get(key) for key in PERSON_OPERATIONS):
+                if row['uuid'] in actual:
+                    raise RuntimeError('Stale native person updates require profile-preserving reconciliation')
+                events.append(profile_replay(event));expected.append(event);safe_events.append(event);absent+=1
+                continue
             if '__kasanova_posthog_original_event' in props:raise RuntimeError('Original envelope namespace collision')
             props['__kasanova_posthog_original_event']=original;props['__kasanova_posthog_original_event_sha256']=hashlib.sha256(original.encode()).hexdigest()
             expected.append(event)
             if row['uuid'] not in actual:events.append(event);absent+=1
             elif not cloud_fields_match(event,actual[row['uuid']]):events.append(event);stale+=1
+        if safe_events:
+            profile_before=profile_replay_preflight(c,source,safe_events,evidence,profile_before)
+            atomic_json(evidence/'profile-preserving-before-private.json',list(profile_before.values()))
         older=[e for e in events if time_us(e['timestamp'])<=time_us(dt.datetime.now(UTC).isoformat())-48*3600*1000000]
         newer=[e for e in events if e not in older]
         if older:c.capture(older,historical=True)
@@ -354,15 +542,26 @@ def cloud_gap(config, state, environment, evidence, end):
                 if all(e['uuid'] in actual and cloud_fields_match(e,actual[e['uuid']]) for e in expected):break
                 time.sleep(2)
             else:raise RuntimeError('Cloud native UUID or exact fields missing/stale after capture')
-        checked+=len(selected);missing+=absent;repaired+=stale
-        atomic_json(evidence/f'reconciliation-{index:06d}.json',{'source_uuids':[x['uuid'] for x in selected],'missing_captured':absent,'existing_versions_repaired':stale,'persisted_source_wire_fields_verified':True,'source_backend_metadata_retained_in_delta_archive':True,'latest_logical_uuid_readback':True})
-    if missing or repaired:
+        if safe_events:
+            verify_preserved_profiles(profile_before,cloud_persons(c))
+            verify_event_people(c,safe_events,profile_before,evidence)
+        if persisted_replays:
+            current=verify_replay_memberships(c,source,persisted_replays,evidence)
+            for identifier,person in current.items():
+                if identifier in profile_before:verify_preserved_profiles({identifier:profile_before[identifier]},[person])
+                profile_before[identifier]=person
+            verify_event_people(c,persisted_replays,profile_before,evidence)
+        checked+=len(selected);missing+=absent;repaired+=stale;profile_preserved+=len(safe_events)
+        atomic_json(evidence/f'reconciliation-{index:06d}.json',{'source_uuids':[x['uuid'] for x in selected],'missing_captured':absent,'existing_versions_repaired':stale,'profile_preserving_events_verified':len(safe_events),'persisted_source_wire_fields_verified':True,'source_backend_metadata_retained_in_delta_archive':True,'latest_logical_uuid_readback':True})
+    if missing or repaired or profile_before:
         # Native source updates above restore identity relationships; compare
         # only affected people in two paginated passes, never synthetic $set.
         affected={row['distinct_id'] for row in rows}
         source_client=HertzClient(evidence)
         people=[p for p in source_people(source_client,source) if affected.intersection(p['distinct_ids'])]
         cloud_people=cloud_persons(c)
+        verify_preserved_profiles(profile_before,cloud_people)
+        protected={i for p in profile_before.values() for i in p['distinct_ids']}
         by_id={i:p for p in cloud_people for i in p['distinct_ids']}
         mismatches=[]
         for person in people:
@@ -372,16 +571,16 @@ def cloud_gap(config, state, environment, evidence, end):
             # Cloud creates its own internal creator-event metadata. Retain the
             # original in the sealed native person archive, never add activity
             # merely to make this backend-generated metadata match.
-            if any(k!='$creator_event_uuid' and (k not in got['properties'] or not json_values_equal(got['properties'][k],v)) for k,v in person['properties'].items()):
+            if not protected.intersection(person['distinct_ids']) and any(k!='$creator_event_uuid' and (k not in got['properties'] or not json_values_equal(got['properties'][k],v)) for k,v in person['properties'].items()):
                 mismatches.append(person['id'])
         atomic_json(evidence/'affected-source-persons-private.json',people)
         if mismatches:
             atomic_json(evidence/'profile-differences-private.json',{'source_person_ids':mismatches})
             raise RuntimeError('Cloud affected native profiles differ; no synthetic profile repair performed')
         atomic_json(evidence/'profile-reconciliation.json',{'affected_source_persons_verified':len(people),
-            'source_custom_properties_and_memberships_verified':True,'synthetic_profile_events_sent':0,
+            'source_memberships_verified':True,'source_custom_properties_verified_except_preserved_current_cloud_profiles':True,'current_cloud_profiles_preserved':len(profile_before),'synthetic_profile_events_sent':0,
             'internal_creator_metadata_retained_in_source_archive':True})
-    return {'source_events_checked':checked,'missing_events_captured_and_verified':missing,'existing_versions_repaired_and_verified':repaired}
+    return {'source_events_checked':checked,'missing_events_captured_and_verified':missing,'existing_versions_repaired_and_verified':repaired,'profile_preserving_events_verified':profile_preserved}
 
 
 def run(config_path):
