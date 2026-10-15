@@ -396,11 +396,19 @@ def profile_replay_preflight(client, source, events, evidence, previous=None):
             if person.get('is_identified') is not True or (anon is not None and (not isinstance(anon,str) or not anon)):
                 raise RuntimeError('Native identify source person or anonymous identity is invalid')
             other=cloud_by_id.get(anon) if isinstance(anon,str) else got
-            if (not other or set(person['distinct_ids'])!=set(got['distinct_ids'])|set(other['distinct_ids']) or
-                time_us(event['timestamp'])<time_us(min(got['created_at'],other['created_at']))):
+            # A recorded anonymous ID may never have reached Cloud. Identify
+            # then attaches that unclaimed ID to the existing target, without
+            # creating or merging a second profile. Require the exact source
+            # membership for both this case and the two-existing-profile case.
+            aliases=set(other['distinct_ids']) if other is not None else {anon}
+            oldest=min(got['created_at'],other['created_at']) if other is not None else got['created_at']
+            if (set(person['distinct_ids'])!=set(got['distinct_ids'])|aliases or
+                time_us(event['timestamp'])<time_us(oldest)):
                 raise RuntimeError('Native identify is not the recorded source identity relationship')
             merged=json.loads(canonical(got))
-            if other['id']!=got['id']:
+            if other is None:
+                merged['distinct_ids']=sorted(set(got['distinct_ids'])|aliases)
+            elif other['id']!=got['id']:
                 if other.get('is_identified') is not False:
                     raise RuntimeError('Native identify cannot merge an already identified source')
                 conflicts={k for k in other['properties'].keys() & got['properties'].keys()

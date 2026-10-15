@@ -416,7 +416,8 @@ class ProfilePreservingRefillTest(unittest.TestCase):
         identified = {**anonymous, 'is_identified': True}
         conflicting = copy.deepcopy(anonymous); conflicting['properties']['nested'] = [1, 1, None]
         outsider = {**anonymous, 'distinct_ids': ['device-alias', 'unrecorded-outsider']}
-        variants = [(event, [target]), (event, [target, identified]),
+        unknown = copy.deepcopy(event); unknown['properties']['$anon_distinct_id'] = 'unrecorded-anonymous-id'
+        variants = [(unknown, [target]), (event, [target, identified]),
                     (event, [target, conflicting]), (event, [target, outsider])]
         older = copy.deepcopy(event); older['timestamp'] = '2019-01-01T00:00:00Z'
         variants.append((older, [target, anonymous]))
@@ -425,6 +426,51 @@ class ProfilePreservingRefillTest(unittest.TestCase):
                 client = MagicMock()
                 with self.gap_stack(self.row(native), client), \
                      patch.object(refill, 'cloud_persons', return_value=people), self.assertRaises(RuntimeError):
+                    refill.cloud_gap(self.config, self.state, 'dev', self.root, dt.datetime.now(refill.UTC))
+                client.capture.assert_not_called()
+
+    def test_recorded_identify_attaches_unclaimed_source_alias_preserving_target_profile_and_retry(self):
+        event = self.identify_event(); target, _, _ = self.split_people()
+        target['is_identified'] = False  # Exact live shape: target exists, source alias has no Cloud owner.
+        expected = copy.deepcopy(target)
+        expected['distinct_ids'] = sorted(self.person['distinct_ids'])
+        expected['is_identified'] = True
+        for environment in ('prod', 'dev'):
+            with self.subTest(environment=environment):
+                client = MagicMock(); evidence = self.root / environment
+                with self.gap_stack(self.row(event), client), \
+                     patch.object(refill, 'cloud_persons', side_effect=[[target], [expected], [expected]]):
+                    result = refill.cloud_gap(self.config, self.state, environment, evidence, dt.datetime.now(refill.UTC))
+                self.assertEqual(result['missing_events_captured_and_verified'], 1)
+                self.assertEqual(result['profile_preserving_events_verified'], 1)
+                self.assertEqual(client.query.call_count, 7)
+                captured = client.capture.call_args.args[0][0]
+                self.assertTrue(refill.cloud_fields_match(event, self.record(captured)))
+                plan = json.loads(next(evidence.glob('identity-replay-plan-*-private.json')).read_text())[0]
+                self.assertEqual(plan['expected']['id'], target['id'])
+                self.assertEqual(plan['expected']['properties'], target['properties'])
+                self.assertEqual(plan['expected']['created_at'], target['created_at'])
+                self.assertEqual(set(plan['expected']['distinct_ids']), set(self.person['distinct_ids']))
+                self.assertIs(plan['expected']['is_identified'], True)
+                retry = MagicMock()
+                with self.gap_stack(self.row(event), retry, {event['uuid']: self.record(captured)}), \
+                     patch.object(refill, 'cloud_persons', return_value=[expected]):
+                    retried = refill.cloud_gap(self.config, self.state, environment, evidence / 'retry', dt.datetime.now(refill.UTC))
+                retry.capture.assert_not_called()
+                self.assertEqual(retry.query.call_count, 4)
+                self.assertIn('groupUniqArray(person_id)', retry.query.call_args.args[0])
+                self.assertEqual(retried['missing_events_captured_and_verified'], 0)
+
+    def test_unclaimed_alias_requires_exact_recorded_source_group_and_target_predating_event(self):
+        event = self.identify_event(); target, _, _ = self.split_people()
+        unknown = copy.deepcopy(event); unknown['properties']['$anon_distinct_id'] = 'unrecorded-anonymous-id'
+        outsider = copy.deepcopy(target); outsider['distinct_ids'].append('unrecorded-cloud-outsider')
+        older = copy.deepcopy(event); older['timestamp'] = '2020-01-01T00:00:00Z'
+        for native, person in [(unknown, target), (event, outsider), (older, target)]:
+            with self.subTest(event=native, person=person):
+                client = MagicMock()
+                with self.gap_stack(self.row(native), client), \
+                     patch.object(refill, 'cloud_persons', return_value=[person]), self.assertRaises(RuntimeError):
                     refill.cloud_gap(self.config, self.state, 'dev', self.root, dt.datetime.now(refill.UTC))
                 client.capture.assert_not_called()
 
