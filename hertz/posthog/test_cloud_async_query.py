@@ -63,6 +63,43 @@ class AsyncQueryTest(unittest.TestCase):
             self.client.query_node({'kind':'HogQLQuery','query':'SELECT 1'})
         self.assertEqual(request.call_count,2);self.assertFalse(request.call_args_list[0].kwargs['retry']);self.assertEqual(request.call_args.kwargs['method'],'DELETE')
 
+    def test_failed_query_preserves_original_exception_chain_only_in_private_error_evidence(self):
+        marker='private-fixture-event-id';node={'kind':'HogQLQuery','query':"SELECT '"+marker+"'"}
+        for cancellation_fails in (False,True):
+            with self.subTest(cancellation_fails=cancellation_fails):
+                client=CloudClient(self.credentials,'prod',self.root/f'exception-{cancellation_fails}')
+                def request(path,*args,**kwargs):
+                    if kwargs.get('method')=='DELETE':
+                        if cancellation_fails:raise TimeoutError('private cancellation failure')
+                        return {'message':'cancelled'}
+                    try:raise urllib.error.URLError('transport source: '+node['query'])
+                    except urllib.error.URLError as cause:
+                        raise RuntimeError('Cloud query transport failed; bound job receipt retained') from cause
+                stdout=io.StringIO();stderr=io.StringIO()
+                with patch.object(client,'request',side_effect=request) as calls, \
+                     patch('sys.stdout',stdout),patch('sys.stderr',stderr), \
+                     self.assertRaisesRegex(RuntimeError,'bound job receipt retained'):
+                    client.query_node(node)
+                operation=client.evidence/'queries'/ID
+                private=json.loads((operation/'error-private.json').read_text())
+                self.assertEqual(private['error_type'],'RuntimeError')
+                self.assertIn('URLError',private['traceback'])
+                self.assertIn('RuntimeError',private['traceback'])
+                self.assertIn(node['query'],private['traceback'])
+                self.assertIn('direct cause',private['traceback'])
+                self.assertNotIn('private cancellation failure',private['traceback'])
+                self.assertEqual((operation/'error-private.json').stat().st_mode & 0o777,0o600)
+                public=(operation/'failure.json').read_text()
+                self.assertNotIn(marker,public)
+                self.assertNotIn(node['query'],public)
+                self.assertNotIn('traceback',public)
+                self.assertEqual(stdout.getvalue(), '')
+                self.assertEqual(stderr.getvalue(), '')
+                self.assertFalse((operation/'success.json').exists())
+                self.assertEqual(sum(c.kwargs.get('method')=='POST' for c in calls.call_args_list),1)
+                self.assertEqual(calls.call_args.args,('/api/projects/301455/query/'+ID+'/',))
+                self.assertEqual(calls.call_args.kwargs['method'],'DELETE')
+
     def test_retry_sleep_and_http_timeout_fit_deadline(self):
         clock=[0.0];timeouts=[]
         def opener(request,timeout):
