@@ -1,6 +1,9 @@
 platform.kasanova.app {
     encode gzip zstd
     header {
+        # Keep this origin on HTTPS over TCP; QUIC stalls large wallet bundles
+        # on affected browser/network paths. Clear cached HTTP/3 advertisements.
+        Alt-Svc clear
         X-Content-Type-Options nosniff
         X-Frame-Options DENY
         Referrer-Policy strict-origin-when-cross-origin
