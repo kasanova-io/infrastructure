@@ -1,0 +1,43 @@
+services:
+  platform:
+    image: kasanova/platform-web:${PLATFORM_IMAGE_TAG:?Set the verified site-server image tag}
+    build: .
+    container_name: kasanova_platform_web
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=0700
+    environment:
+      XDG_CONFIG_HOME: /tmp/config
+      XDG_DATA_HOME: /tmp/data
+      PUBLIC_UPSTREAM: ${PUBLIC_UPSTREAM:?Set the configured public-service upstream}
+      PUBLIC_API_HOST: ${PUBLIC_API_HOST:?Set the configured public API hostname}
+      PUBLIC_CONFIG_API_KEY: ${PUBLIC_CONFIG_API_KEY:?Provide a server-side environment-read credential}
+      PLATFORM_APP_VERSION: ${PLATFORM_APP_VERSION:?Set the artifact version}
+    volumes:
+      - ${PLATFORM_RELEASE_DIR:?Set the verified immutable web release directory}:/srv:ro
+      - ./site.Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - caddy_caddy_net
+    labels:
+      io.kasanova.service: platform-web
+      io.kasanova.source-revision: ${PLATFORM_SOURCE_REVISION:?Set the exact source revision}
+      io.kasanova.artifact-sha256: ${PLATFORM_ARTIFACT_SHA256:?Set the verified artifact hash}
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:8080/version.json]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+networks:
+  caddy_caddy_net:
+    external: true
