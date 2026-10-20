@@ -1,0 +1,59 @@
+# Build stage
+FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 as builder
+
+# Install required system dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    patch \
+    pkgconfig \
+    openssl-dev
+
+# Set working directory
+WORKDIR /app
+
+# Copy the workspace Cargo.toml and modify it to only include K-transaction-processor
+COPY Cargo.toml ./
+RUN sed -i '/members = \[/,/\]/c\members = ["K-transaction-processor"]' Cargo.toml
+
+# Copy package files
+COPY K-transaction-processor/Cargo.toml ./K-transaction-processor/
+
+# Copy source code
+COPY K-transaction-processor/src ./K-transaction-processor/src
+COPY monotonic-profiles.patch ./
+RUN patch --batch --forward --fuzz=0 -p1 < monotonic-profiles.patch
+RUN cat K-transaction-processor/src/profile_guard_tests.rs >> K-transaction-processor/src/k_protocol.rs && rm K-transaction-processor/src/profile_guard_tests.rs
+COPY Cargo.lock ./Cargo.lock
+RUN cargo test --release --locked --no-run --message-format=json --bin K-transaction-processor > /app/native-test-build.json
+
+# Build the application
+RUN cargo build --release --locked --bin K-transaction-processor
+
+# Runtime stage
+FROM alpine:3.19@sha256:6baf43584bcb78f2e5847d1de515f23499913ac9f12bdf834811a3145eb11ca1
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    libssl3
+
+# Create non-root user
+RUN adduser -D -s /bin/sh app
+
+# Set working directory
+WORKDIR /app
+
+# Copy the binary from builder stage
+COPY --from=builder /app/target/release/K-transaction-processor /app/
+
+# Change ownership to app user
+RUN chown -R app:app /app
+
+# Switch to non-root user
+USER app
+
+# Expose any ports if needed (adjust as necessary)
+EXPOSE 8080
+
+# Default command
+ENTRYPOINT ["./K-transaction-processor"]
