@@ -18,7 +18,9 @@ services:
       - ./native_cloud_proxy.py:/opt/kasanova/native_cloud_proxy.py:ro
       - ${ANALYTICS_INGRESS_CONFIG:?Preserve the private client/project mappings}:/run/secrets/ingress.json:ro
       - journal:/var/lib/analytics
-    networks: [analytics]
+    networks:
+      analytics:
+        aliases: [kasanova_analytics_relay]
   gateway:
     image: ${ANALYTICS_CADDY_IMAGE:?Pin the reviewed Caddy image digest}
     entrypoint: [caddy]
@@ -37,7 +39,7 @@ services:
       caddy_caddy_net:
         # Controlled standby overlap requires the SAME journal and a disabled
         # new worker. Certify this gateway through its unique alias first.
-        aliases: [kasanova_analytics_gateway, kasanova_posthog_gateway]
+        aliases: [kasanova_analytics_gateway, '${ANALYTICS_PUBLIC_GATEWAY_ALIAS:-kasanova_analytics_gateway}']
 networks:
   analytics:
   caddy_caddy_net:
