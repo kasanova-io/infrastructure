@@ -435,27 +435,71 @@ def serve(journal, host, port):
     return server
 
 
+def validate_cloud_routes(routes):
+    """Require an isolated Cloud destination for every retained client route."""
+    if not routes:
+        raise ValueError('Cloud-only delivery requires configured client routes')
+    destinations = {}
+    projects = {}
+    tokens = {}
+    for route in routes.values():
+        cloud = route.get('cloud') or {}
+        host = cloud.get('host', '').rstrip('/')
+        project = cloud.get('project_id')
+        if (host not in ('https://us.i.posthog.com', 'https://eu.i.posthog.com')
+                or type(project) is not int or project <= 0
+                or not isinstance(cloud.get('project_token'), str)
+                or not cloud['project_token'].strip()):
+            raise ValueError('Every client route requires a complete Cloud destination')
+        source = str(route['project_id'])
+        destination = (host, project)
+        binding = (destination, cloud['project_token'])
+        if source in projects and projects[source] != binding:
+            raise ValueError('One source project cannot have conflicting Cloud routes')
+        if destination in destinations and destinations[destination] != source:
+            raise ValueError('Distinct source environments cannot share a Cloud project')
+        if cloud['project_token'] in tokens and tokens[cloud['project_token']] != source:
+            raise ValueError('Distinct source environments cannot share a Cloud token')
+        projects[source] = binding
+        destinations[destination] = source
+        tokens[cloud['project_token']] = source
+
+
+def delivery_operations(journal, posthog_host, stopping, cloud_only=False):
+    """Cloud-only operation never calls the retired native destination."""
+    cloud = lambda: journal.deliver_cloud(stopping)
+    if cloud_only:
+        validate_cloud_routes(journal.routes)
+        return (cloud,)
+    return (lambda: journal.deliver(posthog_host, stopping), cloud)
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--journal', type=Path, required=True)
     parser.add_argument('--posthog-host', default='http://proxy')
+    parser.add_argument('--cloud-only', action='store_true',
+                        help='Deliver only to configured Cloud projects; retain native journal acknowledgements unchanged')
     parser.add_argument('--listen', default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8099)
     parser.add_argument('--seed-import', type=Path)
     parser.add_argument('--seed-project', type=int, default=1)
     args = parser.parse_args()
-    journal = Journal(args.journal, json.loads(args.config.read_text())['routes'])
+    routes = json.loads(args.config.read_text())['routes']
+    if args.cloud_only:
+        validate_cloud_routes(routes)
+    journal = Journal(args.journal, routes)
     if args.seed_import:
         print(json.dumps({'history_seeded': journal.seed_history(args.seed_import, args.seed_project)}))
         return
     stopping = threading.Event()
+    operations = delivery_operations(journal, args.posthog_host, stopping, args.cloud_only)
     def worker():
         while not stopping.is_set():
             delivered = 0
-            for operation in (lambda: journal.deliver(args.posthog_host, stopping),
-                              lambda: journal.deliver_cloud(stopping)):
+            for operation in operations:
                 if stopping.is_set():
                     break
                 try:
