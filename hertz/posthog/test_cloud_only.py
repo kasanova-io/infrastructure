@@ -65,6 +65,56 @@ class CloudOnlyTest(unittest.TestCase):
         native.assert_called_once()
         cloud.assert_called_once()
 
+    def test_standby_gate_is_checked_for_each_batch_and_preserves_pending_data(self):
+        marker = Path(self.tmp.name) / 'cloud-delivery.enabled'
+        operations = delivery_operations(self.journal, 'http://retired.invalid', threading.Event(),
+                                         True, marker)
+        with patch.object(self.journal, 'deliver', side_effect=AssertionError('native contacted')), \
+                patch('analytics_ingress.urllib.request.urlopen', return_value=io.BytesIO(b'{"status":1}')) as send:
+            self.assertEqual(operations[0](), 0)
+            send.assert_not_called()
+            # A directory is not an enable marker.
+            marker.mkdir()
+            self.assertEqual(operations[0](), 0)
+            send.assert_not_called()
+            marker.rmdir()
+            marker.write_text('incumbent stopped\n')
+            self.assertEqual(operations[0](), 1)
+            marker.unlink()
+            self.journal.accept({'api_key': 'dev', 'events': [{
+                'event_type': 'standby', 'device_id': 'device', 'insert_id': 'after-disable',
+                'time': 1791662400123,
+            }]})
+            self.assertEqual(operations[0](), 0)
+            self.assertEqual(send.call_count, 1)
+        with self.journal.connect() as con:
+            self.assertEqual(con.execute('SELECT count(*) FROM records WHERE cloud_destination IS NULL').fetchone()[0], 1)
+
+    def test_delivery_gate_rejects_mirror_mode(self):
+        with self.assertRaisesRegex(ValueError, 'requires Cloud-only'):
+            delivery_operations(self.journal, 'http://native', threading.Event(),
+                                enable_file=Path(self.tmp.name) / 'enable')
+
+    def test_marker_removed_during_prod_capture_prevents_following_dev_batch(self):
+        marker = Path(self.tmp.name) / 'enabled'
+        marker.touch()
+        self.journal.accept({'api_key': 'dev', 'events': [{
+            'event_type': 'standby', 'device_id': 'device', 'insert_id': 'dev-pending',
+            'time': 1791662400123,
+        }]})
+
+        def capture(request, **kwargs):
+            marker.unlink()
+            return io.BytesIO(b'{"status":1}')
+
+        with patch('analytics_ingress.urllib.request.urlopen', side_effect=capture) as send:
+            operation = delivery_operations(self.journal, 'http://retired.invalid',
+                                            threading.Event(), True, marker)[0]
+            self.assertEqual(operation(), 1)
+            self.assertEqual(send.call_count, 1)
+        with self.journal.connect() as con:
+            self.assertEqual(con.execute('SELECT project FROM records WHERE cloud_destination IS NULL').fetchall(), [('2',)])
+
     def test_missing_or_invalid_cloud_route_fails_before_delivery(self):
         for update in [None, {}, {'host': 'http://untrusted', 'project_id': 101, 'project_token': 'x'},
                        {'host': 'https://us.i.posthog.com', 'project_id': True, 'project_token': 'x'},
