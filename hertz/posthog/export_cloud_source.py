@@ -18,6 +18,25 @@ import subprocess
 from import_amplitude_events import atomic_json
 
 
+def journal_export_program(source='/var/lib/analytics/ingress.sqlite'):
+    """Snapshot WAL consistently to private disk and stream without RAM copies."""
+    return '''import os,sqlite3,sys,tempfile,shutil
+from pathlib import Path
+os.umask(0o077)
+with tempfile.TemporaryDirectory(prefix='.kasanova-journal-export-',dir=Path(SOURCE).resolve().parent) as temporary:
+    snapshot=Path(temporary)/'journal.sqlite'
+    source=sqlite3.connect(Path(SOURCE).resolve().as_uri()+'?mode=ro',uri=True)
+    target=sqlite3.connect(snapshot)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+    with snapshot.open('rb') as stream:
+        shutil.copyfileobj(stream,sys.stdout.buffer,1024*1024)
+'''.replace('SOURCE', repr(str(source)))
+
+
 def remote_stream(host, program, destination, compressed=True):
     partial = destination.with_suffix(destination.suffix + '.partial')
     if destination.exists() or partial.exists():
@@ -162,9 +181,7 @@ json.dump(result,sys.stdout,ensure_ascii=False)
         manifest['files'][metadata.name] = {'sha256': file_sha(metadata), 'bytes': metadata.stat().st_size}
         atomic_json(args.output / 'manifest.json', manifest)
     journal = args.output / 'ingress.sqlite'
-    code = ("import sqlite3,sys; source=sqlite3.connect('file:/var/lib/analytics/ingress.sqlite?mode=ro',uri=True); "
-            "target=sqlite3.connect(':memory:'); source.backup(target); "
-            'sys.stdout.buffer.write(target.serialize()); target.close(); source.close()')
+    code = journal_export_program()
     program = ('import subprocess,sys\n'
                "sys.exit(subprocess.run(['docker','exec','kasanova_posthog-analytics-ingress-1',"
                "'python3','-c'," + repr(code) + '],stdout=sys.stdout.buffer).returncode)\n')
