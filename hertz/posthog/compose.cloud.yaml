@@ -4,7 +4,7 @@ services:
     image: ${ANALYTICS_PYTHON_IMAGE:?Pin the reviewed Python image digest}
     user: '1000:1000'
     entrypoint: [python3, -B, /opt/kasanova/analytics_ingress.py]
-    command: [--config, /run/secrets/ingress.json, --journal, /var/lib/analytics/ingress.sqlite, --cloud-only]
+    command: [--config, /run/secrets/ingress.json, --journal, /var/lib/analytics/ingress.sqlite, --cloud-only, --delivery-enable-file, /var/lib/analytics/cloud-delivery.enabled]
     restart: unless-stopped
     init: true
     stop_grace_period: 90s
@@ -35,8 +35,8 @@ services:
     networks:
       analytics:
       caddy_caddy_net:
-        # Hand off the old owned alias only after its proxy has disconnected.
-        # This preserves the shared TLS gateway configuration byte-for-byte.
+        # Controlled standby overlap requires the SAME journal and a disabled
+        # new worker. Certify this gateway through its unique alias first.
         aliases: [kasanova_analytics_gateway, kasanova_posthog_gateway]
 networks:
   analytics:
@@ -44,3 +44,5 @@ networks:
     external: true
 volumes:
   journal:
+    external: true
+    name: ${ANALYTICS_JOURNAL_VOLUME:?Use the existing authoritative journal volume}
