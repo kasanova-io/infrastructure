@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -34,6 +35,25 @@ NAMES = [
 
 def quote(value):
     return "'" + value.replace('\\', '\\\\').replace("'", "\\'") + "'"
+
+
+def native_page_path(base, next_url, collection_path):
+    """Keep pagination on the authenticated origin and exact resource.
+
+    The hobby API can generate http links behind its HTTPS gateway. Never
+    request that URL: use only its same-host path on the configured HTTPS base.
+    """
+    if not next_url:
+        return None
+    configured = urllib.parse.urlsplit(base)
+    target = urllib.parse.urlsplit(next_url)
+    expected = urllib.parse.urlsplit(collection_path).path
+    if (target.scheme not in ('http', 'https') or target.username or target.password
+            or target.netloc.lower() != configured.netloc.lower()
+            or target.path != expected or target.fragment
+            or not expected.startswith('/api/projects/')):
+        raise RuntimeError('Native pagination origin or collection changed')
+    return urllib.parse.urlunsplit(('', '', target.path, target.query, ''))
 
 
 class Client:
