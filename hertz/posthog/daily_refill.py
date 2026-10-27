@@ -30,7 +30,7 @@ from cloud_client import CloudClient
 from import_amplitude_events import atomic_json, canonical, compare, json_values_equal
 from prepare_amplitude_import import convert, entries, session_key, session_uuid, time_us
 from prepare_cloud_import import envelope, retain_original, ORIGINAL, ORIGINAL_SHA
-from recreate_analytics_cohorts import Client as HertzClient
+from recreate_analytics_cohorts import Client as HertzClient, native_page_path
 
 UTC = dt.timezone.utc
 PROFILE_REPLAY = '__kasanova_profile_preserving_replay'
@@ -87,8 +87,7 @@ def source_people(client, project):
     while path:
         if path in visited:raise RuntimeError('Person pagination repeated')
         visited.add(path);result=client.request(path);people.extend(result['results']);next_path=result.get('next')
-        if next_path and not next_path.startswith(client.base+'/'):raise RuntimeError('Person pagination origin changed')
-        path=next_path[len(client.base):] if next_path else None
+        path=native_page_path(client.base,next_path,f'/api/projects/{project}/persons/')
     return people
 
 
