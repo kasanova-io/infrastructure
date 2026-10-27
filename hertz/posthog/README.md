@@ -411,3 +411,14 @@ including their restart policies. Preserve all volumes/images/checkpoints.
 The shared journal stays authoritative throughout: rollback must retain its
 latest data and allow only one delivery worker. Never restore a stale journal
 copy over acknowledged post-cutover requests.
+
+`restore_missing_sdk.py` supplies a separate source-bound preparation and proof
+for missing SDK person metadata. Bind the sealed source metadata, original
+ordinary event, established Cloud before-state, environment and project in the
+private operation record. Reuse that before-state on uncertain retries. Only
+missing SDK keys use atomic `$set_once`; current values and identity operations
+are excluded. Actual post-profile and latest original-UUID event readback must
+verify exact added values, preserved current properties/state/creation, archived
+original fields, unchanged direct custom/session fields and normal count one.
+This explicit proof supplements the full history comparison; the general event
+reconciler is unchanged and cannot certify this repair without its source context.
