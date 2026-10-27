@@ -422,3 +422,11 @@ verify exact added values, preserved current properties/state/creation, archived
 original fields, unchanged direct custom/session fields and normal count one.
 This explicit proof supplements the full history comparison; the general event
 reconciler is unchanged and cannot certify this repair without its source context.
+
+After the native public gateway is detached and its consumers drain, use
+`NativePeopleArchive` with the final manifest's verified SHA and explicit
+environment for final-tail replay preflight and membership checks. It validates
+the sealed metadata/API project and alias inventory, then supplies the real
+archived persons through `source_archive=`. Existing identity/profile guards
+remain unchanged; the retired API is never contacted for this mode. Partial or
+changed snapshots and cross-project requests fail before capture.
