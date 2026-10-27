@@ -1,0 +1,13 @@
+(kasanova-wallet-path) {
+    @walletWithoutSlash path /wallet
+    redir @walletWithoutSlash /wallet/ 308
+    handle_path /wallet/* {
+        header {
+            Alt-Svc clear
+            Cache-Control "no-cache"
+            Permissions-Policy "camera=(self), microphone=(self), geolocation=(), payment=(), publickey-credentials-get=(self), publickey-credentials-create=(self)"
+            Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-eval' https://browser.sentry-cdn.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-src https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        }
+        reverse_proxy {args[0]}:8080
+    }
+}
