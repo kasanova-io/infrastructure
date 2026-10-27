@@ -388,7 +388,7 @@ class Journal:
         return count
 
 
-def serve(journal, host, port):
+def serve(journal, host, port, native_proxy=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass  # No keys, identities, URLs or payloads in access logs.
@@ -410,12 +410,16 @@ def serve(journal, host, port):
             self.end_headers()
 
         def do_GET(self):
-            healthy = self.path in ('/health', '/kasanova-ingest/health')
+            healthy = self.path in ('/health', '/_health', '/kasanova-ingest/health')
+            if not healthy and native_proxy is not None:
+                return self.forward_native()
             self.respond(200 if healthy else 404,
                          {'status': 'ok'} if healthy else {'error': 'Not found'})
 
         def do_POST(self):
             if self.path.rstrip('/') != '/kasanova-ingest/amplitude':
+                if native_proxy is not None:
+                    return self.forward_native()
                 return self.respond(404, {'error': 'Not found'})
             try:
                 length = int(self.headers.get('Content-Length', '0'))
@@ -428,6 +432,23 @@ def serve(journal, host, port):
             except Exception:
                 # Preserve the client queue on any ambiguous/unsupported input or disk failure.
                 self.respond(503, {'code': 503, 'error': 'Journal unavailable; retry'})
+
+        def forward_native(self):
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if length < 0 or length > 32 * 1024 * 1024:
+                    return self.respond(413, {'error': 'Payload too large'})
+                code, content_type, raw = native_proxy.request(
+                    self.command, self.path, self.rfile.read(length),
+                    self.headers.get('Content-Encoding', ''), self.headers.get('User-Agent', ''))
+                self.send_response(code)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(raw)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(raw)
+            except Exception:
+                self.respond(503, {'error': 'Cloud unavailable or unsupported request; retry'})
     server = ThreadingHTTPServer((host, port), Handler)
     # Acknowledged records and requests already accepted must finish before a
     # live checkpoint can stop the journal writer.
@@ -509,7 +530,11 @@ def main():
             if delivered:
                 continue
             stopping.wait(2)
-    server = serve(journal, args.listen, args.port)
+    native_proxy = None
+    if args.cloud_only:
+        from native_cloud_proxy import NativeCloudProxy
+        native_proxy = NativeCloudProxy(routes, precise_json)
+    server = serve(journal, args.listen, args.port, native_proxy)
     def terminate(signum, frame):
         # Python runs as container PID1, where the default SIGTERM disposition
         # is ignored. Exit the serving loop and drain its existing writers.

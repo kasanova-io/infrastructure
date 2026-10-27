@@ -135,7 +135,7 @@ def main():
         program = '''import json,sys
 from pathlib import Path
 sys.path.insert(0,'/home/ren/Kasanova/tools/posthog')
-from recreate_analytics_cohorts import Client
+from recreate_analytics_cohorts import Client,native_page_path
 c=Client(Path('/tmp'))
 project=PROJECT
 result={'project':c.request(f'/api/projects/{project}/'), 'collections':{}}
@@ -149,8 +149,7 @@ for collection in ['actions','cohorts','dashboards','insights','persons','event_
         response=c.request(path)
         rows.extend(response.get('results',[]))
         next_path=response.get('next')
-        if next_path and not next_path.startswith(c.base+'/'): raise RuntimeError('Unexpected pagination origin')
-        path=next_path[len(c.base):] if next_path else None
+        path=native_page_path(c.base,next_path,f'/api/projects/{project}/{collection}/')
     result['collections'][collection]=rows
 json.dump(result,sys.stdout,ensure_ascii=False)
 '''.replace('PROJECT', str(project))
