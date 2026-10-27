@@ -1,0 +1,43 @@
+{
+    admin off
+    auto_https off
+}
+
+:8080 {
+    root * /srv
+    encode gzip zstd
+    header Cache-Control "no-cache"
+
+    # Bootstrap uses one fixed read-only public-config route. No client key is
+    # built into JavaScript, and no generic authenticated API proxy is exposed.
+    @environment {
+        path /backend/api/v1/environment
+        method GET
+    }
+    handle @environment {
+        rewrite * /api/v1/environment?
+        reverse_proxy {$PUBLIC_UPSTREAM} {
+            header_up Host {$PUBLIC_API_HOST}
+            header_up -Authorization
+            header_up -Cookie
+            header_up -X-User-Id
+            header_up -X-QA-*
+            header_up X-Platform web
+            header_up X-App-Version {$PLATFORM_APP_VERSION}
+            header_up X-API-Key {$PUBLIC_CONFIG_API_KEY}
+        }
+    }
+    handle /backend/* {
+        respond "Not found" 404
+    }
+
+    # Missing assets must remain 404 rather than receiving the SPA document.
+    @asset path_regexp asset \.(js|wasm|json|png|jpg|jpeg|gif|webp|ico|svg|ttf|otf|woff|woff2|css|map)$
+    handle @asset {
+        file_server
+    }
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}
