@@ -362,25 +362,46 @@ routing only and must be readable by the gateway without DAC-override capability
 (0444 is sufficient). The pinned Caddy executable needs only NET_BIND_SERVICE
 in addition to the all-capabilities drop; validate with the actual pinned image.
 
-Before public exposure, stop/drain the original journal writer and use the
-existing `backup.snapshot_journal` to seed the new journal volume. Compare the
-complete schema and every records/identities/history row, including native and
-Cloud acknowledgement state. Never start with an empty identity/retry map.
-Create/start the relay first; disconnect the exact old proxy from the shared
-network before starting the new gateway with the legacy owned DNS alias.
-Never leave two running owners of that alias. This handoff preserves the shared
-TLS Caddy file without editing or reloading unrelated routes.
+Set `ANALYTICS_JOURNAL_VOLUME` to the existing authoritative journal volume.
+Verify the same database inode, configuration, UID and Journal schema in both
+containers. Keep `cloud-delivery.enabled` absent: the standby accepts durable
+HTTP requests and proxies native SDK traffic, but cannot deliver journal batches.
+The original worker remains the sole journal delivery worker during standby.
+Test the new gateway through its unique alias/IP, including committed legacy
+requests and Cloud SDK/replay requests. A public request can hit the old alias
+owner and cannot certify the replacement.
+
+Only this controlled shared-journal standby permits a brief overlap of the
+legacy gateway alias. Both legacy handlers must use identical atomic identity,
+retry and acknowledgement semantics; both native routes must remain valid.
+Once the replacement and reconciliation are proven, detach the old public
+proxy, stop/drain the original worker, verify it has stopped, then atomically
+create the enable marker as1000:1000. The new worker checks it before each batch.
+Removing the marker prevents subsequent batches; stop/drain any current batch
+before restarting an old worker. Never run two delivery workers. This handoff
+preserves the shared TLS Caddy file without editing or reloading other routes.
 
 Require complete sealed source/Cloud event reconciliation plus separate current
 person-membership/property preservation. Keep exported original metadata and
 recording volumes independently recoverable; an event certificate does not
-certify Cloud recording playback. Final native backup/restore verification must
-use the genuine original private gateway and ingress, even after their public
-alias is detached. Do not substitute new-relay health for old-stack recovery.
+certify Cloud recording playback. Capture the final native event/profile tail
+after old public traffic has detached and native processing has drained. The
+native backup's exclusive-volume guard must continue to reject a shared journal;
+do not fabricate a new native backup PASS or substitute new-relay health for
+old-stack recovery. Preserve verified cold checkpoints, the final logical tail,
+and offline native/recording volumes. Maintain independently verified journal
+and private configuration snapshots for the running Cloud relay.
+`backup_cloud_journal.py --journal <live SQLite> --config <private routes>
+--runtime <Cloud deployment> --output <new private directory>` makes a consistent
+online WAL snapshot, verifies an independent restored copy and seals all runtime
+and private-config hashes. It never stops services. Schedule recurring snapshots
+and independently copy/verify the handoff checkpoint before retiring native
+backup coverage. This protects the relay queue; it is not a native recording
+backup or proof of a Cloud-provider database restore.
 
 After final recovery archives and Cloud acceptance, disable the old refill and
 native backup timers and retire only the exact original project containers,
 including their restart policies. Preserve all volumes/images/checkpoints.
-After any new acknowledgement the new journal is authoritative: rollback must
-retain it, or freeze and verify-copy its latest data before changing writers.
-Never roll clients back to the stale original journal copy.
+The shared journal stays authoritative throughout: rollback must retain its
+latest data and allow only one delivery worker. Never restore a stale journal
+copy over acknowledged post-cutover requests.
