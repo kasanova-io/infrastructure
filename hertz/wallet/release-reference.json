@@ -1,0 +1,13 @@
+{
+  "version": "0.9.0+178",
+  "prodURL": "https://kasanova.app/wallet/",
+  "devURL": "https://dev.kasanova.app/wallet/",
+  "appSource": "adee88c1e9969a27f7efda03f9c94a3c6bb47e49",
+  "sourceInputsSHA256": "bcf88cd30efba05a550b427ddcebbb2924120f88462c2d7e22de19b6668cf5ab",
+  "prodArchiveSHA256": "3c3bfa704ca671bff83af7f694f970af1ed8a3807fbea12b63e73a974d319761",
+  "siteServerImage": "sha256:f9a4db635ef78ebfa647e17a662b1cacf21e3bc632d80a72544808a0f95a94b9",
+  "runtimeReleaseDirectory": "/home/ren/Kasanova/releases/wallet-prod/3c3bfa704ca671bff83a",
+  "rolloutFlagChanged": false,
+  "clientAPIKeysEmpty": true,
+  "nativeOrOTAPublished": false
+}
