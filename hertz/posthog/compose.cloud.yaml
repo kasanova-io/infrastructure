@@ -1,0 +1,43 @@
+name: kasanova_analytics
+services:
+  relay:
+    image: ${ANALYTICS_PYTHON_IMAGE:?Pin the reviewed Python image digest}
+    user: '1000:1000'
+    entrypoint: [python3, -B, /opt/kasanova/analytics_ingress.py]
+    command: [--config, /run/secrets/ingress.json, --journal, /var/lib/analytics/ingress.sqlite, --cloud-only]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 90s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1
+    mem_limit: 512m
+    volumes:
+      - ./analytics_ingress.py:/opt/kasanova/analytics_ingress.py:ro
+      - ./native_cloud_proxy.py:/opt/kasanova/native_cloud_proxy.py:ro
+      - ${ANALYTICS_INGRESS_CONFIG:?Preserve the private client/project mappings}:/run/secrets/ingress.json:ro
+      - journal:/var/lib/analytics
+    networks: [analytics]
+  gateway:
+    image: ${ANALYTICS_CADDY_IMAGE:?Pin the reviewed Caddy image digest}
+    entrypoint: [caddy]
+    command: [run, --config, /etc/caddy/Caddyfile]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.25
+    mem_limit: 128m
+    volumes:
+      - ./Caddyfile.cloud:/etc/caddy/Caddyfile:ro
+    networks:
+      analytics:
+      caddy_caddy_net:
+        aliases: [kasanova_analytics_gateway]
+networks:
+  analytics:
+  caddy_caddy_net:
+    external: true
+volumes:
+  journal:

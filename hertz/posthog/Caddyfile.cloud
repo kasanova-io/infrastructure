@@ -1,0 +1,17 @@
+{
+    auto_https off
+    admin off
+}
+:80 {
+    @health path /_health /health /kasanova-ingest/health
+    handle @health {
+        reverse_proxy relay:8099
+    }
+    @sdk path /kasanova-ingest/* /batch /batch/ /s /s/ /e /e/ /capture /capture/ /i/v0/e /i/v0/e/ /flags /flags/ /decide /decide/ /array/*
+    handle @sdk {
+        reverse_proxy relay:8099
+    }
+    handle {
+        redir https://us.posthog.com 302
+    }
+}
