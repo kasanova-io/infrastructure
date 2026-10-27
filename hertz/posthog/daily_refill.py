@@ -378,8 +378,9 @@ def profile_replay(event):
     return replay
 
 
-def profile_replay_preflight(client, source, events, evidence, previous=None):
-    source_by_id={i:p for p in source_people(HertzClient(evidence),source) for i in p['distinct_ids']}
+def profile_replay_preflight(client, source, events, evidence, previous=None, *, source_archive=None):
+    people = source_archive.people(source) if source_archive is not None else source_people(HertzClient(evidence),source)
+    source_by_id={i:p for p in people for i in p['distinct_ids']}
     cloud_people=cloud_persons(client)
     cloud_by_id={i:p for p in cloud_people for i in p['distinct_ids']}
     verify_preserved_profiles(previous or {},cloud_people)
@@ -439,8 +440,9 @@ def verify_preserved_profiles(before, after):
             raise RuntimeError('Cloud profile changed during profile-preserving refill')
 
 
-def verify_replay_memberships(client, source, events, evidence):
-    source_by_id={i:p for p in source_people(HertzClient(evidence),source) for i in p['distinct_ids']}
+def verify_replay_memberships(client, source, events, evidence, *, source_archive=None):
+    people = source_archive.people(source) if source_archive is not None else source_people(HertzClient(evidence),source)
+    source_by_id={i:p for p in people for i in p['distinct_ids']}
     cloud_by_id={i:p for p in cloud_persons(client) for i in p['distinct_ids']}
     result={}
     for event in events:
