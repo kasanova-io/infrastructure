@@ -486,13 +486,28 @@ def validate_cloud_routes(routes):
         tokens[cloud['project_token']] = source
 
 
-def delivery_operations(journal, posthog_host, stopping, cloud_only=False):
+def delivery_operations(journal, posthog_host, stopping, cloud_only=False, enable_file=None):
     """Cloud-only operation never calls the retired native destination."""
-    cloud = lambda: journal.deliver_cloud(stopping)
     if cloud_only:
         validate_cloud_routes(journal.routes)
-        return (cloud,)
-    return (lambda: journal.deliver(posthog_host, stopping), cloud)
+        # A standby can acknowledge into the SAME authoritative journal while
+        # the incumbent remains its sole delivery worker. Check on every batch,
+        # not only startup. Missing/unreadable markers fail closed for delivery.
+        class DeliveryStop:
+            def is_set(self):
+                return stopping.is_set() or (enable_file is not None and not enable_file.is_file())
+
+        gate = DeliveryStop()
+
+        def gated_cloud():
+            if gate.is_set():
+                return 0
+            # Journal checks this before each environment/HTTP batch as well.
+            return journal.deliver_cloud(gate)
+        return (gated_cloud,)
+    if enable_file is not None:
+        raise ValueError('A delivery enable file requires Cloud-only operation')
+    return (lambda: journal.deliver(posthog_host, stopping), lambda: journal.deliver_cloud(stopping))
 
 
 def main():
@@ -503,11 +518,15 @@ def main():
     parser.add_argument('--posthog-host', default='http://proxy')
     parser.add_argument('--cloud-only', action='store_true',
                         help='Deliver only to configured Cloud projects; retain native journal acknowledgements unchanged')
+    parser.add_argument('--delivery-enable-file', type=Path,
+                        help='Cloud-only standby: accept requests, but deliver journal batches only while this file exists')
     parser.add_argument('--listen', default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8099)
     parser.add_argument('--seed-import', type=Path)
     parser.add_argument('--seed-project', type=int, default=1)
     args = parser.parse_args()
+    if args.delivery_enable_file is not None and not args.cloud_only:
+        parser.error('--delivery-enable-file requires --cloud-only')
     routes = json.loads(args.config.read_text())['routes']
     if args.cloud_only:
         validate_cloud_routes(routes)
@@ -516,7 +535,8 @@ def main():
         print(json.dumps({'history_seeded': journal.seed_history(args.seed_import, args.seed_project)}))
         return
     stopping = threading.Event()
-    operations = delivery_operations(journal, args.posthog_host, stopping, args.cloud_only)
+    operations = delivery_operations(journal, args.posthog_host, stopping, args.cloud_only,
+                                     args.delivery_enable_file)
     def worker():
         while not stopping.is_set():
             delivered = 0
