@@ -344,3 +344,43 @@ Each replay requires stored-field verification, the expected current profiles,
 and canonical event `person_id` readback. Already stored replay events repeat
 membership and canonical-person checks on retries, even when nothing is captured.
 Only complete success in both environments commits the shared watermarks.
+
+## Retire the native stack after Cloud reconciliation
+
+`compose.cloud.yaml` runs only the existing durable HTTP-v2 compatibility relay
+and a small gateway. It has no PostHog databases, Kafka, object storage or
+Amplitude service connection. The locally embedded mobile queue remains
+compatible: client keys, original envelopes, retry IDs, identities and sessions
+are preserved. Native SDK/replay tokens from older installations translate only
+to their configured Cloud projects. Native errors remain retryable.
+
+Pin `ANALYTICS_PYTHON_IMAGE` and `ANALYTICS_CADDY_IMAGE` to verified image digests;
+set `ANALYTICS_INGRESS_CONFIG` to the preserved private route configuration.
+The relay runs as1000:1000 and its journal directory/files must retain that
+ownership. Keep the private configuration0600. `Caddyfile.cloud` contains public
+routing only and must be readable by the gateway without DAC-override capability
+(0444 is sufficient). The pinned Caddy executable needs only NET_BIND_SERVICE
+in addition to the all-capabilities drop; validate with the actual pinned image.
+
+Before public exposure, stop/drain the original journal writer and use the
+existing `backup.snapshot_journal` to seed the new journal volume. Compare the
+complete schema and every records/identities/history row, including native and
+Cloud acknowledgement state. Never start with an empty identity/retry map.
+Create/start the relay first; disconnect the exact old proxy from the shared
+network before starting the new gateway with the legacy owned DNS alias.
+Never leave two running owners of that alias. This handoff preserves the shared
+TLS Caddy file without editing or reloading unrelated routes.
+
+Require complete sealed source/Cloud event reconciliation plus separate current
+person-membership/property preservation. Keep exported original metadata and
+recording volumes independently recoverable; an event certificate does not
+certify Cloud recording playback. Final native backup/restore verification must
+use the genuine original private gateway and ingress, even after their public
+alias is detached. Do not substitute new-relay health for old-stack recovery.
+
+After final recovery archives and Cloud acceptance, disable the old refill and
+native backup timers and retire only the exact original project containers,
+including their restart policies. Preserve all volumes/images/checkpoints.
+After any new acknowledgement the new journal is authoritative: rollback must
+retain it, or freeze and verify-copy its latest data before changing writers.
+Never roll clients back to the stale original journal copy.
