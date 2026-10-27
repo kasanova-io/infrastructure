@@ -370,6 +370,12 @@ The original worker remains the sole journal delivery worker during standby.
 Test the new gateway through its unique alias/IP, including committed legacy
 requests and Cloud SDK/replay requests. A public request can hit the old alias
 owner and cannot certify the replacement.
+The relay's private alias is `kasanova_analytics_relay`; a generic `relay` name
+can collide with another service on the gateway's shared network. Initially
+leave `ANALYTICS_PUBLIC_GATEWAY_ALIAS` unset so only the unique gateway alias is
+advertised. After direct acceptance, set it to the existing owned public alias
+and attach that alias for the controlled handoff; keep the desired Compose
+configuration in sync for future recreations.
 
 Only this controlled shared-journal standby permits a brief overlap of the
 legacy gateway alias. Both legacy handlers must use identical atomic identity,
