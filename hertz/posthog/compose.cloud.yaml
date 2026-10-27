@@ -34,7 +34,9 @@ services:
     networks:
       analytics:
       caddy_caddy_net:
-        aliases: [kasanova_analytics_gateway]
+        # Hand off the old owned alias only after its proxy has disconnected.
+        # This preserves the shared TLS gateway configuration byte-for-byte.
+        aliases: [kasanova_analytics_gateway, kasanova_posthog_gateway]
 networks:
   analytics:
   caddy_caddy_net:
