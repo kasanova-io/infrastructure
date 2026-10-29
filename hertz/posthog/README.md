@@ -412,16 +412,23 @@ The shared journal stays authoritative throughout: rollback must retain its
 latest data and allow only one delivery worker. Never restore a stale journal
 copy over acknowledged post-cutover requests.
 
-`restore_missing_sdk.py` supplies a separate source-bound preparation and proof
-for missing SDK person metadata. Bind the sealed source metadata, original
-ordinary event, established Cloud before-state, environment and project in the
-private operation record. Reuse that before-state on uncertain retries. Only
-missing SDK keys use atomic `$set_once`; current values and identity operations
-are excluded. Actual post-profile and latest original-UUID event readback must
-verify exact added values, preserved current properties/state/creation, archived
-original fields, unchanged direct custom/session fields and normal count one.
-This explicit proof supplements the full history comparison; the general event
-reconciler is unchanged and cannot certify this repair without its source context.
+Use `restore_sdk_profiles.py` for missing SDK person metadata. It prepares a
+new, explicitly labelled PostHog `$set` maintenance event with only `$set_once`
+for missing SDK keys. It never re-ingests ordinary historical events. Bind the
+sealed source metadata, source event, fresh current profile, environment/project,
+audit UUID and execution timestamp before capture. Reuse immutable inputs on
+uncertain submissions and query the saved audit UUID before any resubmission.
+Verify actual added values and unchanged current properties, identities,
+creation time and last-seen time. Independently compare the unfiltered original
+UUID counts and persisted ordinary-event fields before/after; each must remain
+one. Administrative events are reported separately and can increase unfiltered
+all-event totals. Physical audit retry rows must be disclosed.
+
+`restore_missing_sdk.py` and its original strict proof remain as legacy evidence.
+Do not start another ordinary-event replay repair: Cloud deduplication is eventual
+and can leave both ordinary versions counted for an unbounded interval. New
+maintenance acceptance does not turn an old duplicate-count failure into PASS.
+The general event reconciler remains unchanged.
 
 After the native public gateway is detached and its consumers drain, use
 `NativePeopleArchive` with the final manifest's verified SHA and explicit
