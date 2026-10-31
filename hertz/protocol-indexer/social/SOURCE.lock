@@ -1,0 +1,12 @@
+{
+  "upstream_repository": "https://github.com/thesheepcat/K-indexer",
+  "upstream_revision": "917863f49623aa6802e5ad4c0e246581470d93cb",
+  "upstream_archive_sha256": "6a9cc67b54a65a44736b1d68b840b438e003eda08776be2b23e0eaa569a85d2f",
+  "sdk_revision": "01b532e8b553523216471682649693af92f0fd16",
+  "patch_sha256": "ce499c7ce69c21066d3c0000240a406112728d6e0e117b85c95782d76a20e985",
+  "cargo_lock_sha256": "93a0b3375e351695b197d22819921d3d565760af9e0c94992ed900af75cef259",
+  "build_source_manifest": "655430a39d43b54c5f38ac7d64ef46cba9e37b4fbcb8641d076b1c1263819486",
+  "runtime_image": "sha256:9e114a557edb4a22d29f8ab9edd9090c19849c3e55bb027662ace2be1737a5fb",
+  "contract_image": "sha256:1134b944be57fbe86e67792a87ef487c55cf16be1358b8458062c41e442c00b1",
+  "activated": false
+}
