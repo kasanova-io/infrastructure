@@ -31,12 +31,14 @@ flowchart LR
     Inbox --> Consumers[Existing Chats and Social consumers]
 ```
 
-The private native Chats and signed Social/tip consumers are connected and
-independently reviewed; remaining protocol extensions and public cutover are
-still pending. Raw records
-are **not** signature-validated posts, payments, notifications, or public APIs.
-Existing public Chats/Social services remain on their current contracts. Full
-six-family live/backfill acceptance is required before replacing their scanners.
+The private DEV producer now runs the reviewed22-input1594b0d86405 snapshot
+(adapter40748e8) against the preserved collector/journal. Its normal inventory
+adapters replay all six families. Earlier native Chats and Social/tip versions
+passed bounded real-source tests; the reviewed DM, extension and room upgrades
+are staged, with native consumers currently stopped pending paired activation.
+Public services remain on their existing contracts. Full six-family genuine
+live/backfill acceptance and history/API reconciliation precede public cutover.
+Raw recognition is separate from SDK signature/payment verification and delivery.
 
 ## Protocol adapters
 
