@@ -1,0 +1,85 @@
+# Private candidate only. Existing Chats/Social services and volumes stay intact.
+name: protocol_indexer_${PROTOCOL_ENV:?required}
+
+x-common: &common
+  profiles: [candidate]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+  networks: [protocol]
+  security_opt: [no-new-privileges:true]
+
+x-adapter: &adapter
+  <<: *common
+  image: ${PROTOCOL_ADAPTER_IMAGE:?tested immutable image ID required}
+  pull_policy: never
+  environment:
+    PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
+    SIMPLY_METRICS_URL: http://indexer:8501/api/metrics
+  depends_on:
+    indexer: {condition: service_healthy}
+  mem_limit: 512m
+  cpus: 1
+
+services:
+  database:
+    <<: *common
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_USER: protocol
+      POSTGRES_PASSWORD: ${PROTOCOL_DB_PASSWORD:?required}
+      POSTGRES_DB: protocol
+    volumes: [protocol_data:/var/lib/postgresql/data]
+    mem_limit: 2g
+    cpus: 1
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U protocol -d protocol']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  indexer:
+    <<: *common
+    image: ${PROTOCOL_CHAIN_IMAGE:?tested immutable Simply image required}
+    networks: [protocol, caddy_caddy_net]
+    command:
+      - -s
+      - ${KASPA_NODE_URL:?required}
+      - -n
+      - ${PROTOCOL_NETWORK:?required}
+      - -l
+      - 0.0.0.0:8501
+      - -d
+      - postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
+      - --upgrade-db
+      - --disable=blocks_table,block_parent_table,addresses_transactions_table
+      - --exclude-fields=tx_subnetwork_id,tx_hash,tx_mass
+    depends_on:
+      database: {condition: service_healthy}
+    mem_limit: 2g
+    cpus: 1
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8501/api/health']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+  init:
+    <<: *adapter
+    restart: 'no'
+    command: [--network, '${PROTOCOL_NETWORK:?required}', init]
+  adapters:
+    <<: *adapter
+    command: [--network, '${PROTOCOL_NETWORK:?required}', worker]
+    depends_on:
+      init: {condition: service_completed_successfully}
+      indexer: {condition: service_healthy}
+
+volumes:
+  protocol_data:
+    name: protocol_indexer_${PROTOCOL_ENV:?required}_candidate_data
+networks:
+  protocol:
+    internal: true
+  caddy_caddy_net:
+    external: true

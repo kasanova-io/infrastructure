@@ -1,0 +1,16 @@
+[project]
+name = "kasanova-protocol-indexer"
+version = "0.1.0"
+description = "Shared Simply Kaspa ingestion and scan/backfill protocol adapters"
+requires-python = ">=3.11"
+dependencies = ["psycopg[binary]>=3.2,<4"]
+
+[project.scripts]
+kasanova-protocol-indexer = "protocol_indexer.cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+protocol_indexer = ["*.sql"]

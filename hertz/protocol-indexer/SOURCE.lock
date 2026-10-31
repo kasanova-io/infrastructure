@@ -1,0 +1,14 @@
+{
+  "simply": {
+    "repository": "https://github.com/supertypo/simply-kaspa-indexer",
+    "revision": "7b01229d8960f8f53f909ee0e69fb628053ac8ae",
+    "version": "v2.3.0",
+    "schema": 23,
+    "image": "supertypo/simply-kaspa-indexer@sha256:f28478e046af83b8d490984ca76bd75c663a71e242feba51a176e5ab6ce0a62f",
+    "schema_fixture_sha256": "5824be9de97cdf84d604f86cf4d4280f0d329658bd35be374dddaa46bb1b4d40"
+  },
+  "protocol_references": {
+    "ksocial": "917863f49623aa6802e5ad4c0e246581470d93cb",
+    "kachat": "e2f462171bee80ff26c6fe14ddafe06614f05efa"
+  }
+}
