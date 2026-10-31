@@ -12,10 +12,13 @@ RUN tar -xzf /tmp/upstream.tar.gz --strip-components=2 \
 ENV CARGO_BUILD_JOBS=3
 COPY upstream-current.patch /tmp/upstream-current.patch
 RUN apk add --no-cache patch && patch -p1 < /tmp/upstream-current.patch
+COPY history/shared-source.patch /tmp/shared-source.patch
+RUN patch -p1 < /tmp/shared-source.patch
 RUN cargo test --locked --release --workspace
 RUN cargo build --locked --release -p indexer
 
 COPY history/history.rs /src/indexer/src/api/v1/history.rs
+COPY history/shared_ingestion.rs /src/indexer/src/api/v1/shared_ingestion.rs
 COPY history/history.patch /tmp/history.patch
 RUN patch -p1 < /tmp/history.patch
 COPY history/group-pagination.patch /tmp/group-pagination.patch
@@ -26,6 +29,8 @@ COPY history/personal-pagination.patch /tmp/personal-pagination.patch
 RUN patch -p1 < /tmp/personal-pagination.patch
 COPY history/explicit-pagination.patch /tmp/explicit-pagination.patch
 RUN patch -p1 < /tmp/explicit-pagination.patch
+COPY history/shared-lifecycle.patch /tmp/shared-lifecycle.patch
+RUN patch -p1 < /tmp/shared-lifecycle.patch
 RUN cargo test --locked --release --workspace
 RUN cargo build --locked --release -p indexer
 

@@ -112,3 +112,55 @@ image on the migrated database or overwrite either database with a stale copy.
 
 The candidate, manifests, or image build alone do not constitute deployed DEV
 acceptance or authorize a wallet release.
+
+## Shared-ingestion consumer candidate
+
+The private `/history-import` transport now accepts a versioned shared-journal
+object as well as the established legacy array. Both paths reuse the same native
+parser, transactional Fjall insertions and existing read APIs; there is no second
+message database/schema. The candidate mode is opt-in through the following
+configuration, with no change to the current DEV/PROD deployments:
+
+- `KASANOVA_SHARED_INGESTION_ENABLED=true`
+- `KASANOVA_SHARED_NETWORK=<exact configured full network ID>`
+- `KASANOVA_SHARED_INGEST_TOKEN=<private random bearer secret, at least32bytes>`
+- Existing `NETWORK_TYPE` and `KASPA_NODE_WBORSH_URL` must agree with that network.
+
+Shared requests require `Authorization: Bearer ...`, `schema_version:1`, the
+journal's persistent UUID `source_id`, its exact `network`, and `transactions`
+containing a positive `revision` plus the existing `HistoryTx` transaction body.
+The new journal UUID is stored in `protocol_indexer.config.journal_id`; a process
+restart retains it, whereas a recreated journal must be reconciled explicitly.
+The native database binds the first network/source identity and rejects a changed
+source, conflicting body or conflicting duplicate revision. Older revisions are
+acknowledged as stale without applying them. A revoked record clears native
+acceptance; reacceptance updates acceptance while preserving existing pagination
+keys. Writes, revision receipt and acceptance changes commit atomically, with
+`SyncAll` before acknowledgement, including retries of a duplicate.
+
+When shared mode is enabled, legacy arrays are rejected even if an old migration
+flag remains enabled. Native BlockAdded/VCP ingestion is disabled; ordinary RPC
+connection/request dispatch remains active. Periodic metric refresh/compaction is
+preserved, while native cursor pruning is disabled. Existing public ingress must
+continue hiding private import/export/maintenance routes. The token is neither a
+replacement for that boundary nor permission to expose this endpoint publicly.
+
+The deployed `kchat:1:tip` uses64-byte Schnorr signatures. Its ASCII hex sealed
+memo is normalized to raw bytes at the native storage boundary; normal pay/payment
+bytes remain unchanged even if they happen to look like ASCII hex. Existing
+payment API serialization therefore returns tip memos exactly once as hex.
+The original serialized transaction remains intact in the provenance ledger.
+
+This is still a **consumer candidate**. The shared source connector, independent
+sender/payment/signature validation and full real scan/backfill migration remain
+pending. The879d34a native projection does not yet support current KaChat `dm`
+inbox tags or public `bcast` rooms; those are retained by the shared raw journal,
+not misclassified as private Chats. No push is emitted by this import path; the
+existing notification pipeline is integrated in the next ordered goal stage.
+Do not replace the current public writer with this candidate yet.
+
+The consumer candidate also registers shutdown signals before startup/API serving,
+retaining the signal future until the existing shutdown select. This fixes an
+observed baseline race where an immediate stop after an acknowledged restart could
+be lost during initial node connection. Unix and Windows shutdown routing remain
+the same; the Linux build includes a real signal-before-await regression.
