@@ -147,3 +147,45 @@ yet discover/import external historical archives; existing history tools and
 verified archive receipts need to be connected before #5 is complete. Candidate
 Docker/real-node execution, archival import, existing consumer cutover and live
 acceptance remain required before replacing either current scanner.
+
+## External archival inventory
+
+`archive_backfill.py` reuses the existing Social history collector's file-locked
+rate buckets, retries, atomic gzip caches, SQLite progress, quarantines and bounded
+workers. Its new inventory scope cannot reuse a K-only prepared verdict. Both
+public Social discovery routes and explicit candidate IDs from existing Chats or
+Social inventories lead through the same six-family byte dispatcher:
+
+```sh
+python3 archive_backfill.py verify "$ARCHIVE_INVENTORY" \
+  --source "$DISCOVERY_SOURCE" --archive "$ARCHIVE_SOURCE" \
+  --network "$PROTOCOL_NETWORK" --txid "$TRANSACTION_ID" --limit 1
+python3 archive_backfill.py export "$ARCHIVE_INVENTORY" \
+  --source "$DISCOVERY_SOURCE" --archive "$ARCHIVE_SOURCE" \
+  --network "$PROTOCOL_NETWORK" --output "$NEW_BATCH_FILE"
+```
+
+Run it from the infrastructure tree, keeping the existing sibling history tools
+present. No new dependencies or archive endpoint/network defaults are introduced.
+`discover` uses the established public Social inventory traversal; private Chats
+history still requires the existing address/indexer inventories to supply IDs.
+This does not claim exhaustive discovery of messages or deleted Social actions.
+Selected IDs resume quietly if already verified. Quarantines require explicit
+`--retry-quarantine`; original failure evidence remains. Export refuses overwrite.
+
+Every verification invocation checks the archive's **current** `/info/network`
+`networkName`, distinguishing TN10 from TN11 even though their address prefixes
+match. The verifier checks reported acceptance, exact full containing-block
+membership/payload, every output amount/script/address, every input outpoint and
+signature script. Receipts retain the full RPC transaction including output
+script **versions**, plus the archive detail and acceptance identities. Binary
+message tails remain raw hex. Archive consistency is not independent consensus,
+Social signature validity, verified tipping or current acceptance reconciliation.
+
+The immutable exported inventory is deliberately **not imported into the live
+canonical journal yet**: consumer integration must reconcile the latest live
+acceptance/revocation and validate signatures/payments before producing query
+models or counters. Historical receipt `notify_allowed` is always false. This
+collector cannot mutate a running service, broadcast a transaction or emit a push.
+The external receipt supplies missing versioned payment evidence for the next
+consumer integration stage; routing alone does not authorize a payment claim.

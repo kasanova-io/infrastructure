@@ -366,28 +366,36 @@ class History:
         if not 1 <= workers <= 4:
             raise ValueError("Archive workers must be between 1 and 4")
         condition = "status!='verified'" if retry else "status='discovered'"
-        txids = [
-            r[0]
-            for r in self.db.execute(
-                "SELECT txid FROM records WHERE "
-                + condition
-                + " ORDER BY txid LIMIT ?",
-                (budget or 10**9,),
-            )
-        ]
         if selected:
             if any(not HEX64.fullmatch(txid) for txid in selected):
                 raise ValueError("Invalid selected transaction ID")
-            missing = set(selected) - set(txids)
+            # Selection is independent of the global pending queue. Apply its
+            # budget after selecting, so an unrelated older ID cannot prevent
+            # a bounded retry of the requested transaction.
+            selected = list(dict.fromkeys(selected))
+            missing = {
+                txid for txid in selected
+                if self.db.execute(
+                    "SELECT 1 FROM records WHERE txid=? AND " + condition,
+                    (txid,),
+                ).fetchone() is None
+            }
             if missing:
                 raise ValueError(
                     "Selected transaction absent or already verified: "
                     + ",".join(sorted(missing))
                 )
-            txids = selected
+            txids = selected[:budget] if budget else selected
         elif not retry:
             # Include records discovered while archive verification is running.
             txids = self.pending_ids(budget)
+        else:
+            txids = [
+                r[0] for r in self.db.execute(
+                    "SELECT txid FROM records WHERE " + condition + " ORDER BY txid LIMIT ?",
+                    (budget or 10**9,),
+                )
+            ]
         if workers == 1:
             for txid in txids:
                 self.finish_verification(txid, lambda: self.verify_one(txid))
