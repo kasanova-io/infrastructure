@@ -1,9 +1,13 @@
 """Real journal/ack transactions; native RPC is isolated by an explicit test transport."""
 
 from concurrent.futures import ThreadPoolExecutor
+import importlib.util
 import json
+from pathlib import Path
+import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from protocol_indexer.chats import ChatsConsumer, DeliveryPending, EvidencePending, NativeTransport
@@ -63,6 +67,26 @@ class ConsumerTests(PostgresHarness):
         consumer = ChatsConsumer("testnet-10", resolved, Transport(fail))
         self.assertEqual(consumer.run_one(self.db), "deferred")
         self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 1)
+
+    def test_exhausted_archive_job_defers_and_next_ready_job_progresses(self):
+        first = self.ingest(b"kchat:1:handshake:unavailable")
+        second = self.ingest(b"ciph_msg:1:handshake:ready")
+        spec = importlib.util.spec_from_file_location("connector_worker_test", Path(__file__).parents[1] / "chats_worker.py")
+        worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+        with tempfile.TemporaryDirectory() as root:
+            resolver = worker.Resolver(root, "https://archive", "https://archive", "testnet-10")
+            self.addCleanup(resolver.db.close)
+            def resolve(conn, row):
+                if row["transaction_id"] == first:
+                    resolver.request("https://archive/transactions/" + first.hex())
+                return resolved(conn, row)
+            transport = Transport()
+            consumer = ChatsConsumer("testnet-10", resolve, transport)
+            with patch.object(worker.history.History, "request", side_effect=RuntimeError("request retries exhausted")):
+                self.assertEqual(consumer.run_one(self.db), "deferred")
+                self.assertEqual(consumer.run_one(self.db), "delivered")
+            self.assertEqual(transport.batches[0]["transactions"][0]["transaction"]["tx_id"], second.hex())
+            self.assertEqual(self.scalar("SELECT transaction_id FROM protocol_indexer.consumer_jobs"), first)
 
     def test_revocation_committed_during_delivery_is_not_lost_or_blocked(self):
         txid = self.ingest(b"kchat:1:handshake:sealed")

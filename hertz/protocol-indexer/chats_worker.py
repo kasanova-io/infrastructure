@@ -27,6 +27,16 @@ spec.loader.exec_module(history)
 class Resolver(history.History):
     scope = "shared-chat-delivery-evidence-v1"
 
+    def request(self, url):
+        try:
+            return super().request(url)
+        except RuntimeError as exc:
+            # Existing HTTP helper's terminal transient failure is per job.
+            # Keep capacity, storage and unrelated programmer failures visible.
+            if str(exc) != "request retries exhausted":
+                raise
+            raise EvidencePending("archive_request_exhausted") from exc
+
     def save(self, path, value):
         self.guard_capacity()
         history.atomic_json(path, value)

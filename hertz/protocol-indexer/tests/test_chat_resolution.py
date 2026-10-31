@@ -106,6 +106,15 @@ class ResolutionTests(unittest.TestCase):
                 with self.assertRaises(worker.history.CapacityPause): operation()
         self.assertFalse(any((resolver.root / "quarantine").iterdir()))
 
+    def test_only_known_http_exhaustion_is_deferred(self):
+        worker, resolver = self.resolver()
+        with patch.object(worker.history.History, "request", side_effect=RuntimeError("request retries exhausted")):
+            with self.assertRaises(EvidencePending): resolver.request("https://archive/transactions/" + TX)
+        for failure in (RuntimeError("unrelated failure"), worker.history.CapacityPause("full")):
+            with patch.object(worker.history.History, "request", side_effect=failure):
+                with self.assertRaises(type(failure)) as raised: resolver.request("https://archive/info/network")
+                self.assertIs(raised.exception, failure)
+
     def test_exact_binary_payload_and_native_receiver_selection_are_preserved(self):
         row, receipt, header = fixture()
         result = native_transaction(row, receipt, header)
