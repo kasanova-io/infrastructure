@@ -25,7 +25,10 @@
     "private_dev_producer_active": true,
     "normal_inventory_families_replayed": 6,
     "collector_database_binding_preserved": true,
-    "native_consumers_upgraded": false,
+    "all_native_consumers_upgraded": false,
+    "social_bounded_upgrade_preservation_passed": true,
+    "social_retained_real_tips_verified": 3,
+    "social_native_worker_running": false,
     "connector_evidence_workers_active": false,
     "new_chain_transactions": 0,
     "public_activation": false

@@ -13,10 +13,11 @@ effects atomically. Invalid signatures/key forms never receive an envelope.
 
 The existing standalone listener retains its original K-social inputs. Opt-in
 shared mode uses the common canonical journal, with revision fencing, native
-state reconciliation, stable cursors and quiet replay described below. This is
-an unactivated private candidate. Legacy history/API reconciliation and six-family real-chain acceptance
-precede public cutover. No Python
-replacement signature parser is used.
+state reconciliation, stable cursors and quiet replay described below. The
+private candidate passed a bounded upgrade on retained genuine post/tip history;
+the worker stopped cleanly afterwards. Legacy history/API reconciliation and
+six-family real-chain acceptance precede public cutover. No Python replacement
+signature parser is used.
 
 `SOURCE.lock` records upstream/SDK/patch/lock/image identities. The SDK revision
 matches the KaChat reference lock; the genuine historical K-post fixture verifies
@@ -80,10 +81,14 @@ eligible context; only fenced evaluated opportunities are consumed. Previously
 accepted history/reacceptance and duplicate signed actions stay quiet.
 
 The initial source-binding refusal deliberately preserves existing public
-history; it is not an automatic migration/cutover tool. The source includes verified tips, all five KaPosts extension forms and room
-projection; it remains unactivated. Source-connected preservation, legacy
-history/API reconciliation and six-family real acceptance precede public
-activation. Existing public consumers keep running throughout private testing.
+history; it is not an automatic migration/cutover tool. The source includes
+verified tips, all five KaPosts extension forms and room projection. Its bounded
+private source-connected upgrade preserved existing native rows, IDs, times and
+notification state, and all three retained real tips pass SDK/payment validation
+in the current-tip view. New extension/room transactions, native DM integration,
+broader legacy history/API reconciliation and six-family real acceptance remain
+required before public activation. Existing public consumers keep running
+throughout private testing.
 
 
 ## Verified tip facts

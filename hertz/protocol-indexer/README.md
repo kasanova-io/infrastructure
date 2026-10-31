@@ -33,9 +33,11 @@ flowchart LR
 
 The private DEV producer now runs the reviewed22-input1594b0d86405 snapshot
 (adapter40748e8) against the preserved collector/journal. Its normal inventory
-adapters replay all six families. Earlier native Chats and Social/tip versions
-passed bounded real-source tests; the reviewed DM, extension and room upgrades
-are staged, with native consumers currently stopped pending paired activation.
+adapters replay all six families. The reviewed Social extension/room upgrade
+passed bounded preservation on the existing private journal, retaining old rows,
+IDs, timestamps and notification state. All three retained real tips are now
+SDK/payment-verified in its current-tip view. The consumer stopped cleanly after
+the check; the reviewed native DM upgrade still needs paired activation.
 Public services remain on their existing contracts. Full six-family genuine
 live/backfill acceptance and history/API reconciliation precede public cutover.
 Raw recognition is separate from SDK signature/payment verification and delivery.
