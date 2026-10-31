@@ -39,15 +39,18 @@ def check_network(network, info):
     require(info.get("networkName") == "kaspa-" + network, "archive network does not match configuration")
 
 
-def verify_archive(txid, network, network_info, detail, accepting, containing):
+def verify_transaction_evidence(txid, network, network_info, detail, accepting, containing, *, require_protocol=False, require_accepted=True):
     """Preserve all raw fields and script versions; never UTF-8 decode ciphertext."""
     check_network(network, network_info)
     require(bool(HEX64.fullmatch(txid)), "invalid transaction ID")
-    require(detail.get("transaction_id") == txid and detail.get("is_accepted") is True,
+    require(detail.get("transaction_id") == txid and (not require_accepted or detail.get("is_accepted") is True),
             "archive transaction ID mismatch or not accepted")
-    payload = raw_hex(detail.get("payload"))
+    encoded_payload = detail.get("payload")
+    if encoded_payload is None and not require_protocol:
+        encoded_payload = ""
+    payload = raw_hex(encoded_payload)
     classified = route(payload)
-    require(classified is not None, "unsupported protocol root/version/action")
+    require(not require_protocol or classified is not None, "unsupported protocol root/version/action")
     accepted_hash = detail.get("accepting_block_hash", "")
     require(bool(HEX64.fullmatch(accepted_hash)), "missing accepting block")
     require(accepting.get("verboseData", {}).get("hash") == accepted_hash, "accepting block mismatch")
@@ -60,12 +63,15 @@ def verify_archive(txid, network, network_info, detail, accepting, containing):
                if t.get("verboseData", {}).get("transactionId") == txid]
     require(len(matches) == 1, "transaction must appear exactly once in containing block")
     tx = matches[0]
-    require(raw_hex(tx.get("payload")) == payload, "containing block payload mismatch")
+    rpc_payload = tx.get("payload")
+    if rpc_payload is None and not require_protocol:
+        rpc_payload = ""
+    require(raw_hex(rpc_payload) == payload, "containing block payload mismatch")
     outputs, rpc_outputs = detail.get("outputs"), tx.get("outputs")
     inputs, rpc_inputs = detail.get("inputs"), tx.get("inputs")
     require(isinstance(outputs, list) and isinstance(rpc_outputs, list) and outputs and len(outputs) == len(rpc_outputs),
             "missing or inconsistent transaction outputs")
-    require(isinstance(inputs, list) and isinstance(rpc_inputs, list) and inputs and len(inputs) == len(rpc_inputs),
+    require(isinstance(inputs, list) and isinstance(rpc_inputs, list) and (inputs or not require_protocol) and len(inputs) == len(rpc_inputs),
             "missing or inconsistent transaction inputs")
     require(sorted(integer(o.get("index")) for o in outputs) == list(range(len(outputs))), "invalid output indexes")
     require(sorted(integer(i.get("index")) for i in inputs) == list(range(len(inputs))), "invalid input indexes")
@@ -94,8 +100,8 @@ def verify_archive(txid, network, network_info, detail, accepting, containing):
         require(not address or address.startswith(prefix), "input address network mismatch")
     return {
         "schema_version": 1, "network": network, "transaction_id": txid,
-        "family": classified.family.value, "root": classified.root,
-        "version": classified.version, "kind": classified.action,
+        "family": classified.family.value if classified else None, "root": classified.root if classified else None,
+        "version": classified.version if classified else None, "kind": classified.action if classified else None,
         "payload": payload.hex(), "payload_sha256": hashlib.sha256(payload).hexdigest(),
         "block_time": integer(containing.get("header", {}).get("timestamp")),
         "containing_block": containing_hash, "accepting_block": accepted_hash,
@@ -105,3 +111,47 @@ def verify_archive(txid, network, network_info, detail, accepting, containing):
         "notify_allowed": False,
         "verification": "archive-consistency; consensus/signature/payment/current-acceptance reconciliation pending",
     }
+
+
+def verify_archive(txid, network, network_info, detail, accepting, containing):
+    return verify_transaction_evidence(txid, network, network_info, detail, accepting, containing, require_protocol=True)
+
+
+def input0_evidence(receipt, previous):
+    """Bind sender metadata to the exact previous output, not an address claim."""
+    require(receipt["network"] == previous["network"], "previous transaction network mismatch")
+    inputs = sorted(receipt["archive_transaction"]["inputs"], key=lambda r: integer(r["index"]))
+    first = inputs[0]
+    require(first["previous_outpoint_hash"] == previous["transaction_id"], "previous transaction ID mismatch")
+    index = integer(first["previous_outpoint_index"])
+    outputs = previous["rpc_transaction"]["outputs"]
+    require(index < len(outputs), "previous output does not exist")
+    output = outputs[index]
+    require(integer(output["scriptPublicKey"]["version"], 65535) == 0, "native sender script version unsupported")
+    address = (output.get("verboseData") or {}).get("scriptPublicKeyAddress")
+    require(bool(address), "previous output address unresolved")
+    require(not first.get("previous_outpoint_address") or first["previous_outpoint_address"] == address,
+            "claimed sender differs from previous output")
+    return {"address": address, "script": raw_hex(output["scriptPublicKey"]["scriptPublicKey"]).hex(),
+            "amount": integer(output["amount"]), "previous_transaction": previous}
+
+
+def checked_receipt(receipt, txid, network, *, with_input=True):
+    """Recheck stored proof structure, including optional prior-output enrichment."""
+    require(isinstance(receipt, dict) and receipt.get("transaction_id") == txid and receipt.get("network") == network,
+            "cached receipt identity/network mismatch")
+    accepting = {"verboseData": {"hash": receipt["accepting_block"]},
+                 "header": {"daaScore": receipt["accepting_daa_score"], "timestamp": receipt["accepting_time"]}}
+    containing = {"verboseData": {"hash": receipt["containing_block"]}, "header": {"timestamp": receipt["block_time"]},
+                  "transactions": [receipt["rpc_transaction"]]}
+    checked = verify_transaction_evidence(txid, network, {"networkName": "kaspa-" + network},
+        receipt["archive_transaction"], accepting, containing, require_accepted=False)
+    require(checked["payload"] == receipt["payload"], "cached payload mismatch")
+    if with_input and "input0" in receipt:
+        first = min(checked["archive_transaction"]["inputs"], key=lambda r: integer(r["index"]))
+        previous_id = first["previous_outpoint_hash"]
+        previous = checked_receipt(receipt["input0"]["previous_transaction"], previous_id, network, with_input=False)
+        resolved = input0_evidence(checked, previous)
+        require(all(receipt["input0"][k] == resolved[k] for k in ("address", "script", "amount")), "cached sender proof mismatch")
+        checked["input0"] = resolved
+    return checked

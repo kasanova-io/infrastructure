@@ -29,6 +29,23 @@ CREATE TABLE IF NOT EXISTS protocol_indexer.canonical (
 );
 CREATE INDEX IF NOT EXISTS canonical_family_id ON protocol_indexer.canonical (family, transaction_id);
 
+-- One durable wakeup per transaction. Producers never update/lock an existing
+-- job; the consumer fences its acknowledgement against the canonical revision.
+CREATE TABLE IF NOT EXISTS protocol_indexer.consumer_jobs (
+    consumer text NOT NULL,
+    transaction_id bytea NOT NULL REFERENCES protocol_indexer.canonical,
+    available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_error text,
+    PRIMARY KEY (consumer, transaction_id)
+);
+CREATE INDEX IF NOT EXISTS consumer_jobs_ready ON protocol_indexer.consumer_jobs (consumer, available_at);
+
+CREATE TABLE IF NOT EXISTS protocol_indexer.evidence (
+    transaction_id bytea PRIMARY KEY REFERENCES protocol_indexer.canonical,
+    receipt jsonb NOT NULL,
+    acquired_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE IF NOT EXISTS protocol_indexer.events (
     event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     transaction_id bytea NOT NULL REFERENCES protocol_indexer.canonical,

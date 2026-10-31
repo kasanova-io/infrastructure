@@ -115,12 +115,15 @@ class History:
             stream.flush()
         return _chats.request(url)[0]
 
+    def guard_capacity(self):
+        if shutil.disk_usage(self.root).free < 2 * 1024**3:
+            raise CapacityPause("History collection paused: less than 2 GiB free")
+
     def cache(self, directory, key, url):
         path = self.root / directory / (key + ".json.gz")
         if path.exists():
             return load(path)
-        if shutil.disk_usage(self.root).free < 2 * 1024**3:
-            raise CapacityPause("History collection paused: less than 2 GiB free")
+        self.guard_capacity()
         value = self.request(url)
         atomic_json(path, value)
         return value

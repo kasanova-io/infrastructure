@@ -7,7 +7,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .routing import Family, route
+from .routing import Family, native_chat, route
 from .source import SIMPLY_REVISION
 
 
@@ -87,34 +87,48 @@ def capture_one(conn):
         if old and old["source_transaction"] == body and old["accepting_block"] == block:
             conn.execute("DELETE FROM protocol_indexer.pending WHERE transaction_id = %s", (txid,))
             return True
-        revision = old["revision"] + 1 if old else 1
-        ever_accepted = bool(block is not None or (old and old["ever_accepted"]))
-        if block is not None:
-            kind = "updated" if old and old["accepting_block"] == block else "accepted"
-        else:
-            kind = "revoked" if old and old["accepting_block"] is not None else "observed"
-        classified = route(payload)
-        config = conn.execute("SELECT * FROM protocol_indexer.config").fetchone()
-        notify = bool(kind == "accepted" and not (old and old["ever_accepted"])
-                      and body["block_time"] is not None and body["block_time"] >= config["activated_at_ms"])
-        conn.execute("""
-            INSERT INTO protocol_indexer.canonical
-                (transaction_id, revision, family, source_transaction, accepting_block, ever_accepted)
-            VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (transaction_id) DO UPDATE
-                SET revision = EXCLUDED.revision, source_transaction = EXCLUDED.source_transaction,
-                    accepting_block = EXCLUDED.accepting_block, ever_accepted = EXCLUDED.ever_accepted,
-                    family = EXCLUDED.family
-        """, (txid, revision, classified.family.value if classified else None, Jsonb(body), block, ever_accepted))
-        event = conn.execute("""
-            INSERT INTO protocol_indexer.events
-                (transaction_id, revision, family, kind, source_transaction, accepting_block, notify_allowed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING event_id
-        """, (txid, revision, classified.family.value if classified else None, kind, Jsonb(body), block, notify)).fetchone()
-        if classified:
-            conn.execute("INSERT INTO protocol_indexer.delivery_pending VALUES (%s, %s, %s, %s)",
-                         ("scan-v1:" + classified.family.value, event["event_id"], txid, revision))
+        write_revision(conn, txid, body, block, old)
         conn.execute("DELETE FROM protocol_indexer.pending WHERE transaction_id = %s", (txid,))
         return True
+
+
+def enqueue_chat(conn, txid, classified):
+    if native_chat(classified):
+        conn.execute("""INSERT INTO protocol_indexer.consumer_jobs (consumer, transaction_id)
+            VALUES ('native-chats-v1', %s) ON CONFLICT DO NOTHING""", (txid,))
+
+
+def write_revision(conn, txid, body, block, old, *, quiet=False, historically_accepted=False):
+    """Shared live/archive persistence; caller owns the transaction and pending lock."""
+    revision = old["revision"] + 1 if old else 1
+    ever_accepted = bool(block is not None or historically_accepted or (old and old["ever_accepted"]))
+    if block is not None:
+        kind = "updated" if old and old["accepting_block"] == block else "accepted"
+    else:
+        kind = "revoked" if old and old["accepting_block"] is not None else "observed"
+    payload = bytes.fromhex(body["payload"][2:])
+    classified = route(payload)
+    config = conn.execute("SELECT * FROM protocol_indexer.config").fetchone()
+    notify = bool(not quiet and kind == "accepted" and not (old and old["ever_accepted"])
+                  and body["block_time"] is not None and body["block_time"] >= config["activated_at_ms"])
+    conn.execute("""
+        INSERT INTO protocol_indexer.canonical
+            (transaction_id, revision, family, source_transaction, accepting_block, ever_accepted)
+        VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (transaction_id) DO UPDATE
+            SET revision = EXCLUDED.revision, source_transaction = EXCLUDED.source_transaction,
+                accepting_block = EXCLUDED.accepting_block, ever_accepted = EXCLUDED.ever_accepted,
+                family = EXCLUDED.family
+    """, (txid, revision, classified.family.value if classified else None, Jsonb(body), block, ever_accepted))
+    event = conn.execute("""
+        INSERT INTO protocol_indexer.events
+            (transaction_id, revision, family, kind, source_transaction, accepting_block, notify_allowed)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING event_id
+    """, (txid, revision, classified.family.value if classified else None, kind, Jsonb(body), block, notify)).fetchone()
+    if classified:
+        conn.execute("INSERT INTO protocol_indexer.delivery_pending VALUES (%s, %s, %s, %s)",
+                     ("scan-v1:" + classified.family.value, event["event_id"], txid, revision))
+    enqueue_chat(conn, txid, classified)
+    return revision
 
 
 def discard_unrelated(conn, limit=5000):
@@ -193,6 +207,7 @@ class BackfillAdapter:
             """, (self.family.value, after, limit)).fetchall()
             for row in rows:
                 project(conn, self.family, row, "backfill")
+                enqueue_chat(conn, row["transaction_id"], route(bytes.fromhex(row["source_transaction"]["payload"][2:])))
             # This cursor bounds an inventory, not live delivery. New/later
             # commits below it are covered by ScanAdapter, with no MAX(id) gap.
             return rows[-1]["transaction_id"] if rows else None

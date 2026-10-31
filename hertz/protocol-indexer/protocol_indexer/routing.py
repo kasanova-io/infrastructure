@@ -38,6 +38,15 @@ class Route:
     tail: bytes
 
 
+def native_chat(classified: Route | None) -> bool:
+    """Current native projection, not the broader retained protocol inventory."""
+    return classified is not None and (
+        (classified.family in {Family.KASIA_MESSAGES, Family.KACHAT_MESSAGES}
+         and classified.action not in {"dm", "bcast"})
+        or (classified.family == Family.KACHAT_ACTIONS and classified.action == "tip")
+    )
+
+
 def route(payload: bytes) -> Route | None:
     """Select exactly one family; unknown versions/actions stay unprojected.
 

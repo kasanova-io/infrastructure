@@ -21,7 +21,7 @@ DSN = os.environ.get("PROTOCOL_TEST_DATABASE_URL")
 
 
 @unittest.skipUnless(DSN, "set PROTOCOL_TEST_DATABASE_URL to an empty disposable database")
-class PostgresTests(unittest.TestCase):
+class PostgresHarness(unittest.TestCase):
     def setUp(self):
         self.db = connect(DSN)
         # The test harness owns this exact disposable database, not a caller's
@@ -63,6 +63,7 @@ class PostgresTests(unittest.TestCase):
     def scalar(self, query, params=()):
         return next(iter(self.db.execute(query, params).fetchone().values()))
 
+class PostgresTests(PostgresHarness):
     def test_journal_epoch_is_stable_across_install_and_not_a_process_identity(self):
         before = self.scalar("SELECT journal_id FROM protocol_indexer.config")
         self.assertIsNotNone(before)

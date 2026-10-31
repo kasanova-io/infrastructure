@@ -196,3 +196,38 @@ consumer batches carry it as `source_id`. A recreated journal gets a different
 identity, so a receiver cannot silently treat reset revision numbers as old work.
 The additive upgrade preserves existing config activation and captured history;
 consumer migration must reconcile identity changes instead of overriding them.
+
+## Private native Chats connector
+
+The canonical journal now queues one durable `native-chats-v1` wakeup per
+transaction. The live writer and inventory backfill enqueue identically. This
+projection currently covers established Kasia/KaChat private actions and KaChat
+tips; DM/inbox, room broadcasts and public Social remain retained in the raw
+journal pending their established consumer adapters.
+
+`chats_worker.py` reuses the history HTTP/cache tooling. Missing evidence is
+retried per job without acknowledging it. Verified immutable receipts and headers
+are revalidated on reuse; incomplete/malformed responses are never cached as
+successful proofs. Malformed cached entries are retained in quarantine and
+refetched. All new cache writes obey the existing 2 GiB free-space pause.
+The resolver checks exact network, every output, the precise input0 prior output
+and source-node script/amount/address, then sends the latest canonical acceptance
+to the existing private native `/history-import` route. Archive acceptance never
+overwrites a current journal revocation. SQL/storage failures remain visible.
+
+The native consumer binds persistent journal UUID + network and acknowledges
+only after durable native storage. The connector deletes a job only after a
+valid full acknowledgement and a final locked revision comparison. A source
+revision changing during HTTP remains queued; no canonical lock spans HTTP I/O.
+Stale/malformed/error/redirect responses retain the job. Historical delivery does
+not emit push notifications.
+
+Build `Dockerfile.chats` from the **hertz** context and freeze both image IDs.
+`compose.chats.yaml` is an opt-in private overlay for `compose.candidate.yaml`;
+it creates separate Chats and evidence volumes and publishes no ports/routes.
+Supply the same configured node/full network, compatible native `CHATS_NETWORK_TYPE`,
+HTTPS archive origin and a private bearer secret in the server's mode-0600 env.
+Never print `compose config` with those values or reuse synthetic acceptance
+volumes. Initialize the additive SQL schema and replay the supported raw
+families before starting the connector. Existing public services keep their
+writers and volumes until full six-family live/backfill acceptance and cutover.

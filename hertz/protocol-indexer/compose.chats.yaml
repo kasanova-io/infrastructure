@@ -1,0 +1,71 @@
+# Private source-connected candidate overlay. No public route or published port.
+# Build Dockerfile.chats from the hertz directory; bind to the same source project.
+services:
+  chats:
+    profiles: [chats]
+    image: ${PROTOCOL_CHATS_IMAGE:?tested immutable native image required}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      KASIA_INDEXER_DB_ROOT: /app/data
+      KASPA_NODE_WBORSH_URL: ${KASPA_NODE_URL:?required}
+      NETWORK_TYPE: ${CHATS_NETWORK_TYPE:?native mainnet or testnet required}
+      KASIA_API_BIND: 0.0.0.0:8080
+      PUSH_AUTH_MODE: strict
+      KASANOVA_SHARED_INGESTION_ENABLED: 'true'
+      KASANOVA_SHARED_NETWORK: ${PROTOCOL_NETWORK:?required}
+      KASANOVA_SHARED_INGEST_TOKEN: ${KASANOVA_SHARED_INGEST_TOKEN:?private bearer required}
+      RUST_LOG: info
+    volumes: [chats_data:/app/data]
+    networks: [protocol, caddy_caddy_net]
+    stop_signal: SIGINT
+    stop_grace_period: 90s
+    mem_limit: 2g
+    cpus: 1
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  chats-cache-init:
+    profiles: [chats]
+    image: ${PROTOCOL_CHATS_CONNECTOR_IMAGE:?tested immutable connector image required}
+    pull_policy: never
+    user: '0:0'
+    entrypoint: [python, -c]
+    command: ['import os; os.chown("/evidence", 10001, 10001); os.chmod("/evidence", 0o700)']
+    volumes: [chats_evidence:/evidence]
+    network_mode: none
+    security_opt: [no-new-privileges:true]
+  chats-connector:
+    profiles: [chats]
+    image: ${PROTOCOL_CHATS_CONNECTOR_IMAGE:?tested immutable connector image required}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
+      KASANOVA_SHARED_INGEST_TOKEN: ${KASANOVA_SHARED_INGEST_TOKEN:?private bearer required}
+    command: [--network, '${PROTOCOL_NETWORK:?required}', --archive, '${PROTOCOL_ARCHIVE_URL:?configured HTTPS archive required}', --cache, /evidence, --endpoint, 'http://chats:8080/history-import']
+    volumes:
+      - chats_evidence:/evidence
+      - type: bind
+        source: ./source-binding.json
+        target: /run/protocol-indexer/source-binding.json
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [protocol, caddy_caddy_net]
+    depends_on:
+      chats-cache-init: {condition: service_completed_successfully}
+      chats: {condition: service_started}
+      indexer: {condition: service_healthy}
+    stop_grace_period: 90s
+    mem_limit: 512m
+    cpus: 1
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+volumes:
+  chats_data:
+    name: protocol_indexer_${PROTOCOL_ENV:?required}_shared_chats_data
+  chats_evidence:
+    name: protocol_indexer_${PROTOCOL_ENV:?required}_shared_chats_evidence
