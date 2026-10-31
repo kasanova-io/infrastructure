@@ -18,9 +18,33 @@ class SocialDispatchTests(PostgresHarness):
         for payload in (b'kchat:1:comm:alias:sealed', b'ciph_msg:1:handshake:sealed'):
             txid = self.ingest(payload)
             self.assertEqual(self.consumers(txid), {'native-chats-v1'})
-        # New inbox/DM stays retained until its native decoder upgrade; never
-        # route encrypted content into the public Social projection.
+        # Malformed DM stays retained without archive/native work; never route
+        # encrypted content into the public Social projection.
         self.assertEqual(self.consumers(self.ingest(b'kchat:1:dm:tag:alias:sealed')), set())
+
+    def test_dm_live_and_retained_inventory_use_only_existing_private_consumer(self):
+        payload = b'kchat:1:dm:' + b'ab' * 16 + b':alias:\xff\x00:binary'
+        txid = self.ingest(payload)
+        self.assertEqual(self.consumers(txid), {'native-chats-v1'})
+        before = self.db.execute('SELECT revision,source_transaction,ever_accepted FROM protocol_indexer.canonical WHERE transaction_id=%s', (txid,)).fetchone()
+        events = self.scalar('SELECT count(*) FROM protocol_indexer.events')
+        # Simulate the retained pre-capability inventory, without resetting its
+        # actual source body/acceptance, revisions or notification epoch.
+        self.db.execute("DELETE FROM protocol_indexer.consumer_jobs WHERE consumer='native-chats-v1'")
+        adapter = BackfillAdapter(Family.KACHAT_MESSAGES)
+        adapter.run_page(self.db)
+        adapter.run_page(self.db)
+        self.assertEqual(self.consumers(txid), {'native-chats-v1'})
+        self.assertEqual(self.scalar('SELECT count(*) FROM protocol_indexer.consumer_jobs'), 1)
+        self.assertEqual(self.db.execute('SELECT revision,source_transaction,ever_accepted FROM protocol_indexer.canonical WHERE transaction_id=%s', (txid,)).fetchone(), before)
+        self.assertEqual(self.scalar('SELECT count(*) FROM protocol_indexer.events'), events)
+
+    def test_invalid_dm_tags_never_schedule_archive_or_native_work(self):
+        for tag in (b'ab' * 15, b'ab' * 17, b'AB' * 16, b'zz' * 16):
+            txid = self.ingest(b'kchat:1:dm:' + tag + b':alias:sealed')
+            self.assertEqual(self.consumers(txid), set())
+        txid = self.ingest(b'kchat:1:dm:' + b'ab' * 16 + b':alias:')
+        self.assertEqual(self.consumers(txid), set())
 
     def test_tip_delivers_to_private_payment_and_public_verified_social_consumers(self):
         txid = self.ingest(b'kchat:1:tip:key:sig:post:author:cipher')

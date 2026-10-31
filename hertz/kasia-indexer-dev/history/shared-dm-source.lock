@@ -1,0 +1,41 @@
+{
+  "source_manifest": "b4571bca857d0f53657af39feeaf86f9884e671fc4dde938fc8177241c39fc49",
+  "image": "sha256:a6266e4e7ff624d2c2be861b0ecd8f9383aee1bf22343c22df18d44715854697",
+  "upstream": {
+    "upstream_revision": "879d34a0840c3af0117bc6de7f0ffeeda53c9338",
+    "archive_sha256": "33cdbcee4fa45cb691d55d8136fc37499a42ffd300f2311bba1b70f15b27d4d4",
+    "local_reference_files_matched": 74,
+    "cargo_lock_sha256": "7e250c02fbd94d360f218074db07fd41224eb02577064652fa7f0ed6df68fdcc"
+  },
+  "dm_reference_revision": "e2f462171bee80ff26c6fe14ddafe06614f05efa",
+  "dm_reference_files_sha256": {
+    "protocol/src/operation.rs": "165f296cb429b8ff835f075765b60c7882cafd12eb2049f9a7247a8cb3f20c88",
+    "protocol/src/operation/deserializer.rs": "e8523f2dc12aa9b33f4b53288b2e64834531eb631b89d235d1156e1cf534a3ca",
+    "indexer-db/src/messages/contextual_message.rs": "80db174f618bd7af1f50f9817ceba70378d48d3b730dd86ed848cd4e3671b6fc",
+    "indexer/src/api/v1/contextual_messages.rs": "58795eb4661491cc016bf0eb074ad1aa3b384f4ae2f67a736d641727f9af97e3"
+  },
+  "native_inputs_sha256": {
+    "Dockerfile": "790180603e8f365274c1aa44fe4fc9c47684665fd04092c5deaad3c7a2582267",
+    "history/explicit-pagination.patch": "1e59b63da821cb26ff175cd73a9f62417e3198d69cf1a949c3cabf6d1d4fb5ca",
+    "history/group-pagination.patch": "a0b47af3d989cce753cdb1626309bcac3b3d696f2952289f37b228fa20e684bb",
+    "history/history.patch": "24976067b2eace3d69e4fedcdf339d399b723f07672cdda6efefc601fc99b90f",
+    "history/history.rs": "f6e18e1b36499cdf727babf19214cd6dec2a1107a44396df0f67f0e414f33b65",
+    "history/pagination.rs": "43bf559776c74c4c5cff4b08581843cd251c50a07b1244a9f051db66e75571d3",
+    "history/personal-pagination.patch": "38c9a9dfafdfb137839fa3723d4fcafd8609b9b56c1e55e9f5571f8de24b3bbe",
+    "history/personal_pagination_tests.rs": "93e9c4eded4d1467a261bb2288f81042e6e7f69cd53d33776374dd00ea4e364e",
+    "history/shared-lifecycle.patch": "f8b4e23fb1f6b637b739774c99484180cfeacb80f0a7148546c122c9f8775f1b",
+    "history/shared-source.patch": "98dee70a8ccab886d8a3afee29be89af096e2de98507dfa313ce478ea89fc0df",
+    "history/shared_ingestion.rs": "6344f0b024fe4f40c45da46317b423c16934e5eb40124981d3318de5324496a2",
+    "upstream-current.patch": "55e2e3b1da334a56a70e572787fe3fd4dfbf2f910d23f366c024e48d52ba2752",
+    "history/shared-dm.patch": "68ba36f8f1e6654920c3ce26cc7e54d2828cb3ea8d8fef70f58e2c5a0c81a656",
+    "history/inbox.rs": "f0197b0bafb83bddceabc30c212868f44f28df4bc30e940ea4dd6d15c6391ede",
+    "history/LICENSE.KaChat-Indexer": "9a8b1a60d485f688a44e1899fdcab02a7b9c426020611728d75aa63d2f043f39",
+    "history/shared_mutator_tests.rs": "659d3b5ce36a243f2fa708300d0cdf23a7eb02e9fc151b6b3723db0e9fe62f2e"
+  },
+  "unit_tests": 67,
+  "private_api_checks": 43,
+  "source_journal_connected": false,
+  "activated": false,
+  "genuine_new_dm_acceptance": false,
+  "public_cutover": false
+}

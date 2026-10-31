@@ -116,7 +116,7 @@ class ConsumerTests(PostgresHarness):
         self.assertEqual(transport.batches, [])
         self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 1)
 
-    def test_public_posts_rooms_and_dm_never_fall_through_to_old_native_projection(self):
+    def test_public_posts_rooms_and_malformed_dm_never_enter_private_projection(self):
         for wire in (b"kchat:1:post:key:sig:body", b"kchat:1:bcast:room:body", b"kchat:1:dm:tag:alias:sealed", b"k:1:post:key:sig:body"):
             self.ingest(wire)
         self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='native-chats-v1'"), 0)

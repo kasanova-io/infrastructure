@@ -14,7 +14,10 @@ use indexer_db::{
 };
 use kaspa_addresses::Prefix;
 use kaspa_rpc_core::RpcAddress;
-use protocol::operation::{SealedOperation, deserializer::parse_sealed_operation};
+use protocol::operation::{
+    SealedOperation,
+    deserializer::{parse_sealed_operation, parse_shared_operation},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -194,7 +197,12 @@ pub(super) fn import_batch_wtx(
             result.duplicates += 1;
             continue;
         }
-        let op = parse_sealed_operation(&payload).context("unsupported chat operation")?;
+        let op = if reconcile {
+            parse_shared_operation(&payload)
+        } else {
+            parse_sealed_operation(&payload)
+        }
+        .context("unsupported chat operation")?;
         // Compare any existing ciphertext before adding missing historical indexes.
         let (part_name, sealed) = match &op {
             SealedOperation::SealedMessageOrSealedHandshakeVNone(v) => {
@@ -281,6 +289,18 @@ pub(super) fn import_batch_wtx(
                         tx_id,
                     },
                 );
+                if let Some(tag) = v.inbox_tag {
+                    let inbox_tag = fixed::<INBOX_TAG_LEN>(std::str::from_utf8(tag)?)?;
+                    ContextualMessageByInboxPartition::new(db)?.insert_wtx(
+                        wtx,
+                        &ContextualMessageByInboxKey {
+                            inbox_tag,
+                            block_time: t.block_time.into(),
+                            tx_id,
+                        },
+                        Some(sender),
+                    )?;
+                }
             }
             SealedOperation::PaymentV1(_) => {
                 TxIdToPaymentPartition::new(db)?.insert_wtx(wtx, &tx_id, t.amount, sealed)?;

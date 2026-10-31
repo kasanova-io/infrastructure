@@ -1,9 +1,21 @@
 import unittest
 
-from protocol_indexer.routing import Family, route
+from protocol_indexer.routing import Family, native_chat, route
 
 
 class RoutingTests(unittest.TestCase):
+    def test_dm_native_dispatch_validates_tag_without_reencoding_binary_tail(self):
+        for sealed in (bytes(range(256)), b'\xff\x00:binary', b'deadbeef'):
+            tail = b'ab' * 16 + b':alias:' + sealed
+            classified = route(b'kchat:1:dm:' + tail)
+            self.assertEqual(classified.tail, tail)
+            self.assertTrue(native_chat(classified))
+        for wire in (b'ciph_msg:1:dm:' + b'ab' * 16 + b':alias:sealed',
+                     b'kchat:2:dm:' + b'ab' * 16 + b':alias:sealed',
+                     b'kchat:1:dm:' + b'ab' * 16 + b':alias:',
+                     b'kchat:1:dm:' + b'AB' * 16 + b':alias:sealed'):
+            self.assertFalse(native_chat(route(wire)))
+
     def test_exact_protocol_action_dispatch(self):
         cases = {
             b"kchat:1:post:key:sig:body:[]": Family.KACHAT_POSTS,

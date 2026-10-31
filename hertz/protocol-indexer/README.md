@@ -262,10 +262,24 @@ remain required before replacing any public scanner.
 
 The canonical journal now queues one durable `native-chats-v1` wakeup per
 transaction. The live writer and inventory backfill enqueue identically. This
-projection currently covers established Kasia/KaChat private actions and KaChat
-tips; DM/inbox and room broadcasts remain retained in the raw journal pending
-their established consumer adapters. The independent native Social consumer
+projection covers established Kasia/KaChat private actions, KaChat tips and
+canonical KaChat `dm` through the paired shared-native inbox adapter. Room
+broadcasts remain retained pending their native adapter. The independent Social consumer
 handles supported signed public actions and verified tips.
+
+DM uses the existing native contextual-message storage plus the upstream
+recipient-derived inbox-tag index, atomically with acceptance and the native
+journal. The tag is a discovery hint, not recipient ownership or payment proof.
+The native `/contextual-messages/by-inbox` reader preserves the old timestamp
+query and the existing route/tag-bound exclusive cursor/header contract.
+Standalone mode keeps its original parser and returns404 on the inbox probe.
+Shared mode rejects legacy message import/purge routes before reading bodies;
+the authenticated, source/network/revision-bound journal remains its writer.
+After upgrading both private consumers, explicitly replay retained
+`kachat_messages` inventory through the normal backfill adapter; enabling live
+dispatch alone does not enqueue an already captured DM backlog. This private
+implementation does not establish genuine DM delivery/decryption or public
+history/cutover acceptance.
 
 `chats_worker.py` reuses the history HTTP/cache tooling. Missing evidence is
 retried per job without acknowledging it. Verified immutable receipts and headers

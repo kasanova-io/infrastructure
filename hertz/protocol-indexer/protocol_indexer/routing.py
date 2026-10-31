@@ -40,9 +40,17 @@ class Route:
 
 def native_chat(classified: Route | None) -> bool:
     """Current native projection, not the broader retained protocol inventory."""
+    if classified is not None and classified.action == "dm":
+        # Native upstream discovery-tag syntax, before any archive lookup.
+        # The tag is only an index key; it proves no recipient identity.
+        tag, separator, rest = classified.tail.partition(b":")
+        _alias, alias_separator, sealed = rest.partition(b":")
+        return (classified.root == "kchat" and classified.version == 1
+                and len(tag) == 32 and all(byte in b"0123456789abcdef" for byte in tag)
+                and bool(separator and alias_separator and sealed))
     return classified is not None and (
         (classified.family in {Family.KASIA_MESSAGES, Family.KACHAT_MESSAGES}
-         and classified.action not in {"dm", "bcast"})
+         and classified.action != "bcast")
         or (classified.family == Family.KACHAT_ACTIONS and classified.action == "tip")
     )
 

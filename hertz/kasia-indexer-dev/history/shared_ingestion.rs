@@ -133,6 +133,52 @@ pub async fn import_journal(state: ExportApi, headers: HeaderMap, batch: Journal
     }
 }
 
+/// The canonical journal owns message writes in shared mode. Middleware runs
+/// before body extraction, so legacy bulk import/purge cannot bypass its ledger
+/// or buffer an unneeded large body. Push configuration remains independent.
+pub(super) async fn reject_alternate_writer(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    reject_alternate_writer_for_mode(
+        std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true"),
+        request,
+        next,
+    )
+    .await
+}
+
+async fn reject_alternate_writer_for_mode(
+    shared: bool,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if shared {
+        return (
+            StatusCode::FORBIDDEN,
+            "message storage is owned by the canonical journal",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// A successful inbox probe advertises DM ingestion support to KaChat clients.
+/// Standalone scanners retain their old grammar, so they must not advertise it.
+pub(super) async fn require_shared_inbox(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() != Ok("true") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
+}
+
+#[cfg(test)]
+#[path = "shared_mutator_tests.rs"]
+mod shared_mutator_tests;
+
 pub fn apply_batch(
     db: &TxKeyspace,
     configured: &str,
@@ -259,7 +305,7 @@ fn native_chat_payload(value: &str) -> bool {
         return false;
     };
     if rest.starts_with(b"1:") {
-        protocol::operation::deserializer::parse_sealed_operation(&payload).is_some()
+        protocol::operation::deserializer::parse_shared_operation(&payload).is_some()
     } else {
         // The old decoder accepts arbitrary unknown versions as a legacy
         // handshake. Shared dispatch permits only the actual hex legacy envelope.
@@ -274,7 +320,7 @@ mod tests {
         handshake::TxIdToHandshakePartition, payment::TxIdToPaymentPartition,
     };
 
-    fn fixture(n: u8, prefix: Prefix, payload: &[u8]) -> JournalTx {
+    pub(super) fn fixture(n: u8, prefix: Prefix, payload: &[u8]) -> JournalTx {
         let address =
             kaspa_addresses::Address::new(prefix, kaspa_addresses::Version::PubKey, &[7; 32])
                 .to_string();
@@ -293,13 +339,131 @@ mod tests {
             },
         }
     }
-    fn batch(network: &str, transactions: Vec<JournalTx>) -> JournalBatch {
+    pub(super) fn batch(network: &str, transactions: Vec<JournalTx>) -> JournalBatch {
         JournalBatch {
             schema_version: 1,
             source_id: "a0a0a0a0-1111-4444-8888-012345678901".into(),
             network: network.into(),
             transactions,
         }
+    }
+
+    #[test]
+    fn shared_dm_native_storage_is_atomic_and_revision_safe_on_both_networks() -> Result<()> {
+        use indexer_db::messages::contextual_message::*;
+        for (network, prefix) in [
+            ("mainnet", Prefix::Mainnet),
+            ("testnet-10", Prefix::Testnet),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let db = fjall::Config::new(temp.path()).open_transactional()?;
+            let mut wire = format!("kchat:1:dm:{}:alias:", "ab".repeat(16)).into_bytes();
+            let binary = (0..=255u8).collect::<Vec<_>>();
+            wire.extend_from_slice(&binary);
+            let dm = fixture(61, prefix, &wire);
+            assert!(native_chat_payload(&dm.transaction.payload));
+            assert!(
+                protocol::operation::deserializer::parse_sealed_operation(&wire).is_none(),
+                "standalone grammar unchanged"
+            );
+            assert!(
+                super::super::history::import_batch_for_network(
+                    &db,
+                    &[dm.transaction.clone()],
+                    prefix
+                )
+                .is_err(),
+                "legacy writer never partially files DM"
+            );
+            let comm = fixture(62, prefix, b"ciph_msg:1:comm:alias:\xff\x00:binary");
+            assert_eq!(
+                apply_batch(&db, network, &batch(network, vec![dm.clone(), comm]))?.applied,
+                2
+            );
+            let inbox = ContextualMessageByInboxPartition::new(&db)?;
+            let payload = TxIdToContextualMessagePartition::new(&db)?;
+            assert_eq!(
+                payload.get_rtx(&db.read_tx(), &[61; 32])?.unwrap().as_ref(),
+                binary.as_slice()
+            );
+            let rows = inbox
+                .iter_by_tag_from_block_time(&db.read_tx(), &[0xab; 16], 0)
+                .collect::<Result<Vec<_>>>()?;
+            assert_eq!(rows.len(), 1, "classic comm creates no inbox row");
+            assert_eq!(rows[0].0.tx_id, [61; 32]);
+            assert_eq!(rows[0].0.block_time.get(), 123456);
+            assert_eq!(
+                rows[0].1.as_ref(),
+                &address_on_network(&dm.transaction.sender, prefix)?
+            );
+            let by_sender = ContextualMessageBySenderPartition::new(&db)?;
+            assert_eq!(by_sender.len()?, 2);
+            let mut revoked = dm.clone();
+            revoked.revision = 2;
+            revoked.transaction.accepting_block = None;
+            revoked.transaction.accepting_daa_score = None;
+            apply_batch(&db, network, &batch(network, vec![revoked]))?;
+            assert!(
+                TxIDToAcceptancePartition::new(&db)?
+                    .acceptance_by_tx_id_rtx(&db.read_tx(), &[61; 32])?
+                    .is_none()
+            );
+            assert_eq!(
+                apply_batch(&db, network, &batch(network, vec![dm.clone()]))?.stale,
+                1
+            );
+            let mut accepted = dm.clone();
+            accepted.revision = 3;
+            accepted.transaction.block_time += 100;
+            accepted.transaction.block_hash = "ef".repeat(32);
+            accepted.transaction.accepting_block = Some("ef".repeat(32));
+            apply_batch(&db, network, &batch(network, vec![accepted.clone()]))?;
+            assert_eq!(
+                apply_batch(&db, network, &batch(network, vec![accepted.clone()]))?.duplicates,
+                1
+            );
+            let mut new = dm.clone();
+            new.transaction.tx_id = "3f".repeat(32);
+            let malformed = fixture(64, prefix, b"kchat:1:dm:BAD:alias:sealed");
+            assert!(apply_batch(&db, network, &batch(network, vec![new, malformed])).is_err());
+            assert!(
+                payload.get_rtx(&db.read_tx(), &[63; 32])?.is_none(),
+                "valid sibling rollback includes payload and inbox"
+            );
+            assert_eq!(
+                inbox
+                    .iter_by_tag_from_block_time(&db.read_tx(), &[0xab; 16], 0)
+                    .count(),
+                1
+            );
+            for wire in [
+                b"ciph_msg:1:dm:abababababababababababababababab:alias:sealed".as_slice(),
+                b"kchat:2:dm:abababababababababababababababab:alias:sealed",
+            ] {
+                assert!(!native_chat_payload(&faster_hex::hex_string(wire)));
+            }
+            drop(rows);
+            drop(payload);
+            drop(inbox);
+            drop(by_sender);
+            drop(db);
+            let db = fjall::Config::new(temp.path()).open_transactional()?;
+            assert_eq!(
+                apply_batch(&db, network, &batch(network, vec![accepted]))?.duplicates,
+                1
+            );
+            let part = ContextualMessageByInboxPartition::new(&db)?;
+            let rows = part
+                .iter_by_tag_from_block_time(&db.read_tx(), &[0xab; 16], 0)
+                .collect::<Result<Vec<_>>>()?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].0.block_time.get(),
+                123456,
+                "original native cursor retained across reaccept/restart"
+            );
+        }
+        Ok(())
     }
 
     #[test]
