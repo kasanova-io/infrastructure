@@ -3,10 +3,13 @@
   "upstream_revision": "917863f49623aa6802e5ad4c0e246581470d93cb",
   "upstream_archive_sha256": "6a9cc67b54a65a44736b1d68b840b438e003eda08776be2b23e0eaa569a85d2f",
   "sdk_revision": "01b532e8b553523216471682649693af92f0fd16",
-  "patch_sha256": "ce499c7ce69c21066d3c0000240a406112728d6e0e117b85c95782d76a20e985",
+  "patch_sha256": "d2bbeb283a593c3937d3aa384023f1f6fbf932856c070ec9016fa80f25507dab",
   "cargo_lock_sha256": "93a0b3375e351695b197d22819921d3d565760af9e0c94992ed900af75cef259",
-  "build_source_manifest": "655430a39d43b54c5f38ac7d64ef46cba9e37b4fbcb8641d076b1c1263819486",
-  "runtime_image": "sha256:9e114a557edb4a22d29f8ab9edd9090c19849c3e55bb027662ace2be1737a5fb",
-  "contract_image": "sha256:1134b944be57fbe86e67792a87ef487c55cf16be1358b8458062c41e442c00b1",
-  "activated": false
+  "build_source_manifest": "256a3eb03ccb3950897c1da6a3a010456538619e06460b188093e3a763c4117e",
+  "runtime_image": "sha256:b7fae592b363e5425e93012fb4ad8f9de2d153ca518f896386e93404c7f29224",
+  "contract_image": "sha256:87f8af863ade1188b2e0b1bd157d6a5ae5448779e4d00c59c49ea2f9491da56b",
+  "activated": false,
+  "notification_capture_revision": "8216791a786a730ea95ef9793a888f78da12d36e",
+  "notification_capture_body_sha256": "17365ecbf60369fe40ccbe73c8e3620447e0d2b69660c5269b9a494b590e1abe",
+  "shared_schema_sha256": "d0960ef406df01c6fd28ea515c2f718e2a37df6083afac37a759e4bec438409b"
 }

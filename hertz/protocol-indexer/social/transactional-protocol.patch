@@ -50,7 +50,7 @@
  
          // Split by colons to get the components
          let parts: Vec<&str> = k_payload.split(':').collect();
-@@ -469,118 +486,87 @@
+@@ -469,118 +486,103 @@
          }
      }
  
@@ -68,6 +68,22 @@
 +        let protocol = if cleaned.starts_with("k:1:") { "k" }
 +            else if cleaned.starts_with("kchat:1:") { "kchat" } else { return None; };
 +        let action = self.parse_k_protocol_payload(&cleaned).ok()?;
++        // Signature validity cannot authorize malformed native storage fields.
++        // Match the original SQL helpers' hex decoding without inventing new
++        // target/key length restrictions. Storage outages remain real errors.
++        let hex_ok = |value: &str| hex::decode(value).is_ok();
++        if !hex_ok(&transaction.transaction_id) { return None; }
++        let storable = match &action {
++            KActionType::Post(v) => v.mentioned_pubkeys.iter().all(|v|hex_ok(v)),
++            KActionType::Reply(v) => hex_ok(&v.post_id) && v.mentioned_pubkeys.iter().all(|v|hex_ok(v)),
++            KActionType::Quote(v) => hex_ok(&v.content_id) && hex_ok(&v.mentioned_pubkey),
++            KActionType::Vote(v) => hex_ok(&v.post_id) && hex_ok(&v.mentioned_pubkey),
++            KActionType::Follow(v) => hex_ok(&v.followed_user_pubkey),
++            KActionType::Block(v) => hex_ok(&v.blocked_user_pubkey),
++            KActionType::Broadcast(_) => true,
++            KActionType::Unknown(_) => false,
++        };
++        if !storable { return None; }
 +        let (message, signature, public_key) = match &action {
 +            KActionType::Post(value) => (
 +                format!("{}:{}", value.base64_encoded_message,
@@ -239,7 +255,7 @@
  
          // Extract block time
          let block_time = transaction.block_time.unwrap_or(0);
-@@ -612,7 +598,7 @@
+@@ -612,7 +614,7 @@
                  .bind(&sender_pubkey_bytes)
                  .bind(&sender_signature_bytes)
                  .bind(&k_post.base64_encoded_message)
@@ -248,7 +264,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -646,7 +632,7 @@
+@@ -646,7 +648,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_post.base64_encoded_message)
                  .bind(&hashtags)
@@ -257,7 +273,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -695,7 +681,7 @@
+@@ -695,7 +697,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_post.base64_encoded_message)
                  .bind(&mentioned_pubkeys_bytes)
@@ -266,7 +282,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -736,7 +722,7 @@
+@@ -736,7 +738,7 @@
                  .bind(&k_post.base64_encoded_message)
                  .bind(&mentioned_pubkeys_bytes)
                  .bind(&hashtags)
@@ -275,7 +291,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -758,30 +744,14 @@
+@@ -758,30 +760,14 @@
      }
  
      /// Save K reply to database
@@ -308,7 +324,7 @@
  
          // Store values we need for logging before they're moved
          let post_id_for_log = k_reply.post_id.clone();
-@@ -818,7 +788,7 @@
+@@ -818,7 +804,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_reply.base64_encoded_message)
                  .bind(&post_id_bytes)
@@ -317,7 +333,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -853,7 +823,7 @@
+@@ -853,7 +839,7 @@
                  .bind(&k_reply.base64_encoded_message)
                  .bind(&post_id_bytes)
                  .bind(&hashtags)
@@ -326,7 +342,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -904,7 +874,7 @@
+@@ -904,7 +890,7 @@
                  .bind(&k_reply.base64_encoded_message)
                  .bind(&post_id_bytes)
                  .bind(&mentioned_pubkeys_bytes)
@@ -335,7 +351,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -946,7 +916,7 @@
+@@ -946,7 +932,7 @@
                  .bind(&post_id_bytes)
                  .bind(&mentioned_pubkeys_bytes)
                  .bind(&hashtags)
@@ -344,7 +360,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -969,28 +939,14 @@
+@@ -969,28 +955,14 @@
      }
  
      /// Save K quote to database
@@ -375,7 +391,7 @@
  
          // Store values we need for logging before they're moved
          let content_id_for_log = k_quote.content_id.clone();
-@@ -1034,7 +990,7 @@
+@@ -1034,7 +1006,7 @@
              .bind(&k_quote.base64_encoded_message)
              .bind(&content_id_bytes)
              .bind(&mentioned_pubkey_bytes)
@@ -384,7 +400,7 @@
              .await?;
  
              if result.rows_affected() == 0 {
-@@ -1079,7 +1035,7 @@
+@@ -1079,7 +1051,7 @@
              .bind(&content_id_bytes)
              .bind(&mentioned_pubkey_bytes)
              .bind(&hashtags)
@@ -393,7 +409,7 @@
              .await?;
  
              if result.rows_affected() == 0 {
-@@ -1101,37 +1057,14 @@
+@@ -1101,37 +1073,14 @@
      }
  
      /// Save K broadcast to database
@@ -433,7 +449,7 @@
  
          // Convert hex strings to bytea for database storage
          let transaction_id_bytes = hex::decode(transaction_id)?;
-@@ -1160,7 +1093,7 @@
+@@ -1160,7 +1109,7 @@
          .bind(k_broadcast.base64_encoded_nickname)
          .bind(k_broadcast.base64_encoded_profile_image)
          .bind(k_broadcast.base64_encoded_message)
@@ -442,7 +458,7 @@
          .await?;
  
          if result.rows_affected() == 0 {
-@@ -1178,28 +1111,14 @@
+@@ -1178,28 +1127,14 @@
      }
  
      /// Save K vote to database
@@ -473,7 +489,7 @@
  
          // Store values we need for logging before they're moved
          let post_id_for_log = k_vote.post_id.clone();
-@@ -1238,7 +1157,7 @@
+@@ -1238,7 +1173,7 @@
          .bind(&post_id_bytes)
          .bind(k_vote.vote)
          .bind(&mentioned_pubkey_bytes)
@@ -482,7 +498,7 @@
          .await?;
  
          if result.rows_affected() == 0 {
-@@ -1256,31 +1175,14 @@
+@@ -1256,31 +1191,14 @@
      }
  
      /// Process K block action (block/unblock) in database
@@ -516,7 +532,7 @@
  
          // Extract block time
          let block_time = transaction.block_time.unwrap_or(0);
-@@ -1311,7 +1213,7 @@
+@@ -1311,7 +1229,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_block.blocking_action)
                  .bind(&blocked_user_pubkey_bytes)
@@ -525,7 +541,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -1340,7 +1242,7 @@
+@@ -1340,7 +1258,7 @@
                  )
                  .bind(&sender_pubkey_bytes)
                  .bind(&blocked_user_pubkey_bytes)
@@ -534,7 +550,7 @@
                  .await?;
  
                  info!(
-@@ -1363,31 +1265,14 @@
+@@ -1363,31 +1281,14 @@
      }
  
      /// Process K follow action (follow/unfollow) in database
@@ -568,7 +584,7 @@
  
          // Extract block time
          let block_time = transaction.block_time.unwrap_or(0);
-@@ -1418,7 +1303,7 @@
+@@ -1418,7 +1319,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_follow.following_action)
                  .bind(&followed_user_pubkey_bytes)
@@ -577,7 +593,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -1447,7 +1332,7 @@
+@@ -1447,7 +1348,7 @@
                  )
                  .bind(&sender_pubkey_bytes)
                  .bind(&followed_user_pubkey_bytes)
@@ -588,10 +604,29 @@
                  info!(
 --- a/K-transaction-processor/src/main.rs
 +++ b/K-transaction-processor/src/main.rs
-@@ -192,3 +192,6 @@
-     info!("Transaction Processor shutting down");
-     Ok(())
- }
+@@ -8,0 +9 @@
++mod shared_social;
+@@ -73,0 +75,3 @@
++
++    #[arg(long, help = "Use existing common canonical journal; never starts a scanner")]
++    shared_source_id: Option<String>,
+@@ -111,0 +116,15 @@
++    if let Some(source_id) = &args.shared_source_id {
++        anyhow::ensure!(!args.initialize_db && !args.upgrade_db,
++            "shared mode requires an existing reconciled native schema; schema reset/upgrade is not permitted");
++        // Poll shutdown FIRST, before connecting/binding. A dedicated shared
++        // worker never starts the legacy listener/reindex service on this path.
++        return tokio::select! {
++            biased;
++            _ = tokio::signal::ctrl_c() => Ok(()),
++            result = async {
++                let pool = create_pool(&config).await?;
++                shared_social::run(pool, &config.network, source_id).await
++            } => result,
++        };
++    }
++
+@@ -194,0 +214,3 @@
 +
 +#[cfg(test)]
 +mod shared_protocol_tests;

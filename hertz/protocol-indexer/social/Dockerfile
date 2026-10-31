@@ -13,6 +13,7 @@ COPY prepare_manifests.py /tmp/prepare_manifests.py
 RUN python3 /tmp/prepare_manifests.py
 COPY transactional-protocol.patch /tmp/transactional-protocol.patch
 RUN patch -p1 < /tmp/transactional-protocol.patch
+COPY shared_social.rs shared_social.sql notification_capture.sql notification_capture.sha256 /src/K-transaction-processor/src/
 COPY transaction_tests.rs /src/K-transaction-processor/src/shared_protocol_tests.rs
 COPY real_kpost.json /src/K-transaction-processor/src/real_kpost.json
 ENV CARGO_BUILD_JOBS=3 RUSTFLAGS="-C link-args=-s"
@@ -27,12 +28,15 @@ FROM source AS build
 COPY Cargo.lock /src/Cargo.lock
 RUN --mount=type=cache,id=kasanova-social-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=kasanova-social-git,target=/usr/local/cargo/git \
-    cargo test --locked --release --workspace --features shared-postgres-contract --no-run --message-format=json > /tmp/test-artifacts.jsonl
-RUN python3 -c 'import json,pathlib,shutil; rows=[json.loads(v) for v in pathlib.Path("/tmp/test-artifacts.jsonl").read_text().splitlines()]; paths=[v["executable"] for v in rows if v.get("reason")=="compiler-artifact" and v.get("profile",{}).get("test") and v.get("executable")]; assert len(paths)==1; pathlib.Path("/out").mkdir(); shutil.copyfile(paths[0],"/out/social-tests"); pathlib.Path("/out/social-tests").chmod(0o755)'
+    --mount=type=cache,id=kasanova-social-target-rust196-sdk01b532,target=/src/target,sharing=locked \
+    touch /src/K-transaction-processor/src/*.rs && \
+    (cargo test --locked --release --workspace --features shared-postgres-contract --no-run --message-format=json > /tmp/test-artifacts.jsonl || { python3 -c 'import json,pathlib; rows=[json.loads(v) for v in pathlib.Path("/tmp/test-artifacts.jsonl").read_text().splitlines()]; [print(v.get("message",{}).get("rendered","")) for v in rows if v.get("reason")=="compiler-message"]'; exit 1; }) && \
+    python3 -c 'import json,pathlib,shutil; rows=[json.loads(v) for v in pathlib.Path("/tmp/test-artifacts.jsonl").read_text().splitlines()]; paths=[v["executable"] for v in rows if v.get("reason")=="compiler-artifact" and v.get("profile",{}).get("test") and v.get("executable")]; assert len(paths)==1; pathlib.Path("/out").mkdir(exist_ok=True); shutil.copyfile(paths[0],"/out/social-tests"); pathlib.Path("/out/social-tests").chmod(0o755)'
 RUN /out/social-tests --test-threads=1 pure_
 RUN --mount=type=cache,id=kasanova-social-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=kasanova-social-git,target=/usr/local/cargo/git \
-    cargo build --locked --release --bin K-transaction-processor
+    --mount=type=cache,id=kasanova-social-target-rust196-sdk01b532,target=/src/target,sharing=locked \
+    touch /src/K-transaction-processor/src/*.rs && cargo build --locked --release --bin K-transaction-processor && cp /src/target/release/K-transaction-processor /out/social-processor
 RUN /out/social-tests --test-threads=1 --skip postgres_
 
 FROM ${RUNTIME_IMAGE} AS runtime
@@ -47,5 +51,5 @@ ENTRYPOINT ["/app/social-tests"]
 CMD ["--test-threads=1", "postgres_"]
 
 FROM runtime AS final
-COPY --from=build /src/target/release/K-transaction-processor /app/social-processor
+COPY --from=build /out/social-processor /app/social-processor
 ENTRYPOINT ["/app/social-processor"]
