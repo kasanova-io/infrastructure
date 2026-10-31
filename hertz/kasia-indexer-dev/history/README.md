@@ -135,6 +135,10 @@ denies contextual/import, import-file, personal/purge-all and self-stash GC
 before request-body extraction, preserving the canonical writer's ownership.
 Push configuration remains independent. Pair this image with its reviewed
 shared adapter and replay retained DM inventory before evaluating cutover.
-`shared-dm-source.lock` identifies the tested candidate; it is unactivated.
-Private native/API tests are distinct from real DM chain/decryption, existing
-history migration and the complete six-family public cutover.
+`shared-dm-source.lock` identifies the tested candidate. Its bounded private
+activation delivered three retained real tip jobs to the original native store;
+a corrected copy-only follow-up verified durable revisions, payment API data,
+old records and the original cursor. Both earlier verifier failures remain
+retained. Consumers stopped cleanly afterwards. No new DM transaction was sent;
+genuine DM chain/decryption, broader history migration and the complete
+six-family public cutover remain separate acceptance requirements.

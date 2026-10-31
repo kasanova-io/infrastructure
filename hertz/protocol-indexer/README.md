@@ -37,7 +37,11 @@ adapters replay all six families. The reviewed Social extension/room upgrade
 passed bounded preservation on the existing private journal, retaining old rows,
 IDs, timestamps and notification state. All three retained real tips are now
 SDK/payment-verified in its current-tip view. The consumer stopped cleanly after
-the check; the reviewed native DM upgrade still needs paired activation.
+the check. The paired native DM image/connector also processed the three retained
+tip jobs against the original native store. A separate copy-only audit verified
+durable source/revisions/payload/acceptance, old API rows and the original cursor.
+Both earlier verifier failures remain retained; the corrected follow-up passed.
+Native workers are stopped. Genuine DM/room/extension acceptance is still pending.
 Public services remain on their existing contracts. Full six-family genuine
 live/backfill acceptance and history/API reconciliation precede public cutover.
 Raw recognition is separate from SDK signature/payment verification and delivery.
@@ -285,6 +289,17 @@ After upgrading both private consumers, explicitly replay retained
 dispatch alone does not enqueue an already captured DM backlog. This private
 implementation does not establish genuine DM delivery/decryption or public
 history/cutover acceptance.
+
+The reviewed native image and connector passed bounded retained-tip delivery on
+the existing private store. Three actual queued revisions were delivered; a
+copy-only follow-up checked the durable journal and all three payment API
+responses, retaining every old exported record and the original payment cursor.
+The original-store inventory/ownership, Social SQL, source and public services
+remain unchanged across that follow-up. The original source run failed because
+the fixed-list `/export` API omits journal partitions; the first follow-up failed
+on a read-only inventory permission error. Neither run was relabeled PASS.
+The fresh corrected follow-up passed with all consumers stopped afterwards.
+No new protocol transaction or genuine DM acceptance is implied.
 
 `chats_worker.py` reuses the history HTTP/cache tooling. Missing evidence is
 retried per job without acknowledging it. Verified immutable receipts and headers

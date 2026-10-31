@@ -34,8 +34,12 @@
   },
   "unit_tests": 67,
   "private_api_checks": 43,
-  "source_journal_connected": false,
-  "activated": false,
+  "source_journal_connected": true,
+  "activated": true,
+  "activation_scope": "bounded private retained-tip delivery; corrected copy-only durability/API follow-up passed; both earlier verifier failures retained",
+  "native_worker_running": false,
+  "retained_real_payments_verified": 3,
+  "original_history_and_cursor_preserved": true,
   "genuine_new_dm_acceptance": false,
   "public_cutover": false
 }
