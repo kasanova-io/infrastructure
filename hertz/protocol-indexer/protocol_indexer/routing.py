@@ -47,6 +47,19 @@ def native_chat(classified: Route | None) -> bool:
     )
 
 
+def native_social(classified: Route | None) -> bool:
+    """Public protocol work, independent of private encrypted-message storage.
+
+    This queues the native decoder; it does not assert signature/payment validity
+    or that every routed extension already has a public projection.
+    """
+    return classified is not None and (
+        classified.family in {Family.KACHAT_POSTS, Family.KACHAT_ACTIONS,
+                              Family.KSOCIAL_POSTS, Family.KSOCIAL_ACTIONS}
+        or (classified.family == Family.KACHAT_MESSAGES and classified.action == 'bcast')
+    )
+
+
 def route(payload: bytes) -> Route | None:
     """Select exactly one family; unknown versions/actions stay unprojected.
 

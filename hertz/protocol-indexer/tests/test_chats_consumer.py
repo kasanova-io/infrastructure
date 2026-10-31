@@ -44,7 +44,7 @@ class ConsumerTests(PostgresHarness):
         self.assertEqual(batch["network"], "testnet-10")
         self.assertEqual(batch["transactions"][0]["transaction"]["tx_id"], txid.hex())
         self.assertEqual(batch["transactions"][0]["revision"], 1)
-        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 0)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='native-chats-v1'"), 0)
 
     def test_missing_evidence_does_not_ack_or_delay_other_transactions(self):
         first = self.ingest(b"kchat:1:handshake:missing")
@@ -119,7 +119,7 @@ class ConsumerTests(PostgresHarness):
     def test_public_posts_rooms_and_dm_never_fall_through_to_old_native_projection(self):
         for wire in (b"kchat:1:post:key:sig:body", b"kchat:1:bcast:room:body", b"kchat:1:dm:tag:alias:sealed", b"k:1:post:key:sig:body"):
             self.ingest(wire)
-        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 0)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='native-chats-v1'"), 0)
 
 
 class TransportTests(unittest.TestCase):

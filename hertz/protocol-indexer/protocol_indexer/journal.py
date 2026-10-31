@@ -7,7 +7,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .routing import Family, native_chat, route
+from .routing import Family, native_chat, native_social, route
 from .source import SIMPLY_REVISION
 
 
@@ -92,10 +92,11 @@ def capture_one(conn):
         return True
 
 
-def enqueue_chat(conn, txid, classified):
-    if native_chat(classified):
-        conn.execute("""INSERT INTO protocol_indexer.consumer_jobs (consumer, transaction_id)
-            VALUES ('native-chats-v1', %s) ON CONFLICT DO NOTHING""", (txid,))
+def enqueue_consumers(conn, txid, classified):
+    for consumer, accepts in (('native-chats-v1', native_chat), ('native-social-v1', native_social)):
+        if accepts(classified):
+            conn.execute("""INSERT INTO protocol_indexer.consumer_jobs (consumer, transaction_id)
+                VALUES (%s, %s) ON CONFLICT DO NOTHING""", (consumer, txid))
 
 
 def write_revision(conn, txid, body, block, old, *, quiet=False, historically_accepted=False):
@@ -127,7 +128,7 @@ def write_revision(conn, txid, body, block, old, *, quiet=False, historically_ac
     if classified:
         conn.execute("INSERT INTO protocol_indexer.delivery_pending VALUES (%s, %s, %s, %s)",
                      ("scan-v1:" + classified.family.value, event["event_id"], txid, revision))
-    enqueue_chat(conn, txid, classified)
+    enqueue_consumers(conn, txid, classified)
     return revision
 
 
@@ -207,7 +208,7 @@ class BackfillAdapter:
             """, (self.family.value, after, limit)).fetchall()
             for row in rows:
                 project(conn, self.family, row, "backfill")
-                enqueue_chat(conn, row["transaction_id"], route(bytes.fromhex(row["source_transaction"]["payload"][2:])))
+                enqueue_consumers(conn, row["transaction_id"], route(bytes.fromhex(row["source_transaction"]["payload"][2:])))
             # This cursor bounds an inventory, not live delivery. New/later
             # commits below it are covered by ScanAdapter, with no MAX(id) gap.
             return rows[-1]["transaction_id"] if rows else None
