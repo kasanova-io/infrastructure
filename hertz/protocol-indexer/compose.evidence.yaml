@@ -17,7 +17,7 @@ services:
         target: /run/protocol-indexer/source-binding.json
         read_only: true
         bind: {create_host_path: false}
-    networks: [protocol, caddy_caddy_net]
+    networks: [protocol, protocol_egress]
     depends_on:
       chats-cache-init: {condition: service_completed_successfully}
       indexer: {condition: service_healthy}

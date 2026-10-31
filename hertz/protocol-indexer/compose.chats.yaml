@@ -52,7 +52,7 @@ services:
         target: /run/protocol-indexer/source-binding.json
         read_only: true
         bind: {create_host_path: false}
-    networks: [protocol, caddy_caddy_net]
+    networks: [protocol, protocol_egress]
     depends_on:
       chats-cache-init: {condition: service_completed_successfully}
       chats: {condition: service_started}
@@ -69,3 +69,10 @@ volumes:
     name: protocol_indexer_${PROTOCOL_ENV:?required}_shared_chats_data
   chats_evidence:
     name: protocol_indexer_${PROTOCOL_ENV:?required}_shared_chats_evidence
+networks:
+  # Do not share Docker DNS aliases (indexer/database) with other projects.
+  # This bridge supplies outbound archive access; protocol remains internal.
+  protocol_egress:
+    ipam:
+      config:
+        - subnet: ${PROTOCOL_EGRESS_SUBNET:?explicit unused private egress CIDR required}

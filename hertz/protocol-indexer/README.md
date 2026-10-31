@@ -317,3 +317,10 @@ with its own exclusive worker lock, shared cache/rate/cooldown and no endpoint o
 bearer token. Replay the supported inventory once when adding this consumer to
 an existing journal; historical rows are not silently marked as new acceptance.
 No public service or scanner is replaced by starting this private worker.
+
+Both archive connectors use the internal protocol network plus the project's
+own `protocol_egress` bridge. Configure an unused private CIDR through
+`PROTOCOL_EGRESS_SUBNET`. Do not attach them to shared Caddy: its cross-project
+`indexer`/`database` aliases can resolve another service, which the source binding
+correctly rejects. The isolated outbound bridge gives archive access without
+introducing competing source aliases or weakening SQL/metrics identity checks.
