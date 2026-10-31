@@ -103,17 +103,21 @@ class History:
         if not 0.4 <= archive_interval <= 60:
             raise ValueError("Archive pacing must be between 0.4 and 60 seconds")
         interval = 1.0 if source_request else archive_interval
+        max_wait = getattr(self, 'request_max_wait', None)
         bucket = "source-rate.txt" if source_request else "archive-rate.txt"
         with (rate_root / bucket).open("a+") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            fcntl.flock(stream, fcntl.LOCK_EX | (fcntl.LOCK_NB if max_wait is not None else 0))
             stream.seek(0)
             next_at = float(stream.read() or 0)
-            time.sleep(max(0, next_at - time.time()))
+            delay = max(0, next_at - time.time())
+            if max_wait is not None and delay > max_wait:
+                raise _chats.RatePending('shared history cooldown')
+            time.sleep(delay)
             stream.seek(0)
             stream.truncate()
             stream.write(str(time.time() + interval))
             stream.flush()
-        return _chats.request(url)[0]
+        return _chats.request(url, **getattr(self, 'request_options', {}))[0]
 
     def guard_capacity(self):
         if shutil.disk_usage(self.root).free < 2 * 1024**3:

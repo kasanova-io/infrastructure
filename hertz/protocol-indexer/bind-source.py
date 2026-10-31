@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 from urllib.parse import unquote, urlsplit
 
-from protocol_indexer.source import SIMPLY_IMAGE_REF, SIMPLY_REVISION
+from protocol_indexer.source import SIMPLY_IMAGE_REF, SIMPLY_REVISION, SIMPLY_JOURNAL_IMAGE_REF, SIMPLY_JOURNAL_PATCH_SHA256, source_capabilities
 
 
 def docker(*args):
@@ -70,9 +70,25 @@ def main():
             raise ValueError("running source belongs to another work directory")
         containers[service] = item
     indexer, database = containers["indexer"], containers["database"]
-    expected_image = json.loads(docker("image", "inspect", lock["image"]))[0]["Id"]
+    image_ref = config["services"]["indexer"]["image"]
+    capabilities = source_capabilities(image_ref)
+    image = json.loads(docker("image", "inspect", image_ref))[0]
+    expected_image = image['Id']
     if indexer["Image"] != expected_image:
         raise ValueError("running collector image does not match source lock")
+    environment = dict(item.split('=', 1) for item in indexer['Config'].get('Env', []))
+    if capabilities:
+        variant = json.loads(Path('SOURCE.lock').read_text()).get('simply_journal', {})
+        labels = image['Config'].get('Labels') or {}
+        if (variant.get('image') != SIMPLY_JOURNAL_IMAGE_REF
+            or variant.get('patch_sha256') != SIMPLY_JOURNAL_PATCH_SHA256
+            or labels.get('io.kasanova.simply-journal-patch') != SIMPLY_JOURNAL_PATCH_SHA256
+            or labels.get('io.kasanova.simply-upstream-revision') != SIMPLY_REVISION
+            or environment.get('KASANOVA_ACCEPTED_CHAIN_JOURNAL') != 'true'
+            or config['services']['indexer'].get('environment', {}).get('KASANOVA_ACCEPTED_CHAIN_JOURNAL') != 'true'):
+            raise ValueError('archive source hook image/label/activation mismatch')
+    elif environment.get('KASANOVA_ACCEPTED_CHAIN_JOURNAL', 'false') != 'false':
+        raise ValueError('baseline source cannot advertise archive hooks')
     command = indexer["Config"]["Cmd"]
     if command != config["services"]["indexer"]["command"]:
         raise ValueError("running collector command does not match committed compose")
@@ -98,7 +114,8 @@ def main():
     if identity["name"] != db_name:
         raise ValueError("SQL identity database mismatch")
     binding = {"schema_version": 1, "network": args.network, "source_revision": SIMPLY_REVISION,
-               "source_image_ref": lock["image"], "source_image_id": indexer["Image"],
+               "source_image_ref": image_ref, "source_image_id": indexer["Image"],
+               "capabilities": capabilities,
                "source_container": indexer["Id"],
                "metrics_url": config["services"]["init"]["environment"]["SIMPLY_METRICS_URL"],
                "database": {"host": endpoint.hostname, "port": endpoint.port or 5432, **identity}}

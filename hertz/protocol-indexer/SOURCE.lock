@@ -10,5 +10,11 @@
   "protocol_references": {
     "ksocial": "917863f49623aa6802e5ad4c0e246581470d93cb",
     "kachat": "e2f462171bee80ff26c6fe14ddafe06614f05efa"
+  },
+  "simply_journal": {
+    "upstream_revision": "7b01229d8960f8f53f909ee0e69fb628053ac8ae",
+    "patch_sha256": "760989b4c58c41868c25579260f04a170d81794604adac1058d409026d228e35",
+    "build_manifest": "14870974169e6edcb7c9fe42a9a0ea83c5c731f316cae83a7aab6c01019268b6",
+    "image": "sha256:045bb7ada09559048cb867bc5312fba9ac8523f39f025ad507cd924d9097f3d7"
   }
 }

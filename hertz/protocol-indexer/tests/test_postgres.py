@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from protocol_indexer.cli import validate_binding, validate_source
 from protocol_indexer.source import SIMPLY_IMAGE_REF
+from protocol_indexer import source as source_contract
 from protocol_indexer.journal import (
     SIMPLY_REVISION, BackfillAdapter, ScanAdapter, capture_one, connect, discard_unrelated, install, prune_source,
 )
@@ -394,6 +395,21 @@ class SourceContractTests(unittest.TestCase):
         validate_source(self.metrics(), "testnet-10", "shared")
         binding = self.binding()
         validate_binding(binding, "testnet-10", binding["database"], binding["metrics_url"])
+
+    def test_archive_import_requires_both_reviewed_source_capabilities(self):
+        binding = self.binding()
+        with self.assertRaisesRegex(ValueError, 'requires the reviewed'):
+            validate_binding(binding, 'testnet-10', binding['database'], binding['metrics_url'], require_archive_import=True)
+        forged = {**binding, 'capabilities': {'block_removals': True, 'live_overrides_archive_seed': True}}
+        with self.assertRaisesRegex(ValueError, 'capability'):
+            validate_binding(forged, 'testnet-10', binding['database'], binding['metrics_url'], require_archive_import=True)
+        # Explicit approved-image fixture; no fake approval enters production source.
+        image = 'sha256:' + 'ef' * 32
+        with patch.object(source_contract, 'SIMPLY_JOURNAL_IMAGE_REF', image):
+            hook = {**forged, 'source_image_ref': image, 'source_image_id': image}
+            validate_binding(hook, 'testnet-10', hook['database'], hook['metrics_url'], require_archive_import=True)
+            with self.assertRaisesRegex(ValueError, 'immutable image'):
+                validate_binding({**hook, 'source_image_id': binding['source_image_id']}, 'testnet-10', hook['database'], hook['metrics_url'], require_archive_import=True)
 
     def test_same_database_name_on_different_server_does_not_pass_network_preflight(self):
         binding = self.binding()

@@ -5,6 +5,7 @@ COPY protocol-indexer/requirements.txt ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 COPY protocol-indexer/protocol_indexer ./protocol_indexer
 COPY protocol-indexer/chats_worker.py /tools/hertz/protocol-indexer/chats_worker.py
+COPY protocol-indexer/import_archive.py /tools/hertz/protocol-indexer/import_archive.py
 COPY social-indexer-history/history.py /tools/hertz/social-indexer-history/history.py
 COPY kasia-indexer-dev/history/collect.py /tools/hertz/kasia-indexer-dev/history/collect.py
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app

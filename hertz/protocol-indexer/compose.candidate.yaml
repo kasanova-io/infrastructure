@@ -48,6 +48,8 @@ services:
     <<: *common
     image: ${PROTOCOL_CHAIN_IMAGE:?tested immutable Simply image required}
     networks: [protocol, caddy_caddy_net]
+    environment:
+      KASANOVA_ACCEPTED_CHAIN_JOURNAL: ${PROTOCOL_ACCEPTED_CHAIN_JOURNAL:-false}
     command:
       - -s
       - ${KASPA_NODE_URL:?required}

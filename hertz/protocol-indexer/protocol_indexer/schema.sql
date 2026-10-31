@@ -29,6 +29,52 @@ CREATE TABLE IF NOT EXISTS protocol_indexer.canonical (
 );
 CREATE INDEX IF NOT EXISTS canonical_family_id ON protocol_indexer.canonical (family, transaction_id);
 
+-- Archive sentinels must yield to the first genuine live INSERT, including a
+-- concurrent writer whose command snapshot predates the sentinel's commit.
+-- Keep provenance on the locked conflicting tuple, not in a side-table lookup.
+ALTER TABLE public.transactions_acceptances ADD COLUMN IF NOT EXISTS is_archive_seed boolean NOT NULL DEFAULT false;
+
+CREATE OR REPLACE FUNCTION protocol_indexer.insert_source_acceptances(transactions bytea[],blocks bytea[])
+RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE inserted bigint;
+BEGIN
+    IF cardinality(transactions) IS DISTINCT FROM cardinality(blocks) THEN
+        RAISE EXCEPTION 'acceptance arrays differ';
+    END IF;
+    INSERT INTO public.transactions_acceptances(transaction_id,block_hash,is_archive_seed)
+    SELECT DISTINCT ON (transaction_id) transaction_id,block_hash,false
+    FROM unnest(transactions,blocks) WITH ORDINALITY AS values_(transaction_id,block_hash,ordinal)
+    ORDER BY transaction_id,ordinal
+    ON CONFLICT (transaction_id) DO UPDATE SET block_hash=EXCLUDED.block_hash,is_archive_seed=false
+    WHERE public.transactions_acceptances.is_archive_seed;
+    GET DIAGNOSTICS inserted = ROW_COUNT;
+    RETURN inserted;
+END;
+$$;
+
+-- A removal must survive even when the affected transaction is not discovered
+-- until a later archive backfill. Importers and the live source lock this same
+-- block row before touching acceptance rows, serializing that boundary.
+CREATE TABLE IF NOT EXISTS protocol_indexer.acceptance_blocks (
+    block_hash bytea PRIMARY KEY CHECK (octet_length(block_hash)=32),
+    last_removed_at timestamptz
+);
+
+CREATE OR REPLACE FUNCTION protocol_indexer.remove_source_acceptances(blocks bytea[])
+RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE block bytea; removed bigint;
+BEGIN
+    FOR block IN SELECT DISTINCT unnest(blocks) ORDER BY 1 LOOP
+        INSERT INTO protocol_indexer.acceptance_blocks(block_hash,last_removed_at)
+        VALUES (block,clock_timestamp()) ON CONFLICT (block_hash)
+        DO UPDATE SET last_removed_at=EXCLUDED.last_removed_at;
+    END LOOP;
+    DELETE FROM public.transactions_acceptances WHERE block_hash=ANY(blocks);
+    GET DIAGNOSTICS removed = ROW_COUNT;
+    RETURN removed;
+END;
+$$;
+
 -- One durable wakeup per transaction. Producers never update/lock an existing
 -- job; the consumer fences its acknowledgement against the canonical revision.
 CREATE TABLE IF NOT EXISTS protocol_indexer.consumer_jobs (
@@ -39,6 +85,18 @@ CREATE TABLE IF NOT EXISTS protocol_indexer.consumer_jobs (
     PRIMARY KEY (consumer, transaction_id)
 );
 CREATE INDEX IF NOT EXISTS consumer_jobs_ready ON protocol_indexer.consumer_jobs (consumer, available_at);
+
+-- The file cursor acknowledges durable staging, never a transient HTTP result.
+-- Deferred history survives process exit and a caller advancing to the next page.
+CREATE TABLE IF NOT EXISTS protocol_indexer.archive_jobs (
+    batch_sha256 text NOT NULL CHECK (batch_sha256 ~ '^[0-9a-f]{64}$'),
+    line_number bigint NOT NULL CHECK (line_number>0),
+    receipt jsonb NOT NULL,
+    available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_error text,
+    PRIMARY KEY(batch_sha256,line_number)
+);
+CREATE INDEX IF NOT EXISTS archive_jobs_ready ON protocol_indexer.archive_jobs(batch_sha256,available_at,line_number);
 
 CREATE TABLE IF NOT EXISTS protocol_indexer.evidence (
     transaction_id bytea PRIMARY KEY REFERENCES protocol_indexer.canonical,
@@ -121,6 +179,11 @@ BEGIN
         txid := OLD.transaction_id; accepting := NULL;
     ELSE
         txid := NEW.transaction_id; accepting := NEW.block_hash;
+    END IF;
+    -- Only an importer's own acceptance sentinel is quiet. Other transactions
+    -- and every independent live-source connection retain normal wakeups.
+    IF current_setting('protocol_indexer.archive_seed',true)=encode(txid,'hex') THEN
+        RETURN NULL;
     END IF;
     IF EXISTS (SELECT 1 FROM public.transactions t WHERE t.transaction_id = txid
                AND protocol_indexer.is_candidate(t.payload))

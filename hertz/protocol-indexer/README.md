@@ -17,11 +17,11 @@ flowchart LR
     Inbox --> Consumers[Existing Chats and Social consumers]
 ```
 
-The final consumer connection in that diagram is pending integration. The code
-currently captures and routes chain evidence into a private ingestion inbox;
-these records are **not** signature-validated posts, payments, notifications, or
-public APIs. Existing Chats/Social services remain running on their current
-contracts. Do not replace them with this candidate yet.
+The private native Chats consumer is connected and independently reviewed;
+public Social and remaining native projections are still pending. Raw records
+are **not** signature-validated posts, payments, notifications, or public APIs.
+Existing public Chats/Social services remain on their current contracts. Full
+six-family live/backfill acceptance is required before replacing their scanners.
 
 ## Protocol adapters
 
@@ -143,10 +143,9 @@ python -m protocol_indexer.cli --network "$PROTOCOL_NETWORK" prune --retention-h
 
 `backfill --after` resumes the raw inventory by transaction ID. Late commits
 below that cursor are handled by live delivery. This inventory replay does not
-yet discover/import external historical archives; existing history tools and
-verified archive receipts need to be connected before #5 is complete. Candidate
-Docker/real-node execution, archival import, existing consumer cutover and live
-acceptance remain required before replacing either current scanner.
+discover external archives; the archival adapter below supplies those receipts
+through the same journal. Full historical coverage, remaining consumers and
+live acceptance remain required before replacing either public scanner.
 
 ## External archival inventory
 
@@ -182,13 +181,11 @@ script **versions**, plus the archive detail and acceptance identities. Binary
 message tails remain raw hex. Archive consistency is not independent consensus,
 Social signature validity, verified tipping or current acceptance reconciliation.
 
-The immutable exported inventory is deliberately **not imported into the live
-canonical journal yet**: consumer integration must reconcile the latest live
-acceptance/revocation and validate signatures/payments before producing query
-models or counters. Historical receipt `notify_allowed` is always false. This
-collector cannot mutate a running service, broadcast a transaction or emit a push.
-The external receipt supplies missing versioned payment evidence for the next
-consumer integration stage; routing alone does not authorize a payment claim.
+Export alone never mutates a service. Canonical import below reconciles latest
+live acceptance/revocation; consumers must still validate signatures/payments.
+Historical receipt `notify_allowed` is always false. Neither collector nor
+importer broadcasts a transaction or emits a push. Routing alone does not
+authorize a payment claim.
 
 The journal config also has a persistent UUID `journal_id`, created once during
 installation and retained across reinstalls and process/container restarts. Native
@@ -196,6 +193,55 @@ consumer batches carry it as `source_id`. A recreated journal gets a different
 identity, so a receiver cannot silently treat reset revision numbers as old work.
 The additive upgrade preserves existing config activation and captured history;
 consumer migration must reconcile identity changes instead of overriding them.
+
+## External history into the shared journal
+
+`import_archive.py` requires the reviewed opt-in Simply source variant. Baseline
+bindings and forged capabilities are rejected before opening the cache or
+requesting archive data. The host binder checks the exact image, revision/patch
+labels, source lock and active opt-in environment. Both live block-removal and
+live-over-archive insertion capabilities are required.
+
+`simply-journal.patch` preserves default upstream SQL. With
+`KASANOVA_ACCEPTED_CHAIN_JOURNAL=true`, the same scanner calls owned SQL functions
+for its existing insertion/removal operations. Removal records survive even
+when no transaction existed. Import and removal lock the same block record;
+import checks fresh archive acceptance after locking its sentinel, so later
+live removals queue a revocation. A tuple flag marks archive sentinels: the first
+genuine live insertion replaces one after waiting; ordinary live conflicts
+retain upstream DO NOTHING behavior. Existing source bodies, canonical revisions
+and pending revocations take precedence. Imports never create raw transaction
+rows or reset source checkpoints.
+
+Initialize the additive schema using the baseline source before activating the
+hooked image. Then regenerate the read-only binding and recreate adapter mounts.
+Never import against a baseline or unreviewed image. The base revision remains
+in SOURCE.lock; the reviewed variant has its own exact patch/image identity.
+Run from the infrastructure tree, or use the connector image with this script
+as its Python entrypoint:
+
+```sh
+python3 import_archive.py --network "$PROTOCOL_NETWORK" \
+  --archive "$ARCHIVE_SOURCE" --cache "$ARCHIVE_DELIVERY_CACHE" \
+  --batch "$IMMUTABLE_EXPORTED_BATCH" --limit 500 --after-line 0
+```
+
+`next_after_line` acknowledges durable staging, including deferred records.
+Reuse it for the next page of the same batch. PostgreSQL retains the receipt,
+batch hash, line and retry time. Each invocation also drains ready jobs for that
+batch, even at EOF. Exit2 and `pending>0` require retries; `end_of_batch=true`
+alone does not mean delivery completed. Canonical writes, queue acknowledgement
+and historical notification suppression share one transaction. Storage failures
+remain operational failures.
+
+The importer reuses existing HTTP tools with one attempt, a 10s socket timeout,
+nonblocking rate locks, at most2s pacing wait, an8MiB response bound and a **12s
+total POSIX request deadline**, including slow streams and redirects. Its
+standalone worker owns/disarms/restores the alarm. Other collectors retain their
+default retry policy. Pre-activation history still depends on trusted archive
+evidence; this is not independent consensus or Social signature verification.
+Full signature/payment consumer coverage and six-family live/backfill acceptance
+remain required before replacing any public scanner.
 
 ## Private native Chats connector
 

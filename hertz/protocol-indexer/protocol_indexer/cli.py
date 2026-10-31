@@ -11,7 +11,7 @@ import urllib.request
 
 from .journal import SIMPLY_REVISION, BackfillAdapter, ScanAdapter, capture_one, connect, discard_unrelated, install, prune_source
 from .routing import Family
-from .source import SIMPLY_IMAGE_REF
+from .source import SIMPLY_IMAGE_REF, source_capabilities
 
 
 def validate_source(metrics, network, database_name):
@@ -42,26 +42,32 @@ def validate_source(metrics, network, database_name):
         raise ValueError("Simply excludes required payload, payment or sender evidence")
 
 
-def validate_binding(binding, network, identity, metrics_url):
+def validate_binding(binding, network, identity, metrics_url, *, require_archive_import=False):
     """Bind censored upstream metrics to the actual private SQL instance."""
     if (binding.get("schema_version") != 1 or binding.get("network") != network
         or binding.get("source_revision") != SIMPLY_REVISION
-        or binding.get("source_image_ref") != SIMPLY_IMAGE_REF
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.get("source_image_id", ""))
         or not re.fullmatch(r"[0-9a-f]{64}", binding.get("source_container", ""))
         or binding.get("metrics_url") != metrics_url):
         raise ValueError("source binding network/revision/image/metrics mismatch")
+    capabilities = source_capabilities(binding.get("source_image_ref"))
+    if binding.get("capabilities", {}) != capabilities:
+        raise ValueError("source capability receipt mismatch")
+    if capabilities and binding['source_image_id'] != binding['source_image_ref']:
+        raise ValueError('archive source immutable image identity mismatch')
+    if require_archive_import and not (capabilities.get("block_removals") and capabilities.get("live_overrides_archive_seed")):
+        raise ValueError("archive import requires the reviewed live removal/insertion hooks")
     if binding.get("database") != identity:
         raise ValueError("source binding SQL instance/endpoint does not match adapter database")
 
 
-def check_source(conn, url, network, binding_path):
+def check_source(conn, url, network, binding_path, *, require_archive_import=False):
     binding = json.loads(Path(binding_path).read_text())
     info = conn.execute("""SELECT system_identifier::text AS system_identifier,
         (SELECT oid::bigint FROM pg_database WHERE datname = current_database()) AS oid
         FROM pg_control_system()""").fetchone()
     identity = {"host": conn.info.host, "port": conn.info.port, "name": conn.info.dbname, **info}
-    validate_binding(binding, network, identity, url)
+    validate_binding(binding, network, identity, url, require_archive_import=require_archive_import)
     # Upstream deliberately censors the database URL. The read-only binding is
     # generated from the actual container command/network/database, not metrics.
     with urllib.request.urlopen(url, timeout=10) as response:
