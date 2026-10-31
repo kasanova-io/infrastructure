@@ -1,6 +1,7 @@
 """Actual PostgreSQL queue/fence tests; public HTTP remains an explicit fixture."""
 
 import contextlib
+import copy
 import importlib.util
 import io
 import os
@@ -14,7 +15,7 @@ from unittest.mock import patch
 import psycopg
 from psycopg.types.json import Jsonb
 
-from protocol_indexer.archive import bind_output_evidence, verify_archive
+from protocol_indexer.archive import bind_output_evidence, bind_sender_evidence, checked_receipt, input0_evidence, verify_archive
 from protocol_indexer.backfill import source_body
 from protocol_indexer.chats import EvidencePending
 from protocol_indexer.evidence import CONSUMER, EvidenceConsumer
@@ -193,6 +194,175 @@ class EvidenceTests(PostgresHarness):
             self.assertIn('"status": "stored"', output.getvalue())
             self.assertEqual(self.jobs(), 0)
 
+    def test_rooms_live_and_backfill_use_same_proof_queue_and_sender_callback(self):
+        txids = []
+        for root in ('kchat', 'ciph_msg'):
+            txid = self.ingest((root + ':1:bcast:en:message:colon').encode())
+            txids.append(txid)
+            self.db.execute("UPDATE protocol_indexer.consumer_jobs SET last_error='parsed_room_sender_pending:1' WHERE consumer='native-social-v1' AND transaction_id=%s", (txid,))
+        self.db.execute('DELETE FROM protocol_indexer.consumer_jobs WHERE consumer=%s', (CONSUMER,))
+        adapter = BackfillAdapter(Family.KACHAT_MESSAGES)
+        adapter.run_page(self.db); adapter.run_page(self.db)
+        self.assertEqual(self.jobs(), 2)
+        seen = []
+        consumer = self.consumer(lambda *_: self.fail('room cannot use output-only proof'))
+        consumer.resolve_sender = lambda conn, row: seen.append(row['transaction_id'])
+        for _ in range(2): self.assertEqual(consumer.run_one(self.db), 'stored')
+        self.assertCountEqual(seen, txids)
+        self.assertEqual(self.jobs(), 0)
+
+    def test_wrong_kind_fingerprint_and_unconfigured_sender_cannot_authorize_http(self):
+        txid = self.ingest(b'kchat:1:bcast:en:room')
+        consumer = self.consumer(lambda *_: self.fail('wrong resolver'))
+        for marker in ('verified_tip_output_pending:1', 'parsed_room_sender_pending:1:invalid',
+                       'parsed_room_sender_pending:1:' + 'A' * 64, 'parsed_room_sender_pending:2'):
+            self.db.execute("UPDATE protocol_indexer.consumer_jobs SET last_error=%s WHERE consumer='native-social-v1'", (marker,))
+            self.db.execute('UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp() WHERE consumer=%s', (CONSUMER,))
+            self.assertEqual(consumer.run_one(self.db), 'deferred')
+        self.db.execute("UPDATE protocol_indexer.consumer_jobs SET last_error='parsed_room_sender_pending:1' WHERE consumer='native-social-v1'")
+        self.db.execute('UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp() WHERE consumer=%s', (CONSUMER,))
+        self.assertEqual(consumer.run_one(self.db), 'deferred')
+        self.assertEqual(self.jobs(), 1)
+
+    def test_native_fingerprint_passes_only_to_matching_current_admission(self):
+        txid = self.ingest(b'kchat:1:tip:proof')
+        fingerprint = 'ab' * 32
+        self.db.execute("UPDATE protocol_indexer.consumer_jobs SET last_error=%s WHERE consumer='native-social-v1'", ('verified_tip_output_pending:1:' + fingerprint,))
+        seen = []
+        consumer = self.consumer(lambda conn, row, fp: seen.append((row['transaction_id'], fp)))
+        self.assertEqual(consumer.run_one(self.db), 'stored')
+        self.assertEqual(seen, [(txid, fingerprint)])
+
+    def test_forced_tip_and_room_refresh_bypass_bad_cache_then_reuse_repaired_sql(self):
+        from chats_worker import Resolver
+        for with_input in (False, True):
+            row, good = sender_fixture() if with_input else OutputBindingTests().fixture()
+            # Keep this in the actual owning PG schema, not a mocked SQL CAS.
+            txid = row['transaction_id']
+            self.db.execute('INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,ever_accepted) VALUES(%s,1,%s,true) ON CONFLICT(transaction_id) DO NOTHING', (txid, Jsonb(row['source_transaction'])))
+            bad = copy.deepcopy(good)
+            bad['rpc_transaction']['outputs'][0]['scriptPublicKey']['version'] = 9
+            self.db.execute('INSERT INTO protocol_indexer.evidence(transaction_id,receipt) VALUES(%s,%s) ON CONFLICT(transaction_id) DO UPDATE SET receipt=EXCLUDED.receipt', (txid, Jsonb(bad)))
+            fp = self.db.execute("SELECT encode(sha256(convert_to(receipt::text,'UTF8')),'hex') AS fp FROM protocol_indexer.evidence WHERE transaction_id=%s", (txid,)).fetchone()['fp']
+            with tempfile.TemporaryDirectory() as root:
+                resolver = Resolver(root, 'https://archive', 'https://archive', 'testnet-10')
+                try:
+                    current_path = resolver.root / 'verified' / (txid.hex() + '.json.gz')
+                    resolver.save(current_path, bad)
+                    original = current_path.read_bytes()
+                    calls = []
+                    def collect(identifier, *, use_cache=True):
+                        self.assertFalse(use_cache)
+                        calls.append(identifier)
+                        if identifier == txid.hex():
+                            result = copy.deepcopy(good); result.pop('input0', None)
+                            return result
+                        self.assertEqual(identifier, row['source_transaction']['inputs'][0]['previous_outpoint_hash'][2:])
+                        return copy.deepcopy(good['input0']['previous_transaction'])
+                    resolve = resolver.resolve_sender if with_input else resolver.resolve_outputs
+                    with patch.object(resolver, 'collect_body', side_effect=collect), patch.object(resolver, 'request', side_effect=AssertionError('unbounded HTTP')):
+                        resolve(self.db, row, fp)
+                    self.assertEqual(len(calls), 2 if with_input else 1)
+                    self.assertEqual(current_path.read_bytes(), original, 'retained bad file must not race a newer file writer')
+                    stored = self.db.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s', (txid,)).fetchone()['receipt']
+                    self.assertEqual(stored['rpc_transaction'], good['rpc_transaction'])
+                    self.assertTrue(list((resolver.root / 'quarantine').glob('*native-rejected-*')))
+                    with patch.object(resolver, 'collect_body', side_effect=AssertionError('repaired SQL is reusable')):
+                        resolve(self.db, row)
+                finally:
+                    resolver.db.close()
+
+    def test_newer_sql_before_or_during_forced_http_is_preserved_by_fingerprint_cas(self):
+        from chats_worker import Resolver
+        for with_input in (False, True):
+            for during_http in (False, True):
+                row, good = sender_fixture() if with_input else OutputBindingTests().fixture()
+                txid = row['transaction_id']
+                self.db.execute('INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,ever_accepted) VALUES(%s,1,%s,true) ON CONFLICT(transaction_id) DO NOTHING', (txid, Jsonb(row['source_transaction'])))
+                bad = copy.deepcopy(good); bad['rpc_transaction']['outputs'][0]['scriptPublicKey']['version'] = 9
+                self.db.execute('INSERT INTO protocol_indexer.evidence(transaction_id,receipt) VALUES(%s,%s) ON CONFLICT(transaction_id) DO UPDATE SET receipt=EXCLUDED.receipt', (txid, Jsonb(bad)))
+                fp = self.db.execute("SELECT encode(sha256(convert_to(receipt::text,'UTF8')),'hex') AS fp FROM protocol_indexer.evidence WHERE transaction_id=%s", (txid,)).fetchone()['fp']
+                newer = copy.deepcopy(good); newer['concurrent_writer_receipt'] = 'must survive exactly'
+                def publish():
+                    with connect(DSN) as other:
+                        other.execute('UPDATE protocol_indexer.evidence SET receipt=%s WHERE transaction_id=%s', (Jsonb(newer), txid))
+                if not during_http: publish()
+                with tempfile.TemporaryDirectory() as root:
+                    resolver = Resolver(root, 'https://archive', 'https://archive', 'testnet-10')
+                    try:
+                        def collect(identifier, *, use_cache=True):
+                            self.assertTrue(during_http, 'newer SQL must be reused without HTTP')
+                            publish()
+                            return copy.deepcopy(good)
+                        with self.db.transaction(), patch.object(resolver, 'collect_body', side_effect=collect):
+                            (resolver.resolve_sender if with_input else resolver.resolve_outputs)(self.db, row, fp)
+                        stored = self.db.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s', (txid,)).fetchone()['receipt']
+                        self.assertEqual(stored, newer)
+                    finally:
+                        resolver.db.close()
+
+    def test_newer_incomplete_room_proof_defers_without_http_or_rewrite(self):
+        from chats_worker import Resolver
+        row, good = sender_fixture()
+        txid = row['transaction_id']
+        self.db.execute('INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,ever_accepted) VALUES(%s,1,%s,true)', (txid, Jsonb(row['source_transaction'])))
+        newer = copy.deepcopy(good); newer.pop('input0')
+        self.db.execute('INSERT INTO protocol_indexer.evidence(transaction_id,receipt) VALUES(%s,%s)', (txid, Jsonb(newer)))
+        with tempfile.TemporaryDirectory() as root:
+            resolver = Resolver(root, 'https://archive', 'https://archive', 'testnet-10')
+            try:
+                with patch.object(resolver, 'collect_body', side_effect=AssertionError('old admission cannot replace newer proof')):
+                    with self.assertRaises(EvidencePending):
+                        resolver.resolve_sender(self.db, row, 'ab' * 32)
+                self.assertEqual(self.db.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s', (txid,)).fetchone()['receipt'], newer)
+            finally:
+                resolver.db.close()
+
+    def test_cas_loss_to_conflicting_new_proof_defers_without_overwrite(self):
+        from chats_worker import Resolver
+        row, good = sender_fixture()
+        txid = row['transaction_id']
+        self.db.execute('INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,ever_accepted) VALUES(%s,1,%s,true)', (txid, Jsonb(row['source_transaction'])))
+        bad = copy.deepcopy(good); bad['rpc_transaction']['outputs'][0]['scriptPublicKey']['version'] = 9
+        self.db.execute('INSERT INTO protocol_indexer.evidence(transaction_id,receipt) VALUES(%s,%s)', (txid, Jsonb(bad)))
+        fp = self.db.execute("SELECT encode(sha256(convert_to(receipt::text,'UTF8')),'hex') AS fp FROM protocol_indexer.evidence WHERE transaction_id=%s", (txid,)).fetchone()['fp']
+        newer = copy.deepcopy(good); newer['rpc_transaction']['outputs'][0]['amount'] += 1
+        with tempfile.TemporaryDirectory() as root:
+            resolver = Resolver(root, 'https://archive', 'https://archive', 'testnet-10')
+            try:
+                def collect(identifier, *, use_cache=True):
+                    with connect(DSN) as other:
+                        other.execute('UPDATE protocol_indexer.evidence SET receipt=%s WHERE transaction_id=%s', (Jsonb(newer), txid))
+                    return copy.deepcopy(good)
+                with self.db.transaction(), patch.object(resolver, 'collect_body', side_effect=collect):
+                    with self.assertRaises(EvidencePending):
+                        resolver.resolve_sender(self.db, row, fp)
+                self.assertEqual(self.db.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s', (txid,)).fetchone()['receipt'], newer)
+            finally:
+                resolver.db.close()
+
+
+def sender_fixture():
+    values = evidence(b'kchat:1:bcast:en:room')
+    # Deliberately no archive address claims; SDK consumer derives the address.
+    values[0]['inputs'][0].pop('previous_outpoint_address')
+    values[0]['outputs'][0].pop('script_public_key_address')
+    values[2]['transactions'][0]['outputs'][0].pop('verboseData')
+    receipt = verify_archive(TX, 'testnet-10', INFO, *values)
+    previous_values = evidence(b'kchat:1:bcast:en:prior')
+    from test_archive import PREVIOUS
+    previous_values[0]['transaction_id'] = PREVIOUS
+    previous_values[2]['transactions'][0]['verboseData']['transactionId'] = PREVIOUS
+    # Funding index 2 needs three complete outputs in detail and containing body.
+    previous_values[0]['outputs'] = [dict(previous_values[0]['outputs'][0], index=i) for i in range(3)]
+    previous_values[2]['transactions'][0]['outputs'] = [copy.deepcopy(previous_values[2]['transactions'][0]['outputs'][0]) for _ in range(3)]
+    for out in previous_values[0]['outputs']: out.pop('script_public_key_address', None)
+    for out in previous_values[2]['transactions'][0]['outputs']: out.pop('verboseData', None)
+    previous = verify_archive(PREVIOUS, 'testnet-10', INFO, *previous_values)
+    receipt['input0'] = input0_evidence(receipt, previous, require_address=False)
+    row = {'transaction_id': bytes.fromhex(TX), 'source_transaction': source_body(receipt)}
+    return row, receipt
+
 
 class OutputBindingTests(unittest.TestCase):
     def fixture(self):
@@ -294,3 +464,40 @@ class OutputBindingTests(unittest.TestCase):
                 self.assertEqual(stored['rpc_transaction']['outputs'][0]['scriptPublicKey']['version'], 42)
             finally:
                 resolver.db.close()
+
+
+class RoomSenderBindingTests(unittest.TestCase):
+    def test_forced_body_http_bypasses_verified_file_for_reads_and_writes(self):
+        from chats_worker import Resolver
+        row, good = OutputBindingTests().fixture()
+        bad = copy.deepcopy(good); bad['rpc_transaction']['outputs'][0]['scriptPublicKey']['version'] = 9
+        with tempfile.TemporaryDirectory() as root:
+            resolver = Resolver(root, 'https://archive', 'https://archive', 'testnet-10')
+            resolver.network_info = INFO
+            try:
+                path = resolver.root / 'verified' / (TX + '.json.gz')
+                resolver.save(path, bad)
+                original = path.read_bytes()
+                with patch.object(resolver, 'request', side_effect=evidence()) as request:
+                    refreshed = resolver.collect_body(TX, use_cache=False)
+                self.assertEqual(request.call_count, 3)
+                self.assertEqual(refreshed['rpc_transaction'], good['rpc_transaction'])
+                self.assertEqual(path.read_bytes(), original)
+            finally:
+                resolver.db.close()
+
+    def test_generic_addressless_proof_is_bound_but_private_chat_contract_stays_strict(self):
+        row, receipt = sender_fixture()
+        checked = checked_receipt(receipt, TX, 'testnet-10', require_input_address=False)
+        self.assertIsNone(checked['input0']['address'])
+        self.assertIs(bind_sender_evidence(row, checked), checked)
+        with self.assertRaisesRegex(ValueError, 'address unresolved'):
+            checked_receipt(receipt, TX, 'testnet-10')
+
+    def test_canonical_input_index_outpoint_signature_amount_and_script_are_fenced(self):
+        for field in ('index', 'previous_outpoint_hash', 'previous_outpoint_index', 'signature_script', 'previous_outpoint_script', 'previous_outpoint_amount'):
+            row, receipt = sender_fixture()
+            inp = row['source_transaction']['inputs'][0]
+            inp[field] = 9 if field in ('index', 'previous_outpoint_index', 'previous_outpoint_amount') else '\\x00'
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bind_sender_evidence(row, receipt)

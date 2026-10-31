@@ -185,6 +185,9 @@ impl SharedSocial {
         sqlx::raw_sql(include_str!("kaposts_projection.sql"))
             .execute(&mut *tx)
             .await?;
+        sqlx::raw_sql(include_str!("rooms.sql"))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO social_shared.config(network,source_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
             .bind(network).bind(source_id).execute(&mut *tx).await?;
         let row = sqlx::query("SELECT network,source_id FROM social_shared.config WHERE singleton")
@@ -276,6 +279,7 @@ impl SharedSocial {
         let verified_tip = processor.verify_tip_transaction(&transaction);
         let verified = processor.verify_transaction(&transaction);
         let verified_extension = processor.verify_kaposts_transaction(&transaction);
+        let room = crate::rooms::RoomEnvelope::parse(&transaction);
         let key = verified_tip
             .as_ref()
             .map(|v| {
@@ -289,7 +293,8 @@ impl SharedSocial {
                 verified_extension
                     .as_ref()
                     .map(crate::kaposts_projection::subject)
-            });
+            })
+            .or_else(|| room.as_ref().map(|room| room.subject()));
         if let Some(relation) =
             crate::kaposts_projection::relation_lock(verified.as_ref(), verified_extension.as_ref())
         {
@@ -346,7 +351,18 @@ impl SharedSocial {
         }
         if let Some((key, table)) = key {
             use crate::tip_projection::TipReconcile;
-            let outcome = if let Some(tip) = &verified_tip {
+            let outcome = if let Some(room) = &room {
+                crate::rooms::reconcile(
+                    &mut tx,
+                    &self.network,
+                    &id,
+                    revision,
+                    row.get::<Option<Vec<u8>>, _>("accepting_block").is_some(),
+                    &body,
+                    room,
+                )
+                .await?
+            } else if let Some(tip) = &verified_tip {
                 crate::tip_projection::reconcile_tip(
                     &mut tx,
                     &processor,
@@ -417,14 +433,29 @@ impl SharedSocial {
                     return Ok(true);
                 }
                 tx.rollback().await?;
-                if outcome == TipReconcile::ProofPending {
+                if matches!(
+                    outcome,
+                    TipReconcile::ProofPending | TipReconcile::SenderProofPending
+                    | TipReconcile::InvalidProofPending(_) | TipReconcile::InvalidSenderProofPending(_)
+                ) {
                     // Only the native SDK-verified tip + parent/author path
                     // admits archive work. Bind this durable queue state to
                     // the exact canonical revision after releasing all locks.
                     // A parent reacceptance can request evidence again without
                     // requiring another tip transaction or inventory replay.
+                    let (kind, fingerprint) = match &outcome {
+                        TipReconcile::ProofPending => ("verified_tip_output_pending", None),
+                        TipReconcile::SenderProofPending => ("parsed_room_sender_pending", None),
+                        TipReconcile::InvalidProofPending(fp) => ("verified_tip_output_pending", Some(fp)),
+                        TipReconcile::InvalidSenderProofPending(fp) => ("parsed_room_sender_pending", Some(fp)),
+                        _ => unreachable!(),
+                    };
+                    let marker = match fingerprint {
+                        Some(fp) => format!("{kind}:{revision}:{fp}"),
+                        None => format!("{kind}:{revision}"),
+                    };
                     sqlx::query("WITH admitted AS (UPDATE protocol_indexer.consumer_jobs j SET available_at=clock_timestamp()+interval '5 seconds',last_error=$3 WHERE j.consumer='native-social-v1' AND j.transaction_id=$1 AND EXISTS(SELECT 1 FROM protocol_indexer.canonical c CROSS JOIN protocol_indexer.config cfg WHERE c.transaction_id=$1 AND c.revision=$2 AND c.accepting_block IS NOT NULL AND cfg.network=$4 AND cfg.journal_id::text=$5) RETURNING transaction_id) INSERT INTO protocol_indexer.consumer_jobs(consumer,transaction_id) SELECT 'output-evidence-v1',transaction_id FROM admitted ON CONFLICT DO NOTHING")
-                        .bind(&id).bind(revision).bind(format!("verified_tip_output_pending:{revision}"))
+                        .bind(&id).bind(revision).bind(marker)
                         .bind(&self.network).bind(&self.source_id).execute(&self.pool).await?;
                     return Ok(true);
                 }

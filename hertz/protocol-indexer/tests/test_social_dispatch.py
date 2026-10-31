@@ -14,7 +14,8 @@ class SocialDispatchTests(PostgresHarness):
                         b'k:1:follow:key:sig:follow:target', b'kchat:1:edit:key:sig:post:body:[]',
                         b'kchat:1:bcast:room:body', b'ciph_msg:1:bcast:room:body'):
             txid = self.ingest(payload)
-            self.assertEqual(self.consumers(txid), {'native-social-v1'})
+            expected = {'native-social-v1', 'output-evidence-v1'} if b':bcast:' in payload else {'native-social-v1'}
+            self.assertEqual(self.consumers(txid), expected)
         for payload in (b'kchat:1:comm:alias:sealed', b'ciph_msg:1:handshake:sealed'):
             txid = self.ingest(payload)
             self.assertEqual(self.consumers(txid), {'native-chats-v1'})

@@ -13,6 +13,9 @@ pub(crate) enum TipReconcile {
     Busy,
     Pending,
     ProofPending,
+    SenderProofPending,
+    InvalidProofPending(String),
+    InvalidSenderProofPending(String),
     PendingMetadata,
 }
 
@@ -68,15 +71,18 @@ async fn prepare_payment(
                 crate::kaposts_projection::content_identity(processor, &transaction)
             {
                 if hex::decode(&author)? == hex::decode(&tip.tip().author_pubkey)? {
-                    let raw:Option<String>=sqlx::query_scalar("SELECT receipt::text FROM protocol_indexer.evidence WHERE transaction_id=$1")
+                    let raw:Option<(String,String)>=sqlx::query_as("SELECT receipt::text,encode(sha256(convert_to(receipt::text,'UTF8')),'hex') FROM protocol_indexer.evidence WHERE transaction_id=$1")
                             .bind(current).fetch_optional(&mut **tx).await?;
-                    let Some(raw) = raw else {
+                    let Some((raw, fingerprint)) = raw else {
                         return Ok(TipReconcile::ProofPending);
                     };
-                    let receipt: Value = serde_json::from_str(&raw)?;
+                    let receipt: Value = match serde_json::from_str(&raw) {
+                        Ok(value) => value,
+                        Err(_) => return Ok(TipReconcile::InvalidProofPending(fingerprint)),
+                    };
                     let Ok(proof) = TipOutputEvidence::checked(network, current, body, &receipt)
                     else {
-                        return Ok(TipReconcile::ProofPending);
+                        return Ok(TipReconcile::InvalidProofPending(fingerprint));
                     };
                     let amount = proof.payment_to_author(tip)?;
                     if let Ok(amount) = i64::try_from(amount) {

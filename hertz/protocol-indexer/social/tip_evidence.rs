@@ -10,6 +10,7 @@ pub struct TipOutputEvidence {
     transaction_id: String,
     payload: Vec<u8>,
     outputs: Vec<TxOutput>,
+    transaction: crate::transaction_evidence::CheckedTransaction,
 }
 
 fn integer(value: &Value) -> Result<u64> {
@@ -59,6 +60,9 @@ impl TipOutputEvidence {
         );
         let payload = source_bytes(&body["payload"])?;
         let raw = &receipt["rpc_transaction"];
+        // Simply23 omits script versions. SDK identity binds the full RPC
+        // output/version to the canonical ID, beyond a reported archive ID.
+        let transaction = crate::transaction_evidence::CheckedTransaction::checked(raw, &id)?;
         let detail = &receipt["archive_transaction"];
         ensure!(
             raw["verboseData"]["transactionId"].as_str() == Some(id.as_str())
@@ -119,6 +123,7 @@ impl TipOutputEvidence {
             transaction_id: id,
             payload,
             outputs,
+            transaction,
         })
     }
 
@@ -138,5 +143,13 @@ impl TipOutputEvidence {
         );
         let author = xonly_bytes(&verified.tip().author_pubkey).context("invalid author key")?;
         Ok(amount_paid_to(&self.outputs, &author))
+    }
+
+    pub(crate) fn first_output(&self) -> Option<&TxOutput> {
+        self.outputs.first()
+    }
+
+    pub(crate) fn transaction(&self) -> &kaspa_consensus_core::tx::Transaction {
+        self.transaction.transaction()
     }
 }

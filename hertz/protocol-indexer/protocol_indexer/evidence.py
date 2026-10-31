@@ -1,14 +1,17 @@
 """Durable output-proof acquisition from the shared journal, without a scanner."""
 
 from .chats import EvidencePending
+from .archive import HEX64
+from .routing import route
 from psycopg.pq import TransactionStatus
 
 CONSUMER = 'output-evidence-v1'
 
 
 class EvidenceConsumer:
-    def __init__(self, network, source_id, resolve):
+    def __init__(self, network, source_id, resolve, resolve_sender=None):
         self.network, self.source_id, self.resolve = network, source_id, resolve
+        self.resolve_sender = resolve_sender
 
     def admitted(self, conn, row):
         ready = conn.execute("SELECT to_regclass('social_shared.config') IS NOT NULL AND to_regclass('social_shared.actions') IS NOT NULL AS ready").fetchone()['ready']
@@ -18,8 +21,22 @@ class EvidenceConsumer:
         if not config or config['network'] != self.network or config['source_id'] != self.source_id:
             raise ValueError('output evidence native source/network mismatch')
         native = conn.execute("SELECT last_error FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=%s", (row['transaction_id'],)).fetchone()
-        if native and native['last_error'] == 'verified_tip_output_pending:' + str(row['revision']):
-            return True
+        if native and isinstance(native['last_error'], str):
+            parts = native['last_error'].split(':')
+            try:
+                classified = route(bytes.fromhex(row['source_transaction']['payload'][2:]))
+            except (ValueError, TypeError, KeyError):
+                classified = None
+            expected = None
+            if classified and classified.version == 1:
+                if classified.root == 'kchat' and classified.action == 'tip':
+                    expected = 'verified_tip_output_pending'
+                elif classified.root in {'kchat', 'ciph_msg'} and classified.action == 'bcast':
+                    expected = 'parsed_room_sender_pending'
+            if (expected and len(parts) in (2, 3) and parts[:2] == [expected, str(row['revision'])]
+                    and (len(parts) == 2 or HEX64.fullmatch(parts[2]))):
+                return ('room' if expected == 'parsed_room_sender_pending' else 'tip',
+                        parts[2] if len(parts) == 3 else None)
         if native is None and conn.execute('SELECT 1 FROM social_shared.actions WHERE transaction_id=%s AND revision=%s',
                                            (row['transaction_id'], row['revision'])).fetchone():
             # Exact native terminal decision: invalid signature, invalid
@@ -44,11 +61,20 @@ class EvidenceConsumer:
                                (job['transaction_id'],)).fetchone()
             try:
                 settled = False
-                if row['accepting_block'] is not None and self.admitted(conn, row):
-                    self.resolve(conn, row)
-                    wake = job['transaction_id']
-                elif row['accepting_block'] is not None:
-                    settled = True
+                if row['accepting_block'] is not None:
+                    admission = self.admitted(conn, row)
+                    if admission:
+                        kind, fingerprint = admission
+                        resolver = self.resolve_sender if kind == 'room' else self.resolve
+                        if resolver is None:
+                            raise EvidencePending('room_sender_resolver_not_configured')
+                        if fingerprint is None:
+                            resolver(conn, row)
+                        else:
+                            resolver(conn, row, fingerprint)
+                        wake = job['transaction_id']
+                    else:
+                        settled = True
             except EvidencePending:
                 conn.execute('''UPDATE protocol_indexer.consumer_jobs
                     SET available_at=clock_timestamp()+interval '5 seconds',last_error='EvidencePending'

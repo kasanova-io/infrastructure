@@ -477,18 +477,20 @@
 +                .execute(&mut *connection)
 --- a/K-transaction-processor/src/main.rs
 +++ b/K-transaction-processor/src/main.rs
-@@ -8,0 +9,6 @@
+@@ -8,0 +9,8 @@
 +mod shared_social;
 +mod tips;
 +mod tip_evidence;
++mod transaction_evidence;
++mod rooms;
 +mod tip_projection;
 +mod kaposts;
 +mod kaposts_projection;
-@@ -73,0 +80,3 @@
+@@ -73,0 +82,3 @@
 +
 +    #[arg(long, help = "Use existing common canonical journal; never starts a scanner")]
 +    shared_source_id: Option<String>,
-@@ -111,0 +121,15 @@
+@@ -111,0 +123,15 @@
 +    if let Some(source_id) = &args.shared_source_id {
 +        anyhow::ensure!(!args.initialize_db && !args.upgrade_db,
 +            "shared mode requires an existing reconciled native schema; schema reset/upgrade is not permitted");
@@ -504,7 +506,7 @@
 +        };
 +    }
 +
-@@ -194,0 +219,3 @@
+@@ -194,0 +221,3 @@
 +
 +#[cfg(test)]
 +mod shared_protocol_tests;

@@ -13,5 +13,7 @@ text=manifest.read_text()
 needle='kaspa-wallet-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", features = ["wasm32-sdk"] }'
 assert text.count(needle)==1
 text=text.replace(needle,'kaspa-wallet-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16", features = ["wasm32-sdk"] }')
+for package in ['kaspa-consensus-core','kaspa-rpc-core','kaspa-txscript']:
+    text+='\n'+package+' = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }\n'
 text+='\n[features]\nshared-postgres-contract = []\n'
 manifest.write_text(text)

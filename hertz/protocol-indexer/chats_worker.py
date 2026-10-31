@@ -13,7 +13,7 @@ import urllib.parse
 
 from psycopg.types.json import Jsonb
 
-from protocol_indexer.archive import HEX64, bind_output_evidence, checked_receipt, input0_evidence, integer, verify_transaction_evidence
+from protocol_indexer.archive import HEX64, bind_output_evidence, bind_sender_evidence, checked_receipt, input0_evidence, integer, verify_transaction_evidence
 from protocol_indexer.chats import ChatsConsumer, EvidencePending, NativeTransport, native_transaction
 from protocol_indexer.cli import check_source
 from protocol_indexer.journal import connect
@@ -59,15 +59,15 @@ class Resolver(history.History):
         self.network_info = self.request(self.archive + "/info/network")
         check_network(self.network, self.network_info)
 
-    def collect_body(self, txid):
+    def collect_body(self, txid, *, use_cache=True):
         try:
-            return self._collect_body(txid)
+            return self._collect_body(txid, use_cache=use_cache)
         except (OSError, EOFError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
             raise EvidencePending("archive_evidence_shape_or_lag") from exc
 
-    def _collect_body(self, txid):
+    def _collect_body(self, txid, *, use_cache=True):
         verified = self.root / "verified" / (txid + ".json.gz")
-        if verified.exists():
+        if use_cache and verified.exists():
             try:
                 # This file is an immutable body receipt. Funding-input
                 # enrichment is separately checked by the private consumer.
@@ -89,7 +89,8 @@ class Resolver(history.History):
         block = self.request(self.archive + "/blocks/" + containing + "?includeTransactions=true")
         receipt = verify_transaction_evidence(txid, self.network, self.network_info, detail, header, block,
                                               require_protocol=False, require_accepted=False)
-        self.save(verified, receipt)
+        if use_cache:
+            self.save(verified, receipt)
         return receipt
 
     def verified_header(self, block):
@@ -147,22 +148,77 @@ class Resolver(history.History):
         self.store_receipt(conn, row, receipt)
         return transaction
 
-    def resolve_outputs(self, conn, row):
-        saved = conn.execute("SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s",
-                             (row['transaction_id'],)).fetchone()
+    def resolve_outputs(self, conn, row, rejected_fingerprint=None):
+        self._resolve_public(conn, row, False, rejected_fingerprint)
+
+    def resolve_sender(self, conn, row, rejected_fingerprint=None):
+        self._resolve_public(conn, row, True, rejected_fingerprint)
+
+    def _resolve_public(self, conn, row, with_input, rejected_fingerprint):
+        saved = conn.execute("""SELECT receipt,encode(sha256(convert_to(receipt::text,'UTF8')),'hex') AS fingerprint
+            FROM protocol_indexer.evidence WHERE transaction_id=%s""", (row['transaction_id'],)).fetchone()
+        if rejected_fingerprint is not None and (not isinstance(rejected_fingerprint, str) or not HEX64.fullmatch(rejected_fingerprint)):
+            raise ValueError('invalid rejected proof fingerprint')
+        refresh = bool(saved and rejected_fingerprint is not None and saved['fingerprint'] == rejected_fingerprint)
+        bind = bind_sender_evidence if with_input else bind_output_evidence
+        txid = row['transaction_id'].hex()
         try:
             receipt = None
             if saved:
-                try:
-                    receipt = checked_receipt(saved['receipt'], row['transaction_id'].hex(), self.network, with_input=False)
-                except (ValueError, TypeError, KeyError, IndexError, AttributeError):
-                    self.save(self.root / 'quarantine' / (row['transaction_id'].hex() + '-db-' + str(time.time_ns()) + '.json.gz'), saved['receipt'])
+                if refresh:
+                    # Keep adverse evidence. Bypass both immutable body files
+                    # on this refresh, without racing any newer cache writer.
+                    self.save(self.root / 'quarantine' / (txid + '-native-rejected-' + str(time.time_ns()) + '.json.gz'), saved['receipt'])
+                else:
+                    try:
+                        receipt = checked_receipt(saved['receipt'], txid, self.network,
+                                                  with_input=with_input, require_input_address=False)
+                    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                        if rejected_fingerprint is not None:
+                            # A newer receipt won after native's rejection.
+                            # Never replace it on the authority of an old hash.
+                            raise EvidencePending('newer_archive_proof_pending')
+                        self.save(self.root / 'quarantine' / (txid + '-db-' + str(time.time_ns()) + '.json.gz'), saved['receipt'])
             if receipt is None:
-                receipt = self.collect_body(row['transaction_id'].hex())
-            bind_output_evidence(row, receipt)
+                receipt = self.collect_body(txid, use_cache=not refresh)
+            if with_input and 'input0' not in receipt:
+                if saved and rejected_fingerprint is not None and not refresh:
+                    raise EvidencePending('newer_archive_proof_pending')
+                # The authoritative outpoint chooses the previous-body fetch,
+                # never an untrusted rejected receipt's metadata.
+                first = min(row['source_transaction']['inputs'], key=lambda i: integer(i['index']))
+                previous_id = first['previous_outpoint_hash']
+                if not isinstance(previous_id, str) or not previous_id.startswith('\\x') or not HEX64.fullmatch(previous_id[2:]):
+                    raise ValueError('invalid canonical previous outpoint')
+                previous = self.collect_body(previous_id[2:], use_cache=not refresh)
+                receipt['input0'] = input0_evidence(receipt, previous, require_address=False)
+            bind(row, receipt)
         except (OSError, EOFError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
-            raise EvidencePending('archive_output_evidence_unavailable_or_conflicting') from exc
-        self.store_receipt(conn, row, receipt)
+            raise EvidencePending('archive_public_evidence_unavailable_or_conflicting') from exc
+        if refresh:
+            stored = conn.execute("""INSERT INTO protocol_indexer.evidence (transaction_id,receipt) VALUES (%s,%s)
+                ON CONFLICT (transaction_id) DO UPDATE SET receipt = CASE
+                  WHEN jsonb_typeof(protocol_indexer.evidence.receipt)='object'
+                  THEN protocol_indexer.evidence.receipt || EXCLUDED.receipt ELSE EXCLUDED.receipt END
+                WHERE encode(sha256(convert_to(protocol_indexer.evidence.receipt::text,'UTF8')),'hex')=%s
+                RETURNING receipt""", (row['transaction_id'], Jsonb(receipt), rejected_fingerprint)).fetchone()
+            if stored is None:
+                # A second writer published while HTTP was running. SQL CAS
+                # preserves that proof; only acknowledge if usable for this job.
+                latest = conn.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s',
+                                      (row['transaction_id'],)).fetchone()
+                try:
+                    if latest is None:
+                        raise ValueError('newer proof missing')
+                    receipt = checked_receipt(latest['receipt'], txid, self.network,
+                                              with_input=with_input, require_input_address=False)
+                    bind(row, receipt)
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+                    raise EvidencePending('newer_archive_proof_pending') from exc
+        elif rejected_fingerprint is None or saved is None:
+            self.store_receipt(conn, row, receipt)
+        # With a different SQL fingerprint, reuse the newer checked proof
+        # without rewriting it. Native SDK remains the authorization authority.
 
     @staticmethod
     def store_receipt(conn, row, receipt):

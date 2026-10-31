@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acquire public tip output receipts through the existing bounded archive tools."""
+"""Acquire public tip/room receipts through the existing bounded archive tools."""
 
 import argparse
 import fcntl
@@ -54,7 +54,7 @@ def main():
             with connect(os.environ['PROTOCOL_DATABASE_URL']) as conn:
                 check_source(conn, args.metrics_url, args.network, args.source_binding)
                 resolver.refresh_network()
-                consumer = EvidenceConsumer(args.network, source_id, resolver.resolve_outputs)
+                consumer = EvidenceConsumer(args.network, source_id, resolver.resolve_outputs, resolver.resolve_sender)
                 checked = time.monotonic()
                 while running:
                     if time.monotonic() - checked >= 60:

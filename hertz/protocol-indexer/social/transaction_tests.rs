@@ -22,6 +22,95 @@ fn fixture_transaction(value: &serde_json::Value) -> Transaction {
     }
 }
 
+fn synthetic_rpc(
+    payload: &str,
+    outputs: serde_json::Value,
+    nonce: u8,
+) -> (String, serde_json::Value) {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("real_tip.json")).unwrap();
+    let mut rpc = fixture["receipt"]["rpc_transaction"].clone();
+    rpc["payload"] = payload.into();
+    rpc["outputs"] = outputs;
+    rpc["lockTime"] = u64::from(nonce).into();
+    let id = crate::transaction_evidence::fixture_transaction_id(&rpc).unwrap();
+    rpc["verboseData"]["transactionId"] = id.clone().into();
+    (id, rpc)
+}
+
+
+// SDK-coherent isolated transaction bodies, not signatures/UTXO/chain proof.
+fn room_vector(root: &str, channel: &str, content: &str, nonce: u8, forged: bool) -> serde_json::Value {
+    use serde_json::json;
+    let input_script = hex::encode(crate::tips::p2pk_script(&crate::tips::xonly_bytes(&public_key()).unwrap()));
+    let output_script = if forged { hex::encode(crate::tips::p2pk_script(&[9u8;32])) } else { input_script.clone() };
+    let (previous_id, previous_rpc) = synthetic_rpc("", json!([{"amount":50000000,"scriptPublicKey":{"version":0,"scriptPublicKey":input_script}}]), nonce);
+    let payload = hex::encode(format!("{root}:1:bcast:{channel}:{content}"));
+    let (_, mut rpc) = synthetic_rpc(&payload,json!([{"amount":40000000,"scriptPublicKey":{"version":0,"scriptPublicKey":output_script}}]), nonce);
+    let mut input = rpc["inputs"][0].clone();
+    input["previousOutpoint"] = json!({"transactionId":previous_id,"index":0});
+    rpc["inputs"] = json!([input]);
+    let id = crate::transaction_evidence::fixture_transaction_id(&rpc).unwrap();
+    rpc["verboseData"]["transactionId"] = json!(id);
+    let signature = rpc["inputs"][0]["signatureScript"].as_str().unwrap();
+    json!({"transaction":{"transaction_id":id,"payload":payload,"block_time":1700000000000i64},
+      "body":{"transaction_id":format!("\\x{id}"),"payload":format!("\\x{payload}"),"block_time":1700000000000i64,
+        "inputs":[{"index":0,"previous_outpoint_hash":format!("\\x{previous_id}"),"previous_outpoint_index":0,"signature_script":format!("\\x{signature}")}],
+        "outputs":[{"index":0,"amount":40000000,"script_public_key":format!("\\x{output_script}")}]},
+      "receipt":{"schema_version":1,"network":"testnet-10","transaction_id":id,"payload":payload,
+        "archive_transaction":{"transaction_id":id,"payload":payload,"outputs":[{"index":0,"amount":40000000,"script_public_key":output_script}]},
+        "rpc_transaction":rpc,"input0":{"script":input_script,"amount":50000000,
+          "previous_transaction":{"schema_version":1,"network":"testnet-10","transaction_id":previous_id,"rpc_transaction":previous_rpc}}}})
+}
+
+#[tokio::test]
+async fn pure_rooms_keep_original_wire_content_and_normalize_only_channel() {
+    use crate::rooms::{RoomEnvelope, Verdict, judge};
+    for root in ["kchat","ciph_msg"] {
+        let v=room_vector(root,"  TrADING  ","a:b:日本語",91,false);
+        assert!(RoomEnvelope::parse(&fixture_transaction(&v["transaction"])).is_some());
+    }
+    for (channel,content) in [(" ".to_string(),"x"),("x".repeat(37),"x"),("İ".repeat(19),"x"),("good".to_string(),"x\0y")] {
+        let v=room_vector("kchat",&channel,content,92,false);
+        assert!(RoomEnvelope::parse(&fixture_transaction(&v["transaction"])).is_none());
+    }
+    let mut v=fixture_transaction(&room_vector("kchat","x","y",93,false)["transaction"]);
+    v.payload=Some(hex::encode(b"kchat:1:bcast:x:\xff"));
+    assert!(RoomEnvelope::parse(&v).is_none());
+    assert_eq!(judge(Some(" A "),Some("a")),Verdict::Verified("a".into()));
+    assert!(matches!(judge(Some("a"),Some("b")),Verdict::Forged{..}));
+    assert_eq!(judge(None,Some("a")),Verdict::Unknown);
+}
+
+#[tokio::test]
+async fn pure_room_sender_requires_sdk_current_prior_id_and_exact_canonical_outpoint() {
+    use crate::rooms::{sender,Verdict};
+    use serde_json::json;
+    let v=room_vector("kchat","all","body:verbatim",94,false);
+    let id=hex::decode(v["transaction"]["transaction_id"].as_str().unwrap()).unwrap();
+    let Verdict::Verified(address)=sender("testnet-10",&id,&v["body"],&v["receipt"]).unwrap() else {panic!("self send")};
+    assert!(address.starts_with("kaspatest:"));
+    // Complete proof intentionally has no verbose/address metadata anywhere.
+    assert!(v["receipt"]["input0"]["address"].is_null());
+    for field in ["current-version","previous-version","previous-id","proof-amount","claim","canonical-outpoint","canonical-signature","canonical-amount"] {
+        let mut changed=v.clone();
+        match field {
+            "current-version"=>changed["receipt"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"]=json!(1),
+            "previous-version"=>changed["receipt"]["input0"]["previous_transaction"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"]=json!(1),
+            "previous-id"=>changed["receipt"]["input0"]["previous_transaction"]["transaction_id"]=json!("ab".repeat(32)),
+            "proof-amount"=>changed["receipt"]["input0"]["amount"]=json!(1),
+            "claim"=>changed["receipt"]["input0"]["address"]=json!("kaspatest:spoofed"),
+            "canonical-outpoint"=>changed["body"]["inputs"][0]["previous_outpoint_index"]=json!(1),
+            "canonical-signature"=>changed["body"]["inputs"][0]["signature_script"]=json!("\\x00"),
+            _=>changed["body"]["inputs"][0]["previous_outpoint_amount"]=json!(1),
+        }
+        assert!(sender("testnet-10",&id,&changed["body"],&changed["receipt"]).is_err(),"{field}");
+    }
+    let forged=room_vector("kchat","all","forged",95,true);
+    let id=hex::decode(forged["transaction"]["transaction_id"].as_str().unwrap()).unwrap();
+    assert!(matches!(sender("testnet-10",&id,&forged["body"],&forged["receipt"]).unwrap(),Verdict::Forged{..}));
+    assert!(sender("mainnet",&id,&forged["body"],&forged["receipt"]).is_err());
+}
+
 fn public_key() -> String {
     let pair = Keypair::from_seckey_slice(&Secp256k1::new(), &[3; 32]).unwrap();
     pair.x_only_public_key().0.to_string()
@@ -2202,16 +2291,22 @@ mod shared_consumer {
             String::from_utf8(hex::decode(target.payload.as_ref().unwrap()).unwrap()).unwrap();
         let author = author_override.unwrap_or_else(|| raw.split(':').nth(3).unwrap().to_owned());
         let tail = format!("{}:{author}:0011", target.transaction_id);
-        let value = signed("kchat", "tip", &tail, &format!("tip:{tail}"), id);
+        let mut value = signed("kchat", "tip", &tail, &format!("tip:{tail}"), id);
         let script = hex::encode(crate::tips::p2pk_script(
             &crate::tips::xonly_bytes(&author).unwrap(),
         ));
         let payload = value.payload.as_ref().unwrap();
+        let (transaction_id, rpc) = synthetic_rpc(
+            payload,
+            json!([{"amount":amount,"scriptPublicKey":{"version":version,"scriptPublicKey":script}}]),
+            id,
+        );
+        value.transaction_id = transaction_id;
         json!({"transaction":{"transaction_id":value.transaction_id,"payload":payload,"block_time":value.block_time},
           "body":{"transaction_id":format!("\\x{}",value.transaction_id),"payload":format!("\\x{payload}"),"block_time":value.block_time,"outputs":[{"index":0,"amount":amount,"script_public_key":format!("\\x{script}")}]},
           "receipt":{"schema_version":1,"network":"testnet-10","transaction_id":value.transaction_id,"payload":payload,
             "archive_transaction":{"transaction_id":value.transaction_id,"payload":payload,"outputs":[{"index":0,"amount":amount,"script_public_key":script}]},
-            "rpc_transaction":{"verboseData":{"transactionId":value.transaction_id},"payload":payload,"outputs":[{"amount":amount,"scriptPublicKey":{"version":version,"scriptPublicKey":script}}]}}})
+            "rpc_transaction":rpc}})
     }
 
     #[tokio::test]
@@ -2386,7 +2481,10 @@ mod shared_consumer {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(winner, "0b".repeat(32));
+        assert_eq!(
+            winner,
+            good["transaction"]["transaction_id"].as_str().unwrap()
+        );
         let key = Keypair::from_seckey_slice(&Secp256k1::new(), &[4; 32])
             .unwrap()
             .x_only_public_key()
@@ -2547,6 +2645,98 @@ mod shared_consumer {
         .unwrap();
         assert_eq!(epoch, after);
     }
+    #[tokio::test]
+    async fn postgres_rooms_dual_roots_revoke_restore_stable_native_cursor_and_quiet_content() {
+        let pool=setup().await;
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER probe_room AFTER INSERT ON kachat_broadcasts FOR EACH ROW EXECUTE FUNCTION notification_probe_capture()").execute(&pool).await.unwrap();
+        for (n,root) in [(96,"kchat"),(97,"ciph_msg")] {
+            let mut v=room_vector(root,"  EN ","text:verbatim",n,false);
+            let value=capture_vector(&pool,&v,1,true,true,true).await;
+            consume(&consumer).await;
+            let id=hex::decode(&value.transaction_id).unwrap();
+            let before:(i64,i64,String,String)=sqlx::query_as("SELECT id,block_time,channel,content FROM social_shared.current_broadcasts WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(before.2,"en");assert_eq!(before.3,"text:verbatim");
+            sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)").bind(&id).execute(&pool).await.unwrap();
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM social_shared.current_broadcasts WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap(),0);
+            capture_vector(&pool,&v,2,false,false,false).await;
+            consume(&consumer).await;
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM kachat_broadcasts WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap(),0);
+            sqlx::query("DELETE FROM protocol_indexer.pending WHERE transaction_id=$1").bind(&id).execute(&pool).await.unwrap();
+            v["body"]["block_time"]=serde_json::json!(1700000005000i64);
+            capture_vector(&pool,&v,3,true,true,false).await;consume(&consumer).await;
+            let after:(i64,i64,String,String)=sqlx::query_as("SELECT id,block_time,channel,content FROM social_shared.current_broadcasts WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(before,after);
+        }
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,2);
+        assert_eq!(count(&pool,"notification_probe").await,0);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,0);
+        SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,2);
+    }
+
+    #[tokio::test]
+    async fn postgres_rooms_missing_or_sdk_rejected_proof_admits_exact_revision_and_fair_retry() {
+        let pool=setup().await;
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        let mut v=room_vector("kchat","all","proof pending",98,false);
+        let value=capture_vector(&pool,&v,1,true,true,false).await;consume(&consumer).await;
+        let id=hex::decode(&value.transaction_id).unwrap();
+        assert_eq!(count(&pool,"social_shared.actions").await,0,"pending work rolls back native ledger too");
+        let marker:String=sqlx::query_scalar("SELECT last_error FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!(marker,"parsed_room_sender_pending:1");
+        v["receipt"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"]=serde_json::json!(1);
+        capture_vector(&pool,&v,2,true,false,true).await;ready_all(&pool).await;consume(&consumer).await;
+        let fingerprint:String=sqlx::query_scalar("SELECT encode(sha256(convert_to(receipt::text,'UTF8')),'hex') FROM protocol_indexer.evidence WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        let marker:String=sqlx::query_scalar("SELECT last_error FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!(marker,format!("parsed_room_sender_pending:2:{fingerprint}"));
+        let ready=room_vector("ciph_msg","all","ready",99,false);
+        capture_vector(&pool,&ready,1,true,false,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,1);
+        assert!(!consumer.run_one().await.unwrap());
+        v["receipt"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"]=serde_json::json!(0);
+        capture_vector(&pool,&v,3,true,false,true).await;ready_all(&pool).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,2);
+    }
+
+    #[tokio::test]
+    async fn postgres_rooms_forged_selfsend_is_terminal_and_failure_rolls_back_ack() {
+        let pool=setup().await;
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        let forged=room_vector("kchat","all","not this sender",100,true);
+        capture_vector(&pool,&forged,1,true,true,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,0);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,0);
+        let v=room_vector("kchat","all","rollback",101,false);
+        capture_vector(&pool,&v,1,true,true,true).await;
+        sqlx::raw_sql("CREATE FUNCTION reject_room() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected room SQL failure'; END $$; CREATE TRIGGER reject_room BEFORE INSERT ON kachat_broadcasts FOR EACH ROW EXECUTE FUNCTION reject_room()").execute(&pool).await.unwrap();
+        assert!(consumer.run_one().await.is_err());
+        assert_eq!(count(&pool,"kachat_broadcasts").await,0);
+        assert_eq!(count(&pool,"social_shared.room_facts").await,0);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,1);
+        sqlx::query("DROP TRIGGER reject_room ON kachat_broadcasts").execute(&pool).await.unwrap();
+        consume(&consumer).await;assert_eq!(count(&pool,"social_shared.current_broadcasts").await,1);
+    }
+
+    #[tokio::test]
+    async fn postgres_rooms_upgrade_refuses_unowned_history_and_tip_rejection_binds_receipt_hash() {
+        let pool=setup().await;
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        boot_tip_parent(&pool,&consumer).await;
+        let mut v=old_tip_vector();
+        v["receipt"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"]=serde_json::json!(1);
+        let value=capture_vector(&pool,&v,1,true,false,true).await;consume(&consumer).await;
+        let id=hex::decode(value.transaction_id).unwrap();
+        let fp:String=sqlx::query_scalar("SELECT encode(sha256(convert_to(receipt::text,'UTF8')),'hex') FROM protocol_indexer.evidence WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        let marker:String=sqlx::query_scalar("SELECT last_error FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!(marker,format!("verified_tip_output_pending:1:{fp}"));
+        sqlx::query("DELETE FROM social_shared.decoder_epochs WHERE kind='kchat:1:bcast'").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO kachat_broadcasts(transaction_id,block_time,channel,sender_address,content) VALUES($1,1,'en','foreign','retained')").bind(vec![123u8;32]).execute(&pool).await.unwrap();
+        assert!(SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.is_err());
+        assert_eq!(count(&pool,"kachat_broadcasts").await,1);
+        assert_eq!(count(&pool,"social_shared.decoder_epochs").await,2,"failed bind does not install room epoch");
+    }
+
 }
 
 #[tokio::test]
@@ -2564,8 +2754,7 @@ async fn pure_tip_signature_and_output_binding_follow_upstream_without_fee_input
     let post = "ab".repeat(32);
     let tail = format!("{post}:{author}:0011");
     let message = format!("tip:{tail}");
-    let transaction = signed("kchat", "tip", &tail, &message, 7);
-    let verified = processor.verify_tip_transaction(&transaction).unwrap();
+    let mut transaction = signed("kchat", "tip", &tail, &message, 7);
     let script = hex::encode(p2pk_script(&xonly_bytes(&author).unwrap()));
     let sender_script = hex::encode(p2pk_script(&xonly_bytes(&public_key()).unwrap()));
     let outputs = vec![
@@ -2586,10 +2775,13 @@ async fn pure_tip_signature_and_output_binding_follow_upstream_without_fee_input
         .collect();
     let rpc:Vec<_>=outputs.iter().map(|(n,v,s)|json!({"amount":n.to_string(),"scriptPublicKey":{"version":v,"scriptPublicKey":s}})).collect();
     let payload = transaction.payload.as_ref().unwrap();
+    let (id_text, rpc_transaction) = synthetic_rpc(payload, json!(rpc), 7);
+    transaction.transaction_id = id_text;
+    let verified = processor.verify_tip_transaction(&transaction).unwrap();
     let body = json!({"transaction_id":format!("\\x{}",transaction.transaction_id),"payload":format!("\\x{payload}"),"outputs":canonical});
     let receipt = json!({"schema_version":1,"network":"testnet-10","transaction_id":transaction.transaction_id,"payload":payload,
         "archive_transaction":{"transaction_id":transaction.transaction_id,"payload":payload,"outputs":detail},
-        "rpc_transaction":{"verboseData":{"transactionId":transaction.transaction_id},"payload":payload,"outputs":rpc,"inputs":[{"arbitrary_funding_key":"separate fee payer"}]}});
+        "rpc_transaction":rpc_transaction});
     let id = hex::decode(&transaction.transaction_id).unwrap();
     let proof = TipOutputEvidence::checked("testnet-10", &id, &body, &receipt).unwrap();
     assert_eq!(
@@ -2609,6 +2801,33 @@ async fn pure_tip_signature_and_output_binding_follow_upstream_without_fee_input
     changed["rpc_transaction"]["outputs"][0]["amount"] = json!(999);
     assert!(TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err());
     assert_eq!(proof.payment_to_author(&verified).unwrap(), 18);
+    let mut changed = receipt.clone();
+    changed["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"] = json!(1);
+    assert!(
+        TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err(),
+        "a reported ID cannot hide a script-version mutation"
+    );
+    for malformed in [
+        json!([null]),
+        json!([true]),
+        json!(["input"]),
+        json!([{"previousOutpoint":[]}]),
+    ] {
+        let mut changed = receipt.clone();
+        changed["rpc_transaction"]["inputs"] = malformed;
+        assert!(
+            TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err(),
+            "malformed RPC input must reject without panicking"
+        );
+    }
+    for malformed in [json!([null]), json!([true]), json!(["output"])] {
+        let mut changed = receipt.clone();
+        changed["rpc_transaction"]["outputs"] = malformed;
+        assert!(
+            TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err(),
+            "malformed RPC output must reject without panicking"
+        );
+    }
     for path in ["network", "transaction_id", "payload"] {
         let mut changed = receipt.clone();
         changed[path] = json!("wrong");

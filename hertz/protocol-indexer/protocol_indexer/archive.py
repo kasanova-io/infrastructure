@@ -117,7 +117,7 @@ def verify_archive(txid, network, network_info, detail, accepting, containing):
     return verify_transaction_evidence(txid, network, network_info, detail, accepting, containing, require_protocol=True)
 
 
-def input0_evidence(receipt, previous):
+def input0_evidence(receipt, previous, *, require_address=True):
     """Bind sender metadata to the exact previous output, not an address claim."""
     require(receipt["network"] == previous["network"], "previous transaction network mismatch")
     inputs = sorted(receipt["archive_transaction"]["inputs"], key=lambda r: integer(r["index"]))
@@ -127,16 +127,17 @@ def input0_evidence(receipt, previous):
     outputs = previous["rpc_transaction"]["outputs"]
     require(index < len(outputs), "previous output does not exist")
     output = outputs[index]
-    require(integer(output["scriptPublicKey"]["version"], 65535) == 0, "native sender script version unsupported")
+    version = integer(output["scriptPublicKey"]["version"], 65535)
+    require(not require_address or version == 0, "native sender script version unsupported")
     address = (output.get("verboseData") or {}).get("scriptPublicKeyAddress")
-    require(bool(address), "previous output address unresolved")
-    require(not first.get("previous_outpoint_address") or first["previous_outpoint_address"] == address,
+    require(not require_address or bool(address), "previous output address unresolved")
+    require(not first.get("previous_outpoint_address") or not address or first["previous_outpoint_address"] == address,
             "claimed sender differs from previous output")
     return {"address": address, "script": raw_hex(output["scriptPublicKey"]["scriptPublicKey"]).hex(),
             "amount": integer(output["amount"]), "previous_transaction": previous}
 
 
-def checked_receipt(receipt, txid, network, *, with_input=True):
+def checked_receipt(receipt, txid, network, *, with_input=True, require_input_address=True):
     """Recheck stored proof structure, including optional prior-output enrichment."""
     require(isinstance(receipt, dict) and receipt.get("transaction_id") == txid and receipt.get("network") == network,
             "cached receipt identity/network mismatch")
@@ -151,7 +152,7 @@ def checked_receipt(receipt, txid, network, *, with_input=True):
         first = min(checked["archive_transaction"]["inputs"], key=lambda r: integer(r["index"]))
         previous_id = first["previous_outpoint_hash"]
         previous = checked_receipt(receipt["input0"]["previous_transaction"], previous_id, network, with_input=False)
-        resolved = input0_evidence(checked, previous)
+        resolved = input0_evidence(checked, previous, require_address=require_input_address)
         require(all(receipt["input0"][k] == resolved[k] for k in ("address", "script", "amount")), "cached sender proof mismatch")
         checked["input0"] = resolved
     return checked
@@ -184,4 +185,27 @@ def bind_output_evidence(row, receipt):
                 'source output address network mismatch')
         require(not claimed or not address or (claimed if ':' in claimed else prefix + claimed) == address,
                 'output proof address mismatch')
+    return receipt
+
+
+def bind_sender_evidence(row, receipt):
+    """Bind the room funding proof to canonical outpoints; SDK derives sender."""
+    bind_output_evidence(row, receipt)
+    inputs = row['source_transaction'].get('inputs')
+    rpc = receipt['rpc_transaction']['inputs']
+    require(isinstance(inputs, list) and inputs and len(inputs) == len(rpc), 'sender proof input count mismatch')
+    require(sorted(integer(i.get('index')) for i in inputs) == list(range(len(inputs))), 'sender proof indexes mismatch')
+    for source, full in zip(sorted(inputs, key=lambda i: integer(i['index'])), rpc):
+        previous = full['previousOutpoint']
+        require(source.get('previous_outpoint_hash') == '\\x' + previous['transactionId'] and
+                integer(source.get('previous_outpoint_index')) == integer(previous['index']), 'sender proof outpoint mismatch')
+        claimed = source.get('signature_script')
+        require(claimed is None or claimed == '\\x' + raw_hex(full['signatureScript']).hex(), 'sender proof signature mismatch')
+    first = min(inputs, key=lambda i: integer(i['index']))
+    require(isinstance(receipt.get('input0'), dict), 'sender proof input0 missing')
+    proof = receipt['input0']
+    require(first.get('previous_outpoint_script') is None or
+            first['previous_outpoint_script'] == '\\x' + proof['script'], 'sender proof previous script mismatch')
+    require(first.get('previous_outpoint_amount') is None or
+            integer(first['previous_outpoint_amount']) == integer(proof['amount']), 'sender proof previous amount mismatch')
     return receipt

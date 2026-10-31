@@ -263,9 +263,10 @@ remain required before replacing any public scanner.
 The canonical journal now queues one durable `native-chats-v1` wakeup per
 transaction. The live writer and inventory backfill enqueue identically. This
 projection covers established Kasia/KaChat private actions, KaChat tips and
-canonical KaChat `dm` through the paired shared-native inbox adapter. Room
-broadcasts remain retained pending their native adapter. The independent Social consumer
-handles supported signed public actions and verified tips.
+canonical KaChat `dm` through the paired shared-native inbox adapter. The independent
+Social consumer handles supported signed public actions, verified tips and both
+public room roots. Room source-connected/genuine acceptance and public API
+cutover remain pending.
 
 DM uses the existing native contextual-message storage plus the upstream
 recipient-derived inbox-tag index, atomically with acceptance and the native
@@ -332,12 +333,13 @@ extension history without owning metadata requires explicit reconciliation.
 Genuine extension acceptance and public history/API migration remain separate
 delivery gates before switching the existing indexer origins.
 
-## Public tip output evidence
+## Public tip and room evidence
 
 Both live capture and inventory replay also enqueue `output-evidence-v1` for
-`kchat:1:tip`. `evidence_worker.py` acquires immutable full output receipts using
+`kchat:1:tip` and both public `bcast` roots. `evidence_worker.py` acquires
+immutable full output or input0 sender receipts using
 the existing archive resolver and importer bounds (one attempt, 10s socket,
-12s total deadline, 8MiB, shared nonblocking rate buckets and capacity pause).
+12s wall-clock deadline per HTTP request, 8MiB, shared nonblocking rate buckets and capacity pause).
 It validates the configured source before cache/HTTP access, binds the journal
 UUID and network, and rechecks them before each job. It does not scan the chain,
 write canonical acceptance, decrypt tips or emit notifications.
@@ -349,12 +351,25 @@ then rolls back incomplete projection work. Unknown or stale admission defers;
 exact terminal native decisions (including wrong targets/authors) acknowledge
 without HTTP. Prefix routing alone never admits an archive lookup. Native can
 requeue proof work after parent reacceptance through the same durable queue.
+Room work instead requires `parsed_room_sender_pending:<revision>` after the
+native envelope parser; it uses a distinct full-input resolver, never tip-only
+output proof. Exact current native source/network binding applies to both.
 
 Output proofs bind the exact transaction/payload and every indexed output's
 amount/script to the canonical source, preserving full RPC script versions.
 They do not require funding-input address resolution or equality between the
 fee payer and tip signer. Signature validity, target authorization and payment
-sum are still checked by the existing native SDK consumer.
+sum are still checked by the existing native SDK consumer. Room sender proof
+also binds every canonical input/outpoint and the spent previous transaction.
+The SDK recomputes current/prior IDs and derives the self-send addresses from
+scripts; absent verbose addresses are allowed without relaxing private Chats.
+
+When native rejects an existing receipt, admission includes its exact PG
+`receipt::text` SHA256. The worker bypasses current/prior body cache reads and
+writes for that refresh, retaining adverse files and a rejected-SQL audit copy.
+A final atomic SQL fingerprint comparison preserves any newer concurrent proof;
+that newer proof is revalidated/reused or the job defers. Original no-hash
+markers still support missing proof. No source/history/native fact is deleted.
 
 Archive I/O holds only the evidence job, allowing source revisions to advance.
 The final canonical revision fence retains changed work; missing evidence defers

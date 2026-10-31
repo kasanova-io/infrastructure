@@ -14,8 +14,8 @@ effects atomically. Invalid signatures/key forms never receive an envelope.
 The existing standalone listener retains its original K-social inputs. Opt-in
 shared mode uses the common canonical journal, with revision fencing, native
 state reconciliation, stable cursors and quiet replay described below. This is
-an unactivated private candidate. Legacy history reconciliation, remaining
-KaChat extensions and six-family acceptance precede public cutover. No Python
+an unactivated private candidate. Legacy history/API reconciliation and six-family real-chain acceptance
+precede public cutover. No Python
 replacement signature parser is used.
 
 `SOURCE.lock` records upstream/SDK/patch/lock/image identities. The SDK revision
@@ -80,9 +80,9 @@ eligible context; only fenced evaluated opportunities are consumed. Previously
 accepted history/reacceptance and duplicate signed actions stay quiet.
 
 The initial source-binding refusal deliberately preserves existing public
-history; it is not an automatic migration/cutover tool. Remaining KaChat
-extensions (including verified public tips/rooms), private DM/inbox upgrades,
-legacy reconciliation and six-family real acceptance still precede public
+history; it is not an automatic migration/cutover tool. The source includes verified tips, all five KaPosts extension forms and room
+projection; it remains unactivated. Source-connected preservation, legacy
+history/API reconciliation and six-family real acceptance precede public
 activation. Existing public consumers keep running throughout private testing.
 
 
@@ -113,8 +113,50 @@ reacceptance. Decoder epoch is persistent; newly supported history stays quiet.
 This component supplies storage, not the app counter or notification rollout.
 The existing capture function has no tip trigger, so zero real outbox rows do not
 prove tip-notification suppression; an append-only positive-control contract
-checks eligibility until Notifications is extended. Live output-proof harvesting
-and the remaining KaChat extensions/DM/history/API/counter/UI integration remain
-required before public cutover. The genuine private tip sample uses an already
+checks eligibility until Notifications is extended. Source-connected proof harvesting, genuine extension/DM/room acceptance and
+history/API/counter/UI integration remain required before public cutover. The genuine private tip sample uses an already
 retained full receipt, without injecting a source/revision/evidence row or sending
 another transaction.
+
+
+## Public room broadcasts and shared transaction identity
+
+Both `kchat:1:bcast:<channel>:<content>` and `ciph_msg:1:bcast:...` use the pinned
+KaChat public-room envelope and pure self-send rule: the address derived from
+input0's spent output must equal the address derived from output0. Rooms have no
+payload author signature. The original ISC notice is byte-identical to the
+retained K-indexer notice. Exact upstream source hashes are in `SOURCE.lock`.
+Channel trimming/lowercasing and the native 36-character bound are preserved;
+content, including colons, is stored verbatim. Invalid UTF-8/NUL is terminal.
+Operator language/art/personal filters and upstream RPC singletons are not
+installed in shared infrastructure.
+
+The configured-network SDK recomputes current and previous transaction IDs and
+extracts both script addresses. The previous transaction must match the exact
+canonical input0 outpoint. Canonical input indexes/outpoints/signature bytes,
+optional resolved amount/script, and every current output are bound to the
+receipt. Missing verbose address metadata is allowed; a supplied sender claim
+must match the SDK address. Complete mismatched or non-addressable scripts
+receive no room attribution. Private Chats keeps its existing strict sender
+address contract. Transaction identity is not an independent consensus, UTXO or
+signature check; current acceptance remains owned by the canonical journal.
+The same current-ID check strengthens tip output evidence. Only three already
+transitive SDK packages become direct dependencies, with versions/sources and
+checksums unchanged in the locked graph.
+
+Missing room proof rolls back projection and durably admits the existing bounded
+proof worker as `parsed_room_sender_pending:<revision>`. An SDK-rejected stored
+proof additionally carries its exact PostgreSQL receipt fingerprint, for both
+room and tip admission. Forced recovery bypasses current/prior body cache files
+without replacing them, keeps the rejected SQL receipt as an audit artifact,
+and stores a fresh proof only through an atomic SQL fingerprint comparison.
+If another writer wins during HTTP, its proof is revalidated and reused or the
+job defers. No newer proof, canonical history or native fact is overwritten by
+an old rejection. Missing/stale/wrong-kind admission never authorizes HTTP.
+
+Room effects and acknowledgements are atomic. Revocation removes the native
+row; reacceptance restores its original ID/time. `social_shared.current_broadcasts`
+also hides pending removals and stale revisions before reconciliation. New
+nonempty unowned room history is refused. Rooms remain quiet, without adding
+notifications, retention jobs, another scanner or public endpoints. This view
+is internal storage, not a claim of public room API or history compatibility.

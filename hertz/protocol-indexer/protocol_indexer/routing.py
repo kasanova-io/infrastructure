@@ -69,8 +69,11 @@ def native_social(classified: Route | None) -> bool:
 
 
 def output_evidence(classified: Route | None) -> bool:
-    """Public tips need output proofs independently of private sender lookup."""
-    return classified is not None and classified.root == 'kchat' and classified.action == 'tip'
+    """Native-admitted public tips/rooms share bounded proof acquisition."""
+    return classified is not None and classified.version == 1 and (
+        (classified.root == 'kchat' and classified.action == 'tip')
+        or (classified.root in {'kchat', 'ciph_msg'} and classified.action == 'bcast')
+    )
 
 
 def route(payload: bytes) -> Route | None:
