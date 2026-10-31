@@ -1,0 +1,41 @@
+{
+  "simply": {
+    "repository": "https://github.com/supertypo/simply-kaspa-indexer",
+    "revision": "7b01229d8960f8f53f909ee0e69fb628053ac8ae",
+    "version": "v2.3.0",
+    "schema": 23,
+    "image": "supertypo/simply-kaspa-indexer@sha256:f28478e046af83b8d490984ca76bd75c663a71e242feba51a176e5ab6ce0a62f",
+    "schema_fixture_sha256": "5824be9de97cdf84d604f86cf4d4280f0d329658bd35be374dddaa46bb1b4d40"
+  },
+  "protocol_references": {
+    "ksocial": "917863f49623aa6802e5ad4c0e246581470d93cb",
+    "kachat": "e2f462171bee80ff26c6fe14ddafe06614f05efa"
+  },
+  "simply_journal": {
+    "upstream_revision": "7b01229d8960f8f53f909ee0e69fb628053ac8ae",
+    "patch_sha256": "760989b4c58c41868c25579260f04a170d81794604adac1058d409026d228e35",
+    "build_manifest": "14870974169e6edcb7c9fe42a9a0ea83c5c731f316cae83a7aab6c01019268b6",
+    "image": "sha256:045bb7ada09559048cb867bc5312fba9ac8523f39f025ad507cd924d9097f3d7"
+  },
+  "private_producer": {
+    "source_revision": "2d5939afbb31f3bea5b97839d9b5ddaa5c1641e3",
+    "source_manifest": "1594b0d864056045c618e52b0b7a00dc24692050e78a612a85c1dab8f186444e",
+    "adapter_image": "sha256:40748e8e55b22d06673299e834b8fa2840d42e3415407389e6291336d83fda46",
+    "connector_image_built": "sha256:51e0cd89e69bfc5dd00591d2dcbbdf46f33ff6152363c56d917ba604e60318e9",
+    "private_dev_producer_active": true,
+    "normal_inventory_families_replayed": 6,
+    "collector_database_binding_preserved": true,
+    "bounded_native_consumer_upgrades_verified": ["native-social-v1", "native-chats-v1"],
+    "native_consumer_workers_running": false,
+    "native_chats_retained_real_payments_verified": 3,
+    "native_chats_first_upgrade_run_status": "FAIL",
+    "native_chats_corrected_durable_followup_status": "PASS",
+    "native_chats_genuine_dm_verified": false,
+    "social_bounded_upgrade_preservation_passed": true,
+    "social_retained_real_tips_verified": 3,
+    "social_native_worker_running": false,
+    "connector_evidence_workers_active": false,
+    "new_chain_transactions": 0,
+    "public_activation": false
+  }
+}

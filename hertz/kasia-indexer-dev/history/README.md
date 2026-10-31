@@ -118,3 +118,27 @@ The Rust tests additionally cover both prefixes, each personal message type,
 atomic failure, conflicting duplicates, binary ciphertext, acceptance metadata,
 and persistence across restart. Runtime verification must still read the
 actual migrated records; unit tests are not migration acceptance.
+
+## Shared-native DM candidate
+
+`shared-dm.patch` narrowly backports the upstream KaChat DM type and inbox
+partition from `e2f462171bee80ff26c6fe14ddafe06614f05efa` (ISC notice retained
+in `LICENSE.KaChat-Indexer`). The original standalone parser/actors keep their
+grammar; only the shared importer enables canonical `kchat:1:dm`. It reuses the
+same contextual ciphertext and sender index, adding the native inbox index in
+the existing transaction with acceptance and durable journal acknowledgement.
+No actor partition IDs, personal filtering or push routing change.
+
+The inbox GET uses the established cursor/header contract; the standalone
+route returns404 so it cannot advertise unsupported DM ingestion. Shared mode
+denies contextual/import, import-file, personal/purge-all and self-stash GC
+before request-body extraction, preserving the canonical writer's ownership.
+Push configuration remains independent. Pair this image with its reviewed
+shared adapter and replay retained DM inventory before evaluating cutover.
+`shared-dm-source.lock` identifies the tested candidate. Its bounded private
+activation delivered three retained real tip jobs to the original native store;
+a corrected copy-only follow-up verified durable revisions, payment API data,
+old records and the original cursor. Both earlier verifier failures remain
+retained. Consumers stopped cleanly afterwards. No new DM transaction was sent;
+genuine DM chain/decryption, broader history migration and the complete
+six-family public cutover remain separate acceptance requirements.

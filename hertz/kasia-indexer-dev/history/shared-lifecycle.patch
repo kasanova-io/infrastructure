@@ -1,0 +1,88 @@
+--- a/indexer/src/signals.rs
++++ b/indexer/src/signals.rs
+@@ -1,6 +1,6 @@
+ /// Waits for a signal that requests a graceful shutdown, like SIGTERM or SIGINT.
+ #[cfg(unix)]
+-pub async fn wait_for_signal_impl() {
++pub fn wait_for_signal_impl() -> impl std::future::Future<Output = ()> {
+     use tokio::signal::unix::{SignalKind, signal};
+ 
+     // Infos here:
+@@ -8,15 +8,17 @@
+     let mut signal_terminate = signal(SignalKind::terminate()).unwrap();
+     let mut signal_interrupt = signal(SignalKind::interrupt()).unwrap();
+ 
+-    tokio::select! {
+-        _ = signal_terminate.recv() => tracing::debug!("Received SIGTERM."),
+-        _ = signal_interrupt.recv() => tracing::debug!("Received SIGINT."),
+-    };
++    async move {
++        tokio::select! {
++            _ = signal_terminate.recv() => tracing::debug!("Received SIGTERM."),
++            _ = signal_interrupt.recv() => tracing::debug!("Received SIGINT."),
++        };
++    }
+ }
+ 
+ /// Waits for a signal that requests a graceful shutdown, Ctrl-C (SIGINT).
+ #[cfg(windows)]
+-pub async fn wait_for_signal_impl() {
++pub fn wait_for_signal_impl() -> impl std::future::Future<Output = ()> {
+     use tokio::signal::windows;
+ 
+     // Infos here:
+@@ -26,10 +28,27 @@
+     let mut signal_close = windows::ctrl_close().unwrap();
+     let mut signal_shutdown = windows::ctrl_shutdown().unwrap();
+ 
+-    tokio::select! {
+-        _ = signal_c.recv() => tracing::debug!("Received CTRL_C."),
+-        _ = signal_break.recv() => tracing::debug!("Received CTRL_BREAK."),
+-        _ = signal_close.recv() => tracing::debug!("Received CTRL_CLOSE."),
+-        _ = signal_shutdown.recv() => tracing::debug!("Received CTRL_SHUTDOWN."),
+-    };
++    async move {
++        tokio::select! {
++            _ = signal_c.recv() => tracing::debug!("Received CTRL_C."),
++            _ = signal_break.recv() => tracing::debug!("Received CTRL_BREAK."),
++            _ = signal_close.recv() => tracing::debug!("Received CTRL_CLOSE."),
++            _ = signal_shutdown.recv() => tracing::debug!("Received CTRL_SHUTDOWN."),
++        };
++    }
+ }
++
++#[cfg(all(test, unix))]
++mod tests {
++    #[tokio::test]
++    async fn shutdown_signal_received_during_startup_is_buffered_before_await() -> anyhow::Result<()>
++    {
++        let waiting = super::wait_for_signal_impl();
++        let sent = std::process::Command::new("kill")
++            .args(["-INT", &std::process::id().to_string()])
++            .status()?;
++        assert!(sent.success());
++        tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await?;
++        Ok(())
++    }
++}
+--- a/indexer/src/main.rs
++++ b/indexer/src/main.rs
+@@ -140,6 +140,9 @@
+ 
+ #[tokio::main]
+ async fn main() -> anyhow::Result<()> {
++    // Register before serving the API or waiting on the initial node connection.
++    // A stop during startup must remain queued until the existing shutdown select.
++    let shutdown_signal = signals::wait_for_signal_impl();
+     // ignore faillures as .env might not be present at runtime, and this use-case is tolerated
+     dotenv()
+         .inspect_err(|err| println!("[WARN] reading .env files is failed with err {err}"))
+@@ -473,7 +476,7 @@
+         ticker: shutdown_ticker_tx,
+     };
+     tokio::select! {
+-        _ = signals::wait_for_signal_impl() => {
++        _ = shutdown_signal => {
+             info!("Termination signal received. Shutting down...");
+             shutdown.shutdown(None).await
+         },

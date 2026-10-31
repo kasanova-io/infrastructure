@@ -1,0 +1,513 @@
+--- a/K-transaction-processor/src/k_protocol.rs
++++ b/K-transaction-processor/src/k_protocol.rs
+@@ -154,0 +155,37 @@
++/// Produced only by native signature verification. No public mutable fields:
++/// a caller cannot swap its transaction after review or bypass verification.
++#[derive(Debug, Clone)]
++pub struct VerifiedAction {
++    transaction: Transaction,
++    protocol: &'static str,
++    action: KActionType,
++}
++
++impl VerifiedAction {
++    pub fn transaction(&self) -> &Transaction { &self.transaction }
++    pub fn protocol(&self) -> &'static str { self.protocol }
++    pub fn action(&self) -> &KActionType { &self.action }
++}
++
++/// Signature-verified KaChat tip; payment/current-target checks remain separate.
++#[derive(Debug, Clone)]
++pub struct VerifiedTip {
++    transaction: Transaction,
++    tip: crate::tips::KTip,
++}
++impl VerifiedTip {
++    pub fn transaction(&self) -> &Transaction { &self.transaction }
++    pub fn tip(&self) -> &crate::tips::KTip { &self.tip }
++}
++
++/// Original-SDK verified KaPosts extension; owns its exact reviewed input.
++#[derive(Debug, Clone)]
++pub struct VerifiedKaPosts {
++    transaction: Transaction,
++    action: crate::kaposts::KaPostsAction,
++}
++impl VerifiedKaPosts {
++    pub fn transaction(&self) -> &Transaction { &self.transaction }
++    pub fn action(&self) -> &crate::kaposts::KaPostsAction { &self.action }
++}
++
+@@ -155,0 +193,38 @@
++    pub fn verify_tip_transaction(&self, transaction: &Transaction) -> Option<VerifiedTip> {
++        if hex::decode(&transaction.transaction_id).ok()?.len()!=32 { return None; }
++        let bytes=hex::decode(transaction.payload.as_ref()?).ok()?;
++        let payload=std::str::from_utf8(&bytes).ok()?.strip_prefix("kchat:1:")?;
++        let tip=crate::tips::parse_tip_parts(&payload.split(':').collect::<Vec<_>>()).ok()?;
++        let sender=crate::tips::xonly_bytes(&tip.sender_pubkey)?;
++        let author=crate::tips::xonly_bytes(&tip.author_pubkey)?;
++        if sender==author || !self.verify_kaspa_signature(&tip.signing_string(),&tip.sender_signature,&tip.sender_pubkey) {return None;}
++        Some(VerifiedTip {transaction:transaction.clone(),tip})
++    }
++
++    pub fn verify_kaposts_transaction(&self, transaction: &Transaction) -> Option<VerifiedKaPosts> {
++        if hex::decode(&transaction.transaction_id).ok()?.len()!=32 { return None; }
++        let bytes=hex::decode(transaction.payload.as_ref()?).ok()?;
++        let raw=std::str::from_utf8(&bytes).ok()?;
++        let cleaned=raw.chars().filter(|c| !c.is_control() || matches!(*c,'\n'|'\r'|'\t')).collect::<String>();
++        let payload=cleaned.strip_prefix("kchat:1:")?;
++        let action=crate::kaposts::parse_parts(&payload.split(':').collect::<Vec<_>>()).ok()?;
++        if !action.storage_fields_are_decodable() { return None; }
++        let message=action.signing_string().ok()?;
++        let (signature,public_key)=action.signature_fields();
++        if !self.verify_kaspa_signature(&message,signature,public_key) { return None; }
++        Some(VerifiedKaPosts {transaction:transaction.clone(),action})
++    }
++
++    pub async fn apply_verified_poll_in(&self, connection: &mut sqlx::Transaction<'_, sqlx::Postgres>, verified: &VerifiedKaPosts) -> Result<()> {
++        let crate::kaposts::KaPostsAction::Poll(poll)=&verified.action else {return Err(anyhow::anyhow!("not a verified poll"));};
++        anyhow::ensure!(crate::kaposts_projection::valid_poll(poll,verified.transaction.block_time.unwrap_or(0)),"invalid poll structure/time");
++        let post=KPost {sender_pubkey:poll.sender_pubkey.clone(),sender_signature:poll.sender_signature.clone(),base64_encoded_message:poll.base64_encoded_question.clone(),mentioned_pubkeys:poll.mentioned_pubkeys.clone()};
++        self.save_k_post_to_database(&mut **connection,&verified.transaction,post).await?;
++        let id=hex::decode(&verified.transaction.transaction_id)?;
++        sqlx::query("UPDATE k_contents SET content_type='poll' WHERE transaction_id=$1").bind(&id).execute(&mut **connection).await?;
++        sqlx::query("INSERT INTO k_polls(post_id,options,closes_at,block_time) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
++            .bind(id).bind(&poll.options_b64_csv).bind(poll.closes_at_ms).bind(verified.transaction.block_time.unwrap_or(0)).execute(&mut **connection).await?;
++        Ok(())
++    }
++
++
+@@ -187,0 +263,3 @@
++                    if !matches!(bytes[0], 2 | 3) {
++                        return false;
++                    }
+@@ -234,6 +312,5 @@
+-        // Remove the K protocol prefix "k:1:"
+-        if !payload.starts_with("k:1:") {
+-            return Err(anyhow::anyhow!("Invalid K protocol prefix"));
+-        }
+-
+-        let k_payload = &payload[4..]; // Remove "k:1:" prefix
++        // Both roots use the original K action/signature format. Preserve the
++        // signed content (including KaChat's marker) without exclusivity filters.
++        let k_payload = payload.strip_prefix("k:1:")
++            .or_else(|| payload.strip_prefix("kchat:1:"))
++            .ok_or_else(|| anyhow::anyhow!("Invalid K protocol prefix"))?;
+@@ -472 +549,61 @@
+-    /// Process K protocol transaction
++    /// Decode and verify with the original native parser and Kaspa SDK before
++    /// acquiring a write transaction. The envelope owns its exact input; callers
++    /// cannot substitute another payload/time/id after verification.
++    pub fn verify_transaction(&self, transaction: &Transaction) -> Option<VerifiedAction> {
++        let payload_bytes = hex::decode(transaction.payload.as_ref()?).ok()?;
++        let payload = std::str::from_utf8(&payload_bytes).ok()?;
++        // Retain the established K parser's control-character handling.
++        let cleaned = payload.chars()
++            .filter(|c| !c.is_control() || matches!(*c, '\n' | '\r' | '\t'))
++            .collect::<String>();
++        let protocol = if cleaned.starts_with("k:1:") { "k" }
++            else if cleaned.starts_with("kchat:1:") { "kchat" } else { return None; };
++        let action = self.parse_k_protocol_payload(&cleaned).ok()?;
++        // Signature validity cannot authorize malformed native storage fields.
++        // Match the original SQL helpers' hex decoding without inventing new
++        // target/key length restrictions. Storage outages remain real errors.
++        let hex_ok = |value: &str| hex::decode(value).is_ok();
++        if !hex_ok(&transaction.transaction_id) { return None; }
++        let storable = match &action {
++            KActionType::Post(v) => v.mentioned_pubkeys.iter().all(|v|hex_ok(v)),
++            KActionType::Reply(v) => hex_ok(&v.post_id) && v.mentioned_pubkeys.iter().all(|v|hex_ok(v)),
++            KActionType::Quote(v) => hex_ok(&v.content_id) && hex_ok(&v.mentioned_pubkey),
++            KActionType::Vote(v) => hex_ok(&v.post_id) && hex_ok(&v.mentioned_pubkey),
++            KActionType::Follow(v) => hex_ok(&v.followed_user_pubkey),
++            KActionType::Block(v) => hex_ok(&v.blocked_user_pubkey),
++            KActionType::Broadcast(_) => true,
++            KActionType::Unknown(_) => false,
++        };
++        if !storable { return None; }
++        let (message, signature, public_key) = match &action {
++            KActionType::Post(value) => (
++                format!("{}:{}", value.base64_encoded_message,
++                    serde_json::to_string(&value.mentioned_pubkeys).ok()?),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Reply(value) => (
++                format!("{}:{}:{}", value.post_id, value.base64_encoded_message,
++                    serde_json::to_string(&value.mentioned_pubkeys).ok()?),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Quote(value) => (
++                format!("{}:{}:{}", value.content_id, value.base64_encoded_message, value.mentioned_pubkey),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Broadcast(value) => (
++                format!("{}:{}:{}", value.base64_encoded_nickname,
++                    value.base64_encoded_profile_image.as_deref().unwrap_or(""), value.base64_encoded_message),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Vote(value) => (
++                format!("{}:{}:{}", value.post_id, value.vote, value.mentioned_pubkey),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Follow(value) => (
++                format!("{}:{}", value.following_action, value.followed_user_pubkey),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Block(value) => (
++                format!("{}:{}", value.blocking_action, value.blocked_user_pubkey),
++                &value.sender_signature, &value.sender_pubkey),
++            KActionType::Unknown(_) => return None,
++        };
++        if !self.verify_kaspa_signature(&message, signature, public_key) { return None; }
++        Some(VerifiedAction { transaction: transaction.clone(), protocol, action })
++    }
++
++    /// Existing entry point retains its API; all native SQL effects are atomic.
+@@ -474,80 +611,22 @@
+-        let transaction_id = &transaction.transaction_id;
+-
+-        // Get payload as hex string
+-        let payload_hex = match &transaction.payload {
+-            Some(hex_payload) => hex_payload,
+-            None => {
+-                warn!("Transaction {} has no payload", transaction_id);
+-                return Ok(());
+-            }
+-        };
+-
+-        // Convert hex payload to UTF-8 string
+-        let payload_bytes = match hex::decode(payload_hex) {
+-            Ok(bytes) => bytes,
+-            Err(err) => {
+-                error!(
+-                    "Failed to decode hex payload for transaction {}: {}",
+-                    transaction_id, err
+-                );
+-                return Ok(());
+-            }
+-        };
+-
+-        let payload_str = match std::str::from_utf8(&payload_bytes) {
+-            Ok(payload_str) => payload_str,
+-            Err(err) => {
+-                error!(
+-                    "Invalid UTF-8 in transaction payload for ID: {}: {}",
+-                    transaction_id, err
+-                );
+-                return Ok(());
+-            }
+-        };
+-
+-        // Clean the payload string by removing null bytes and other control characters
+-        let cleaned_payload = payload_str
+-            .chars()
+-            .filter(|c| !c.is_control() || *c == '\n' || *c == '\r' || *c == '\t')
+-            .collect::<String>();
+-
+-        // Parse K protocol payload
+-        match self.parse_k_protocol_payload(&cleaned_payload) {
+-            Ok(action_type) => match action_type {
+-                KActionType::Broadcast(k_broadcast) => {
+-                    self.save_k_broadcast_to_database(transaction, k_broadcast)
+-                        .await?;
+-                }
+-                KActionType::Post(k_post) => {
+-                    self.save_k_post_to_database(transaction, k_post).await?;
+-                }
+-                KActionType::Reply(k_reply) => {
+-                    self.save_k_reply_to_database(transaction, k_reply).await?;
+-                }
+-                KActionType::Vote(k_vote) => {
+-                    self.save_k_vote_to_database(transaction, k_vote).await?;
+-                }
+-                KActionType::Block(k_block) => {
+-                    self.process_k_block_in_database(transaction, k_block)
+-                        .await?;
+-                }
+-                KActionType::Quote(k_quote) => {
+-                    self.save_k_quote_to_database(transaction, k_quote).await?;
+-                }
+-                KActionType::Follow(k_follow) => {
+-                    self.process_k_follow_in_database(transaction, k_follow)
+-                        .await?;
+-                }
+-                KActionType::Unknown(action) => {
+-                    warn!(
+-                        "Unknown K protocol action '{}' in transaction {}",
+-                        action, transaction_id
+-                    );
+-                }
+-            },
+-            Err(err) => {
+-                error!(
+-                    "Failed to parse K protocol payload for transaction {}: {}",
+-                    transaction_id, err
+-                );
+-            }
++        let Some(verified) = self.verify_transaction(transaction) else { return Ok(()); };
++        let mut connection = self.db_pool.begin().await?;
++        self.apply_verified_in(&mut connection, &verified).await?;
++        connection.commit().await?;
++        Ok(())
++    }
++
++    /// Shared journal callers own this transaction, its revision fence and quiet
++    /// notification context. No helper checks out a second pool connection.
++    pub async fn apply_verified_in(
++        &self, connection: &mut sqlx::Transaction<'_, sqlx::Postgres>, verified: &VerifiedAction,
++    ) -> Result<()> {
++        let transaction = &verified.transaction;
++        match verified.action.clone() {
++            KActionType::Broadcast(value) => self.save_k_broadcast_to_database(connection, transaction, value).await?,
++            KActionType::Post(value) => self.save_k_post_to_database(connection, transaction, value).await?,
++            KActionType::Reply(value) => self.save_k_reply_to_database(connection, transaction, value).await?,
++            KActionType::Vote(value) => self.save_k_vote_to_database(connection, transaction, value).await?,
++            KActionType::Block(value) => self.process_k_block_in_database(connection, transaction, value).await?,
++            KActionType::Quote(value) => self.save_k_quote_to_database(connection, transaction, value).await?,
++            KActionType::Follow(value) => self.process_k_follow_in_database(connection, transaction, value).await?,
++            KActionType::Unknown(_) => unreachable!("opaque verified action excludes unknown kinds"),
+@@ -555 +633,0 @@
+-
+@@ -560 +638 @@
+-    pub async fn save_k_post_to_database(
++    async fn save_k_post_to_database(
+@@ -561,0 +640 @@
++        connection: &mut sqlx::PgConnection,
+@@ -567,17 +645,0 @@
+-        // Construct the message to verify - it's the base64 message + mentioned_pubkeys JSON
+-        let mentioned_pubkeys_json_str =
+-            serde_json::to_string(&k_post.mentioned_pubkeys).unwrap_or_else(|_| "[]".to_string());
+-        let message_to_verify = format!(
+-            "{}:{}",
+-            k_post.base64_encoded_message, mentioned_pubkeys_json_str
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_post.sender_signature,
+-            &k_post.sender_pubkey,
+-        ) {
+-            error!("Invalid signature for post {}, skipping", transaction_id);
+-            return Ok(()); // Skip posts with invalid signatures
+-        }
+@@ -615 +677 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -649 +711 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -698 +760 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -739 +801 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -761 +823 @@
+-    pub async fn save_k_reply_to_database(
++    async fn save_k_reply_to_database(
+@@ -762,0 +825 @@
++        connection: &mut sqlx::PgConnection,
+@@ -768,17 +830,0 @@
+-        // Construct the message to verify - it's post_id + base64_message + mentioned_pubkeys JSON
+-        let mentioned_pubkeys_json_str =
+-            serde_json::to_string(&k_reply.mentioned_pubkeys).unwrap_or_else(|_| "[]".to_string());
+-        let message_to_verify = format!(
+-            "{}:{}:{}",
+-            k_reply.post_id, k_reply.base64_encoded_message, mentioned_pubkeys_json_str
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_reply.sender_signature,
+-            &k_reply.sender_pubkey,
+-        ) {
+-            error!("Invalid signature for reply {}, skipping", transaction_id);
+-            return Ok(()); // Skip replies with invalid signatures
+-        }
+@@ -821 +867 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -856 +902 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -907 +953 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -949 +995 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -972 +1018 @@
+-    pub async fn save_k_quote_to_database(
++    async fn save_k_quote_to_database(
+@@ -973,0 +1020 @@
++        connection: &mut sqlx::PgConnection,
+@@ -979,15 +1025,0 @@
+-        // Construct the message to verify - it's content_id + base64_message + mentioned_pubkey
+-        let message_to_verify = format!(
+-            "{}:{}:{}",
+-            k_quote.content_id, k_quote.base64_encoded_message, k_quote.mentioned_pubkey
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_quote.sender_signature,
+-            &k_quote.sender_pubkey,
+-        ) {
+-            error!("Invalid signature for quote {}, skipping", transaction_id);
+-            return Ok(()); // Skip quotes with invalid signatures
+-        }
+@@ -1037 +1069 @@
+-            .execute(&self.db_pool)
++            .execute(&mut *connection)
+@@ -1082 +1114 @@
+-            .execute(&self.db_pool)
++            .execute(&mut *connection)
+@@ -1104 +1136 @@
+-    pub async fn save_k_broadcast_to_database(
++    async fn save_k_broadcast_to_database(
+@@ -1105,0 +1138 @@
++        connection: &mut sqlx::PgConnection,
+@@ -1111,24 +1143,0 @@
+-        // Construct the message to verify - it's nickname + profile_image + message
+-        let profile_image_str = k_broadcast
+-            .base64_encoded_profile_image
+-            .as_deref()
+-            .unwrap_or("");
+-        let message_to_verify = format!(
+-            "{}:{}:{}",
+-            k_broadcast.base64_encoded_nickname,
+-            profile_image_str,
+-            k_broadcast.base64_encoded_message
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_broadcast.sender_signature,
+-            &k_broadcast.sender_pubkey,
+-        ) {
+-            error!(
+-                "Invalid signature for broadcast {}, skipping",
+-                transaction_id
+-            );
+-            return Ok(()); // Skip broadcasts with invalid signatures
+-        }
+@@ -1163 +1172 @@
+-        .execute(&self.db_pool)
++        .execute(&mut *connection)
+@@ -1181 +1190 @@
+-    pub async fn save_k_vote_to_database(
++    async fn save_k_vote_to_database(
+@@ -1182,0 +1192 @@
++        connection: &mut sqlx::PgConnection,
+@@ -1188,15 +1197,0 @@
+-        // Construct the message to verify - it's post_id + vote + mentioned_pubkey
+-        let message_to_verify = format!(
+-            "{}:{}:{}",
+-            k_vote.post_id, k_vote.vote, k_vote.mentioned_pubkey
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_vote.sender_signature,
+-            &k_vote.sender_pubkey,
+-        ) {
+-            error!("Invalid signature for vote {}, skipping", transaction_id);
+-            return Ok(()); // Skip votes with invalid signatures
+-        }
+@@ -1241 +1236 @@
+-        .execute(&self.db_pool)
++        .execute(&mut *connection)
+@@ -1259 +1254 @@
+-    pub async fn process_k_block_in_database(
++    async fn process_k_block_in_database(
+@@ -1260,0 +1256 @@
++        connection: &mut sqlx::PgConnection,
+@@ -1266,18 +1261,0 @@
+-        // Construct the message to verify - it's blocking_action + blocked_user_pubkey
+-        let message_to_verify = format!(
+-            "{}:{}",
+-            k_block.blocking_action, k_block.blocked_user_pubkey
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_block.sender_signature,
+-            &k_block.sender_pubkey,
+-        ) {
+-            error!(
+-                "Invalid signature for block action {}, skipping",
+-                transaction_id
+-            );
+-            return Ok(()); // Skip block actions with invalid signatures
+-        }
+@@ -1314 +1292 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -1343 +1321 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -1366 +1344 @@
+-    pub async fn process_k_follow_in_database(
++    async fn process_k_follow_in_database(
+@@ -1367,0 +1346 @@
++        connection: &mut sqlx::PgConnection,
+@@ -1373,18 +1351,0 @@
+-        // Construct the message to verify - it's following_action + followed_user_pubkey
+-        let message_to_verify = format!(
+-            "{}:{}",
+-            k_follow.following_action, k_follow.followed_user_pubkey
+-        );
+-
+-        // Verify the signature
+-        if !self.verify_kaspa_signature(
+-            &message_to_verify,
+-            &k_follow.sender_signature,
+-            &k_follow.sender_pubkey,
+-        ) {
+-            error!(
+-                "Invalid signature for follow action {}, skipping",
+-                transaction_id
+-            );
+-            return Ok(()); // Skip follow actions with invalid signatures
+-        }
+@@ -1421 +1382 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+@@ -1450 +1411 @@
+-                .execute(&self.db_pool)
++                .execute(&mut *connection)
+--- a/K-transaction-processor/src/main.rs
++++ b/K-transaction-processor/src/main.rs
+@@ -8,0 +9,9 @@
++mod shared_social;
++mod tips;
++mod tip_evidence;
++mod transaction_evidence;
++mod rooms;
++mod tip_projection;
++mod kaposts;
++mod kaposts_projection;
++mod read_views;
+@@ -73,0 +83,3 @@
++
++    #[arg(long, help = "Use existing common canonical journal; never starts a scanner")]
++    shared_source_id: Option<String>,
+@@ -111,0 +124,15 @@
++    if let Some(source_id) = &args.shared_source_id {
++        anyhow::ensure!(!args.initialize_db && !args.upgrade_db,
++            "shared mode requires an existing reconciled native schema; schema reset/upgrade is not permitted");
++        // Poll shutdown FIRST, before connecting/binding. A dedicated shared
++        // worker never starts the legacy listener/reindex service on this path.
++        return tokio::select! {
++            biased;
++            _ = tokio::signal::ctrl_c() => Ok(()),
++            result = async {
++                let pool = create_pool(&config).await?;
++                shared_social::run(pool, &config.network, source_id).await
++            } => result,
++        };
++    }
++
+@@ -194,0 +222,3 @@
++
++#[cfg(test)]
++mod shared_protocol_tests;
