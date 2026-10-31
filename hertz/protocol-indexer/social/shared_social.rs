@@ -66,7 +66,10 @@ pub(crate) fn selection_sql(table: &str) -> String {
         "k_follows" | "k_blocks" => format!(
             "WITH reversal AS (SELECT a.original_time,a.transaction_id {base} AND a.state_action='deactivate' ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) SELECT {fields} {base} AND a.state_action='activate' AND (NOT EXISTS(SELECT 1 FROM reversal) OR (a.original_time,a.transaction_id)>(SELECT original_time,transaction_id FROM reversal)) ORDER BY a.original_time,a.transaction_id LIMIT 1"
         ),
-        "k_contents" | "k_votes" => format!(
+        "k_contents" => format!(
+            "SELECT {fields} {base} AND NOT EXISTS(SELECT 1 FROM social_shared.extensions e WHERE e.transaction_id=a.transaction_id AND e.kind='poll' AND NOT e.shape_valid) ORDER BY EXISTS(SELECT 1 FROM k_contents native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1"
+        ),
+        "k_votes" => format!(
             "SELECT {fields} {base} ORDER BY EXISTS(SELECT 1 FROM {table} native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1"
         ),
         _ => unreachable!("native table is a closed verified action mapping"),
@@ -179,6 +182,9 @@ impl SharedSocial {
         sqlx::raw_sql(include_str!("shared_social.sql"))
             .execute(&mut *tx)
             .await?;
+        sqlx::raw_sql(include_str!("kaposts_projection.sql"))
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO social_shared.config(network,source_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
             .bind(network).bind(source_id).execute(&mut *tx).await?;
         let row = sqlx::query("SELECT network,source_id FROM social_shared.config WHERE singleton")
@@ -269,6 +275,7 @@ impl SharedSocial {
         let processor = KProtocolProcessor::new(self.pool.clone());
         let verified_tip = processor.verify_tip_transaction(&transaction);
         let verified = processor.verify_transaction(&transaction);
+        let verified_extension = processor.verify_kaposts_transaction(&transaction);
         let key = verified_tip
             .as_ref()
             .map(|v| {
@@ -277,7 +284,26 @@ impl SharedSocial {
                     "k_tips",
                 )
             })
-            .or_else(|| verified.as_ref().map(subject));
+            .or_else(|| verified.as_ref().map(subject))
+            .or_else(|| {
+                verified_extension
+                    .as_ref()
+                    .map(crate::kaposts_projection::subject)
+            });
+        if let Some(relation) =
+            crate::kaposts_projection::relation_lock(verified.as_ref(), verified_extension.as_ref())
+        {
+            let acquired: bool =
+                sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,736124))")
+                    .bind(relation)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !acquired {
+                tx.rollback().await?;
+                sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '50 milliseconds',last_error='quote_relation_busy' WHERE consumer='native-social-v1' AND transaction_id=$1").bind(&id).execute(&self.pool).await?;
+                return Ok(true);
+            }
+        }
         if let Some((key, _)) = &key {
             // All actions for one signature/author/relation serialize; unrelated
             // subjects can progress. Rebuild never locks other canonical rows.
@@ -306,8 +332,14 @@ impl SharedSocial {
         }
         sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,subject=EXCLUDED.subject,native_table=EXCLUDED.native_table,status=EXCLUDED.status,state_action=EXCLUDED.state_action")
             .bind(&id).bind(revision).bind(key.as_ref().map(|v|v.0.as_str())).bind(key.as_ref().map(|v|v.1))
-            .bind(payload).bind(time).bind(if verified.is_some() || verified_tip.is_some() {"verified"} else {"unsupported_or_invalid"})
-             .bind(if verified_tip.is_some() {Some("signed")} else {verified.as_ref().map(operation)}).execute(&mut *tx).await?;
+            .bind(payload).bind(time).bind(if verified.is_some() || verified_tip.is_some() || verified_extension.is_some() {"verified"} else {"unsupported_or_invalid"})
+             .bind(if verified_tip.is_some() || verified_extension.is_some() {Some("signed")} else {verified.as_ref().map(operation)}).execute(&mut *tx).await?;
+        if let Some(core) = &verified {
+            crate::kaposts_projection::record_core(&mut tx, core).await?;
+        }
+        if let Some(extension) = &verified_extension {
+            crate::kaposts_projection::record_extension(&mut tx, extension, revision).await?;
+        }
         if let Some(tip) = &verified_tip {
             sqlx::query("INSERT INTO social_shared.tip_targets(transaction_id,post_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
                 .bind(&id).bind(hex::decode(&tip.tip().post_id)?).execute(&mut *tx).await?;
@@ -327,12 +359,63 @@ impl SharedSocial {
                     tip,
                 )
                 .await?
-            } else if self.rebuild(&mut tx, &processor, &key, table, &id).await? {
+            } else if let Some(extension) = &verified_extension {
+                let plan = crate::kaposts_projection::plan(&mut tx, &processor, extension).await?;
+                if plan.busy {
+                    TipReconcile::Busy
+                } else if plan.pending {
+                    TipReconcile::PendingMetadata
+                } else {
+                    let mut complete = true;
+                    for content_key in plan.content_keys {
+                        let acquired: bool = sqlx::query_scalar(
+                            "SELECT pg_try_advisory_xact_lock(hashtextextended($1,736124))",
+                        )
+                        .bind(&content_key)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        if !acquired
+                            || !self
+                                .rebuild(
+                                    &mut tx,
+                                    &processor,
+                                    &content_key,
+                                    "k_contents",
+                                    &id,
+                                    !matches!(
+                                        extension.action(),
+                                        crate::kaposts::KaPostsAction::Poll(_)
+                                    ),
+                                )
+                                .await?
+                        {
+                            complete = false;
+                            break;
+                        }
+                    }
+                    if complete {
+                        TipReconcile::Applied
+                    } else {
+                        TipReconcile::Busy
+                    }
+                }
+            } else if self
+                .rebuild(&mut tx, &processor, &key, table, &id, false)
+                .await?
+            {
                 TipReconcile::Applied
             } else {
                 TipReconcile::Busy
             };
             if outcome != TipReconcile::Applied {
+                if outcome == TipReconcile::PendingMetadata {
+                    // Signature-only metadata and the upstream signed delete
+                    // intent tombstone may persist. Neither authorizes content
+                    // removal nor acknowledges this still-pending job.
+                    sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '5 seconds',last_error='kaposts_parent_pending' WHERE consumer='native-social-v1' AND transaction_id=$1").bind(&id).execute(&mut *tx).await?;
+                    tx.commit().await?;
+                    return Ok(true);
+                }
                 tx.rollback().await?;
                 if outcome == TipReconcile::ProofPending {
                     // Only the native SDK-verified tip + parent/author path
@@ -371,6 +454,7 @@ impl SharedSocial {
         key: &str,
         table: &str,
         current: &[u8],
+        overlay_only: bool,
     ) -> Result<bool> {
         // Original timestamps persist across source metadata revisions. Native
         // signature identity chooses one accepted representative across roots.
@@ -392,12 +476,28 @@ impl SharedSocial {
             }
             evaluated.push(id);
         }
+        let prior_content: Option<Vec<u8>> = if table == "k_contents" {
+            sqlx::query_scalar("SELECT transaction_id FROM k_contents WHERE sender_signature=$1")
+                .bind(hex::decode(
+                    key.strip_prefix("k_contents:").context("content subject")?,
+                )?)
+                .fetch_optional(&mut **tx)
+                .await?
+        } else {
+            None
+        };
         // Delete only the affected owned subject. Unrelated history stays put;
         // no growing in-memory array of all historical transaction IDs.
-        sqlx::query("DELETE FROM k_mentions m USING social_shared.actions a WHERE a.subject=$1 AND m.content_id=a.transaction_id")
-            .bind(key).execute(&mut **tx).await?;
-        sqlx::query(&format!("DELETE FROM {table} t USING social_shared.actions a WHERE a.subject=$1 AND t.transaction_id=a.transaction_id"))
-            .bind(key).execute(&mut **tx).await?;
+        if table != "k_contents" {
+            sqlx::query("DELETE FROM k_mentions m USING social_shared.actions a WHERE a.subject=$1 AND m.content_id=a.transaction_id").bind(key).execute(&mut **tx).await?;
+            sqlx::query(&format!("DELETE FROM {table} t USING social_shared.actions a WHERE a.subject=$1 AND t.transaction_id=a.transaction_id")).bind(key).execute(&mut **tx).await?;
+        } else if active.is_empty() {
+            crate::kaposts_projection::clear_content(
+                tx,
+                &hex::decode(key.strip_prefix("k_contents:").unwrap())?,
+            )
+            .await?;
+        }
         for row in &active {
             let id: Vec<u8> = row.get("transaction_id");
             let transaction = Transaction {
@@ -405,32 +505,115 @@ impl SharedSocial {
                 payload: Some(row.get("source_payload")),
                 block_time: Some(row.get("original_time")),
             };
-            let verified = processor
-                .verify_transaction(&transaction)
-                .context("stored verified Social action no longer verifies")?;
-            ensure!(
-                subject(&verified) == (key.into(), table),
-                "stored Social subject mismatch"
-            );
-            let notify: bool = if !row.get::<bool, _>("notification_consumed") {
+            let verified = processor.verify_transaction(&transaction);
+            let poll = processor.verify_kaposts_transaction(&transaction);
+            let signature = if table == "k_contents" {
+                Some(hex::decode(
+                    key.strip_prefix("k_contents:").context("content subject")?,
+                )?)
+            } else {
+                None
+            };
+            if let Some(core) = &verified {
+                ensure!(
+                    subject(core) == (key.into(), table),
+                    "stored Social subject mismatch"
+                );
+                crate::kaposts_projection::record_core(tx, core).await?;
+                if table == "k_votes" {
+                    match crate::kaposts_projection::ordinary_vote_hidden(tx, processor, core)
+                        .await?
+                    {
+                        None => return Ok(false),
+                        Some(true) => continue,
+                        Some(false) => {}
+                    }
+                }
+            } else {
+                let extension = poll
+                    .as_ref()
+                    .context("stored verified Social action no longer verifies")?;
+                ensure!(
+                    crate::kaposts_projection::subject(extension) == (key.into(), table)
+                        && matches!(extension.action(), crate::kaposts::KaPostsAction::Poll(_)),
+                    "stored poll subject mismatch"
+                );
+            }
+            let policy = if let Some(signature) = &signature {
+                let original =
+                    crate::kaposts_projection::source_message(verified.as_ref(), poll.as_ref())
+                        .context("content message")?;
+                let Some(policy) =
+                    crate::kaposts_projection::content_policy(tx, signature, &id, original).await?
+                else {
+                    return Ok(false);
+                };
+                Some(policy)
+            } else {
+                None
+            };
+            let mut notify: bool = if !row.get::<bool, _>("notification_consumed") {
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM protocol_indexer.events WHERE transaction_id=$1 AND revision<=$2 AND notify_allowed)")
                     .bind(&id).bind(row.get::<i64,_>("revision")).fetch_one(&mut **tx).await?
             } else {
                 false
             };
+            if poll
+                .as_ref()
+                .is_some_and(|v| matches!(v.action(), crate::kaposts::KaPostsAction::Poll(_)))
+            {
+                let decoder_live:bool=sqlx::query_scalar("SELECT $1>=since_ms AND NOT EXISTS(SELECT 1 FROM social_shared.extensions e JOIN social_shared.actions a USING(transaction_id) WHERE e.signature=$2 AND a.notification_consumed) FROM social_shared.decoder_epochs WHERE kind='kchat:1:extensions'")
+                    .bind(transaction.block_time.unwrap_or(i64::MIN)).bind(signature.as_ref().unwrap()).fetch_one(&mut **tx).await?;
+                notify = notify && decoder_live;
+            }
             sqlx::query("SELECT set_config('kasanova.social_notify_allowed',$1,true)")
                 .bind(if notify { "true" } else { "false" })
                 .execute(&mut **tx)
                 .await?;
-            processor.apply_verified_in(tx, &verified).await?;
-            restore_snapshot(
-                tx,
-                table,
-                &id,
-                row.get::<Option<String>, _>("snapshot").as_deref(),
-            )
-            .await?;
-            capture_snapshot(tx, table, &id).await?;
+            let preserved =
+                table == "k_contents" && overlay_only && prior_content.as_ref() == Some(&id);
+            if policy
+                .as_ref()
+                .is_some_and(crate::kaposts_projection::hidden)
+            {
+                crate::kaposts_projection::clear_content(tx, signature.as_ref().unwrap()).await?;
+            } else if !preserved {
+                if let Some(signature) = &signature {
+                    crate::kaposts_projection::clear_content(tx, signature).await?;
+                }
+                if let Some(verified) = &verified {
+                    processor.apply_verified_in(tx, verified).await?;
+                } else {
+                    processor
+                        .apply_verified_poll_in(tx, poll.as_ref().unwrap())
+                        .await?;
+                }
+                restore_snapshot(
+                    tx,
+                    table,
+                    &id,
+                    row.get::<Option<String>, _>("snapshot").as_deref(),
+                )
+                .await?;
+                // Base snapshots retain only original mentions/hashtags. Edit
+                // overlays have their own persistent mention IDs and must not
+                // leak revoked additions back into the restored original.
+                capture_snapshot(tx, table, &id).await?;
+            }
+            if let Some(policy) = policy {
+                if !crate::kaposts_projection::apply_policy(
+                    tx,
+                    policy,
+                    &id,
+                    signature.as_ref().unwrap(),
+                    current,
+                    !preserved,
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
+            }
         }
         // Only selected/current opportunities were evaluated and their exact
         // canonical rows are fenced. Another pending subject action may accept
@@ -438,7 +621,18 @@ impl SharedSocial {
         sqlx::query("UPDATE social_shared.actions a SET notification_consumed=true FROM protocol_indexer.canonical c WHERE a.transaction_id=ANY($1) AND NOT a.notification_consumed AND a.transaction_id=c.transaction_id AND c.accepting_block IS NOT NULL")
             .bind(&evaluated).execute(&mut **tx).await?;
         if table == "k_contents" {
-            crate::tip_projection::content_reconciled(tx, key).await?;
+            let signature =
+                hex::decode(key.strip_prefix("k_contents:").context("content subject")?)?;
+            let now: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT transaction_id FROM k_contents WHERE sender_signature=$1",
+            )
+            .bind(&signature)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if !overlay_only || prior_content != now {
+                crate::tip_projection::content_reconciled(tx, key).await?;
+                crate::kaposts_projection::content_reconciled(tx, &signature).await?;
+            }
         }
         // Leave no accidental live eligibility for a later statement in caller.
         sqlx::query("SELECT set_config('kasanova.social_notify_allowed','false',true)")

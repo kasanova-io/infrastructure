@@ -294,6 +294,30 @@ volumes. Initialize the additive SQL schema and replay the supported raw
 families before starting the connector. Existing public services keep their
 writers and volumes until full six-family live/backfill acceptance and cutover.
 
+## Private KaPosts projection
+
+The native Social consumer handles `kchat:1:` edits, deletes, unquotes, polls
+and poll votes through the same journal and original Kaspa SDK verifier. These
+forms extend the existing content tables; they do not start another scanner.
+Edits require the literal target's author and original two-hour window; polls
+are immutable. Signed delete intent can precede its parent, but removes content
+only after parent verification. Unquotes withdraw the author's earlier quotes
+of that target. Polls retain the upstream option and closing-time rules.
+
+Canonical revision fences and shared content locks serialize mutations and
+ordinary votes. Reorgs restore the effective prior state and stable native
+cursor IDs. Edit overlays update the effective body without replaying prior
+edits. Added-recipient receipts retain first evaluation, including quiet replay,
+so restoration cannot duplicate notification eligibility. Existing post/tip
+projections and independent ordinary Social access remain in the same path.
+
+`social_shared.current_poll_votes` and `social_shared.current_tips` are internal
+verified-state views. They do not establish public API compatibility, a visible
+counter, notification delivery, or complete six-family cutover. Nonempty
+extension history without owning metadata requires explicit reconciliation.
+Genuine extension acceptance and public history/API migration remain separate
+delivery gates before switching the existing indexer origins.
+
 ## Public tip output evidence
 
 Both live capture and inventory replay also enqueue `output-evidence-v1` for

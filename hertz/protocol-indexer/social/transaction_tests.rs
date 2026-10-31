@@ -46,6 +46,46 @@ fn signed(root: &str, action: &str, tail: &str, message: &str, id: u8) -> Transa
     }
 }
 
+#[test]
+fn pure_kaposts_poll_shape_unicode_and_chain_time_boundaries() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let make = |options: &[&str], closes_at_ms| crate::kaposts::KPoll {
+        sender_pubkey: public_key(),
+        sender_signature: String::new(),
+        base64_encoded_question: STANDARD.encode("question"),
+        options_b64_csv: options
+            .iter()
+            .map(|s| STANDARD.encode(s))
+            .collect::<Vec<_>>()
+            .join(","),
+        closes_at_ms,
+        mentioned_pubkeys: vec![],
+        is_kchat: true,
+    };
+    let valid = crate::kaposts_projection::valid_poll;
+    assert!(valid(&make(&["yes", "no"], 1001), 1000));
+    assert!(valid(&make(&["a", "b", "c", "d"], 604801000), 1000));
+    assert!(!valid(&make(&["yes", "no"], 1000), 1000));
+    assert!(!valid(&make(&["yes", "no"], 604801001), 1000));
+    for options in [
+        &["a"][..],
+        &["a", "b", "c", "d", "e"],
+        &["same", "same"],
+        &["", "no"],
+    ] {
+        assert!(!valid(&make(options, 2000), 1000));
+    }
+    assert!(valid(&make(&[&"é".repeat(40), "no"], 2000), 1000));
+    assert!(!valid(&make(&[&"é".repeat(41), "no"], 2000), 1000));
+    assert!(!valid(&make(&["yes", "no"], i64::MAX), i64::MAX - 1));
+    let mut malformed = make(&["yes", "no"], 2000);
+    malformed.base64_encoded_question = "/w==".into();
+    assert!(!valid(&malformed, 1000));
+    malformed = make(&["yes", "no"], 2000);
+    malformed.options_b64_csv = "eWVz,/w==".into();
+    assert!(!valid(&malformed, 1000));
+}
+
 #[tokio::test]
 async fn pure_kaposts_all_five_upstream_forms_use_original_sdk_and_own_reviewed_input() {
     use crate::kaposts::KaPostsAction;
@@ -1301,6 +1341,803 @@ mod shared_consumer {
             untouched,
             "failed adoption rolls back new metadata/schema, retaining legacy rows"
         );
+    }
+
+    fn at(mut value: Transaction, time: i64) -> Transaction {
+        value.block_time = Some(time);
+        value
+    }
+
+    fn signed_as(key: u8, action: &str, tail: &str, message: &str, id: u8) -> Transaction {
+        let bytes = [key; 32];
+        let pair = Keypair::from_seckey_slice(&Secp256k1::new(), &bytes).unwrap();
+        let signature = sign_message(
+            &PersonalMessage(message),
+            &bytes,
+            &SignMessageOptions { no_aux_rand: true },
+        )
+        .unwrap();
+        Transaction {
+            transaction_id: format!("{id:02x}").repeat(32),
+            payload: Some(hex::encode(format!(
+                "kchat:1:{action}:{}:{}:{tail}",
+                pair.x_only_public_key().0,
+                hex::encode(signature)
+            ))),
+            block_time: Some(1000),
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_third_edit_supplier_is_quiet_after_base_rebuild() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE social_shared.decoder_epochs SET since_ms=0 WHERE kind='kchat:1:extensions'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql("CREATE FUNCTION mention_probe_capture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF current_setting('kasanova.social_notify_allowed',true)='true' THEN INSERT INTO notification_probe(transaction_id) VALUES(NEW.content_id); END IF; RETURN NEW; END $$; CREATE TRIGGER probe_edit_mentions AFTER INSERT ON k_mentions FOR EACH ROW EXECUTE FUNCTION mention_probe_capture()")
+            .execute(&pool).await.unwrap();
+        let base = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 71), 1000);
+        capture(&pool, &base, 1, true, false).await;
+        consume(&consumer).await;
+        let alias = at(signed("kchat", "post", "aGk=:[]", "aGk=:[]", 72), 1000);
+        capture(&pool, &alias, 1, true, false).await;
+        let mut hold = pool.begin().await.unwrap();
+        sqlx::query("SELECT transaction_id FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1 FOR UPDATE").bind(hex::decode(&alias.transaction_id).unwrap()).fetch_one(&mut *hold).await.unwrap();
+        let alice = format!("02{}", "44".repeat(32));
+        let bob = format!("02{}", "55".repeat(32));
+        let carol = format!("02{}", "66".repeat(32));
+        let early_tail = format!("{}:b25l:[\"{alice}\",\"{bob}\"]", alias.transaction_id);
+        let early = at(
+            signed(
+                "kchat",
+                "edit",
+                &early_tail,
+                &format!("edit:{early_tail}"),
+                73,
+            ),
+            1100,
+        );
+        let head_tail = format!("{}:dHdv:[\"{carol}\"]", alias.transaction_id);
+        let head = at(
+            signed(
+                "kchat",
+                "edit",
+                &head_tail,
+                &format!("edit:{head_tail}"),
+                74,
+            ),
+            1400,
+        );
+        for value in [&early, &head] {
+            capture(&pool, value, 1, true, true).await;
+            consume(&consumer).await;
+        }
+        let current_tail = format!("{}:dGhyZWU=:[\"{alice}\"]", base.transaction_id);
+        let current = at(
+            signed(
+                "kchat",
+                "edit",
+                &current_tail,
+                &format!("edit:{current_tail}"),
+                75,
+            ),
+            1300,
+        );
+        capture(&pool, &current, 1, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "notification_probe").await, 2);
+        let consumed: bool = sqlx::query_scalar(
+            "SELECT notification_consumed FROM social_shared.actions WHERE transaction_id=$1",
+        )
+        .bind(hex::decode(&early.transaction_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !consumed,
+            "early supplier's other recipient has not been evaluated"
+        );
+        for revision in [2, 3] {
+            capture(&pool, &base, revision, true, false).await;
+            consume(&consumer).await;
+            assert_eq!(
+                count(&pool, "notification_probe").await,
+                3,
+                "Alice and Carol restore quietly; previously unevaluated Bob notifies once"
+            );
+        }
+        hold.rollback().await.unwrap();
+        ready_all(&pool).await;
+        drain(&consumer).await;
+        assert_eq!(count(&pool, "notification_probe").await, 3);
+        assert_eq!(count(&pool, "k_mentions").await, 3);
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_vote_delete_revoke_serializes_before_vote_acknowledgement() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let post = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 81), 1000);
+        capture(&pool, &post, 1, true, false).await;
+        consume(&consumer).await;
+        let deletion = at(
+            signed(
+                "kchat",
+                "delete",
+                &post.transaction_id,
+                &format!("delete:{}", post.transaction_id),
+                82,
+            ),
+            1200,
+        );
+        capture(&pool, &deletion, 1, true, false).await;
+        consume(&consumer).await;
+        let tail = format!("{}:upvote:{}", post.transaction_id, public_key());
+        let vote = at(signed("k", "vote", &tail, &tail, 83), 1300);
+        capture(&pool, &vote, 1, true, false).await;
+        let mut barrier = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(736124,98)")
+            .execute(&mut *barrier)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&format!("CREATE FUNCTION vote_ack_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.transaction_id=decode('{}','hex') AND NEW.notification_consumed AND NOT OLD.notification_consumed THEN PERFORM pg_advisory_xact_lock(736124,98); END IF; RETURN NEW; END $$; CREATE TRIGGER vote_ack_barrier BEFORE UPDATE ON social_shared.actions FOR EACH ROW EXECUTE FUNCTION vote_ack_barrier()", vote.transaction_id)).execute(&pool).await.unwrap();
+        let running = consumer.clone();
+        let task = tokio::spawn(async move { running.run_one().await });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=736124 AND objid=98 AND NOT granted)").fetch_one(&pool).await.unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "vote reached actual post-decision acknowledgement barrier"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        capture(&pool, &deletion, 2, false, false).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), consumer.run_one())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            count(&pool, "k_contents").await,
+            0,
+            "revoke must defer behind vote's content decision lock"
+        );
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM protocol_indexer.consumer_jobs WHERE transaction_id=$1 AND last_error='subject_revision_busy')").bind(hex::decode(&deletion.transaction_id).unwrap()).fetch_one(&pool).await.unwrap();
+        assert!(
+            retained,
+            "revoke retry survives until old vote acknowledges"
+        );
+        let unrelated = at(signed("k", "post", "b3RoZXI=:[]", "b3RoZXI=:[]", 84), 1500);
+        capture(&pool, &unrelated, 1, true, false).await;
+        consume(&consumer).await;
+        assert!(
+            native_content(&pool, &unrelated.transaction_id)
+                .await
+                .is_some()
+        );
+        barrier.commit().await.unwrap();
+        assert!(task.await.unwrap().unwrap());
+        ready_all(&pool).await;
+        drain(&consumer).await;
+        assert!(native_content(&pool, &post.transaction_id).await.is_some());
+        assert_eq!(
+            count(&pool, "k_votes").await,
+            1,
+            "revocation wakes the vote after its old job is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_long_edit_history_does_not_rewrite_prior_native_or_ledger_rows() {
+        use base64::Engine as _;
+        use sqlx::Row;
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let post = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 90), 1000);
+        capture(&pool, &post, 1, true, false).await;
+        consume(&consumer).await;
+        let original = native_content(&pool, &post.transaction_id).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE write_probe(relation text,operation text); CREATE FUNCTION write_probe_capture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO write_probe VALUES(TG_TABLE_NAME,TG_OP); RETURN COALESCE(NEW,OLD); END $$; CREATE TRIGGER content_write_probe AFTER INSERT OR UPDATE OR DELETE ON k_contents FOR EACH ROW EXECUTE FUNCTION write_probe_capture(); CREATE TRIGGER edit_write_probe AFTER INSERT OR UPDATE OR DELETE ON k_edits FOR EACH ROW EXECUTE FUNCTION write_probe_capture(); CREATE TRIGGER ledger_write_probe AFTER UPDATE ON social_shared.actions FOR EACH ROW EXECUTE FUNCTION write_probe_capture()")
+            .execute(&pool).await.unwrap();
+        for id in 100..180u8 {
+            let message = base64::engine::general_purpose::STANDARD.encode(format!("edit {id}"));
+            let tail = format!("{}:{message}:[]", post.transaction_id);
+            let edit = at(
+                signed("kchat", "edit", &tail, &format!("edit:{tail}"), id),
+                1000 + i64::from(id),
+            );
+            capture(&pool, &edit, 1, true, false).await;
+            consume(&consumer).await;
+        }
+        for (relation, operation, expected) in [
+            ("k_contents", "UPDATE", 80),
+            ("k_edits", "INSERT", 80),
+            ("actions", "UPDATE", 160),
+        ] {
+            let actual: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM write_probe WHERE relation=$1 AND operation=$2",
+            )
+            .bind(relation)
+            .bind(operation)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                actual, expected,
+                "{relation} {operation}: linear effective-state writes, no historical replay"
+            );
+        }
+        assert_eq!(count(&pool, "write_probe").await, 320);
+        assert_eq!(
+            native_content(&pool, &post.transaction_id).await.unwrap().0,
+            original.0
+        );
+        assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 0);
+        // Plan-only synthetic history: mixed unrelated, invalid and revoked
+        // rows. These are never submitted to a decoder or claimed chain facts.
+        sqlx::query("WITH ids AS MATERIALIZED (SELECT n,decode(md5('plan-a-'||n)||md5('plan-b-'||n),'hex') AS id FROM generate_series(1,10000) n), canonical AS (INSERT INTO protocol_indexer.canonical SELECT i.id,1,c.source_transaction,CASE WHEN i.n%3=0 THEN NULL ELSE c.accepting_block END FROM ids i CROSS JOIN protocol_indexer.canonical c WHERE c.transaction_id=$1 RETURNING transaction_id), actions AS (INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,state_action,source_payload,original_time,status,notification_consumed) SELECT c.transaction_id,1,'plan-only','kaposts','signed','',1100,'verified',true FROM canonical c RETURNING transaction_id), template AS (SELECT * FROM social_shared.extensions WHERE kind='edit' LIMIT 1) INSERT INTO social_shared.extensions SELECT i.id,1,1100,e.kind,e.sender,e.signature,e.target,e.message,e.mentions,e.options,e.closes_at,e.option_index,(i.n%3<>0),CASE WHEN i.n%5=0 THEN e.target_signature ELSE i.id END,e.target_author,e.target_kind,e.target_time FROM ids i JOIN actions a ON a.transaction_id=i.id CROSS JOIN template e")
+            .bind(hex::decode(&post.transaction_id).unwrap()).execute(&pool).await.unwrap();
+        sqlx::raw_sql("ANALYZE social_shared.extensions; ANALYZE social_shared.actions; ANALYZE protocol_indexer.canonical")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let signature: Vec<u8> = sqlx::query_scalar(
+            "SELECT signature FROM social_shared.content_keys WHERE transaction_id=$1",
+        )
+        .bind(hex::decode(&post.transaction_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let rows = sqlx::query(&format!(
+            "EXPLAIN (ANALYZE,BUFFERS) {}",
+            crate::kaposts_projection::edit_selection_sql()
+        ))
+        .bind(signature)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let plan = rows
+            .iter()
+            .map(|row| row.get::<String, _>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan.contains("social_shared_edit_effective"), "{plan}");
+        println!("KaPosts effective edit production query plan:\n{plan}");
+        assert!(
+            !plan.contains("Sort"),
+            "effective-head lookup must use ordered index: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_two_pending_edits_evaluate_effective_recipients_before_consumption() {
+        for newer_pending in [true, false] {
+            let pool = setup().await;
+            let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE social_shared.decoder_epochs SET since_ms=0 WHERE kind='kchat:1:extensions'").execute(&pool).await.unwrap();
+            sqlx::raw_sql("CREATE FUNCTION mention_probe_capture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF current_setting('kasanova.social_notify_allowed',true)='true' THEN INSERT INTO notification_probe(transaction_id) VALUES(NEW.content_id); END IF; RETURN NEW; END $$; CREATE TRIGGER probe_edit_mentions AFTER INSERT ON k_mentions FOR EACH ROW EXECUTE FUNCTION mention_probe_capture()")
+                .execute(&pool).await.unwrap();
+            let base = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 61), 1000);
+            capture(&pool, &base, 1, true, false).await;
+            consume(&consumer).await;
+            let alias = at(signed("kchat", "post", "aGk=:[]", "aGk=:[]", 62), 1000);
+            capture(&pool, &alias, 1, true, false).await;
+            let mut hold = pool.begin().await.unwrap();
+            sqlx::query("SELECT transaction_id FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1 FOR UPDATE").bind(hex::decode(&alias.transaction_id).unwrap()).fetch_one(&mut *hold).await.unwrap();
+            let alice = format!("02{}", "44".repeat(32));
+            let bob = format!("02{}", "55".repeat(32));
+            let pending_time = if newer_pending { 1300 } else { 1200 };
+            let current_time = if newer_pending { 1200 } else { 1300 };
+            let pending_tail = format!("{}:dHdv:[\"{bob}\"]", alias.transaction_id);
+            let pending = at(
+                signed(
+                    "kchat",
+                    "edit",
+                    &pending_tail,
+                    &format!("edit:{pending_tail}"),
+                    63,
+                ),
+                pending_time,
+            );
+            capture(&pool, &pending, 1, true, true).await;
+            consume(&consumer).await;
+            let consumed: bool = sqlx::query_scalar(
+                "SELECT notification_consumed FROM social_shared.actions WHERE transaction_id=$1",
+            )
+            .bind(hex::decode(&pending.transaction_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(!consumed);
+            let current_tail = format!("{}:b25l:[\"{alice}\"]", base.transaction_id);
+            let current = at(
+                signed(
+                    "kchat",
+                    "edit",
+                    &current_tail,
+                    &format!("edit:{current_tail}"),
+                    64,
+                ),
+                current_time,
+            );
+            capture(&pool, &current, 1, true, true).await;
+            consume(&consumer).await;
+            if newer_pending {
+                assert_eq!(
+                    count(&pool, "notification_probe").await,
+                    2,
+                    "effective pending edit's recipient is evaluated with its displayed body"
+                );
+            }
+            hold.rollback().await.unwrap();
+            ready_all(&pool).await;
+            drain(&consumer).await;
+            assert_eq!(
+                count(&pool, "notification_probe").await,
+                2,
+                "both delivery orders notify each added recipient once"
+            );
+            assert_eq!(count(&pool, "k_mentions").await, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_unknown_parent_intent_and_busy_rollback_are_narrow() {
+        {
+            let pool = setup().await;
+            let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+                .await
+                .unwrap();
+            let parent = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 71), 1000);
+            let deletion = at(
+                signed(
+                    "kchat",
+                    "delete",
+                    &parent.transaction_id,
+                    &format!("delete:{}", parent.transaction_id),
+                    72,
+                ),
+                1500,
+            );
+            capture(&pool, &deletion, 1, true, false).await;
+            consume(&consumer).await;
+            assert_eq!(
+                count(&pool, "kachat_delete_tombstones").await,
+                1,
+                "signed intent may persist before ownership can be checked"
+            );
+            for table in [
+                "k_contents",
+                "k_edits",
+                "k_deletes",
+                "k_votes",
+                "k_mentions",
+                "k_hashtags",
+                "k_polls",
+                "k_poll_votes",
+                "k_tips",
+            ] {
+                assert_eq!(count(&pool, table).await, 0, "{table}");
+            }
+            let other = at(signed("k", "post", "b3RoZXI=:[]", "b3RoZXI=:[]", 73), 1000);
+            capture(&pool, &other, 1, true, false).await;
+            consume(&consumer).await;
+            capture(&pool, &parent, 1, true, true).await;
+            consume(&consumer).await;
+            assert!(
+                native_content(&pool, &parent.transaction_id)
+                    .await
+                    .is_none()
+            );
+            assert!(native_content(&pool, &other.transaction_id).await.is_some());
+            assert_eq!(
+                count(&pool, "notification_probe").await,
+                0,
+                "deleted-before-post never inserts an eligible hidden post"
+            );
+        }
+        {
+            let pool = setup().await;
+            let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+                .await
+                .unwrap();
+            let parent = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 74), 1000);
+            capture(&pool, &parent, 1, true, false).await;
+            consume(&consumer).await;
+            let before = native_content(&pool, &parent.transaction_id).await;
+            let mut hold = pool.begin().await.unwrap();
+            sqlx::query("SELECT transaction_id FROM protocol_indexer.canonical WHERE transaction_id=$1 FOR UPDATE").bind(hex::decode(&parent.transaction_id).unwrap()).fetch_one(&mut *hold).await.unwrap();
+            let deletion = at(
+                signed(
+                    "kchat",
+                    "delete",
+                    &parent.transaction_id,
+                    &format!("delete:{}", parent.transaction_id),
+                    75,
+                ),
+                1500,
+            );
+            capture(&pool, &deletion, 1, true, false).await;
+            consume(&consumer).await;
+            assert_eq!(native_content(&pool, &parent.transaction_id).await, before);
+            for table in [
+                "k_edits",
+                "k_deletes",
+                "kachat_delete_tombstones",
+                "k_votes",
+                "k_mentions",
+                "k_hashtags",
+                "k_polls",
+                "k_poll_votes",
+                "k_tips",
+            ] {
+                assert_eq!(count(&pool, table).await, 0, "busy rolls back {table}");
+            }
+            let captured: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM social_shared.extensions WHERE transaction_id=$1",
+            )
+            .bind(hex::decode(&deletion.transaction_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(captured, 0);
+            hold.rollback().await.unwrap();
+            ready_all(&pool).await;
+            drain(&consumer).await;
+            assert!(
+                native_content(&pool, &parent.transaction_id)
+                    .await
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_author_window_poll_immutability_and_tip_target() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let post = signed_as(4, "post", "aGk=:[]", "aGk=:[]", 81);
+        capture(&pool, &post, 1, true, false).await;
+        consume(&consumer).await;
+        let original = native_content(&pool, &post.transaction_id).await;
+        let tail = format!("{}:bmV3:[]", post.transaction_id);
+        let forged = at(
+            signed("kchat", "edit", &tail, &format!("edit:{tail}"), 82),
+            1500,
+        );
+        capture(&pool, &forged, 1, true, false).await;
+        consume(&consumer).await;
+        let delete_forged = at(
+            signed(
+                "kchat",
+                "delete",
+                &post.transaction_id,
+                &format!("delete:{}", post.transaction_id),
+                83,
+            ),
+            1600,
+        );
+        capture(&pool, &delete_forged, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(native_content(&pool, &post.transaction_id).await, original);
+        assert_eq!(count(&pool, "k_edits").await, 0);
+        assert_eq!(count(&pool, "k_deletes").await, 0);
+        let valid = at(
+            signed_as(4, "edit", &tail, &format!("edit:{tail}"), 84),
+            1000 + 7_200_000,
+        );
+        capture(&pool, &valid, 1, true, false).await;
+        consume(&consumer).await;
+        let last = native_content(&pool, &post.transaction_id).await;
+        let late_tail = format!("{}:bGF0ZQ==:[]", post.transaction_id);
+        let late = at(
+            signed_as(4, "edit", &late_tail, &format!("edit:{late_tail}"), 85),
+            1000 + 7_200_001,
+        );
+        capture(&pool, &late, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(native_content(&pool, &post.transaction_id).await, last);
+        let poll_tail = "aGk=:eWVz,bm8=:2000:[]";
+        let poll = signed_as(4, "poll", poll_tail, &format!("poll:{poll_tail}"), 86);
+        capture(&pool, &poll, 1, true, false).await;
+        consume(&consumer).await;
+        let poll_before = native_content(&pool, &poll.transaction_id).await;
+        let edit_poll_tail = format!("{}:bmV3:[]", poll.transaction_id);
+        let edit_poll = at(
+            signed_as(
+                4,
+                "edit",
+                &edit_poll_tail,
+                &format!("edit:{edit_poll_tail}"),
+                87,
+            ),
+            1500,
+        );
+        capture(&pool, &edit_poll, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(
+            native_content(&pool, &poll.transaction_id).await,
+            poll_before
+        );
+        let tip = synthetic_tip_vector(88, &poll, 10_000_000, 0, None);
+        capture_vector(&pool, &tip, 1, true, false, true).await;
+        consume(&consumer).await;
+        assert_eq!(
+            count(&pool, "social_shared.current_tips").await,
+            1,
+            "poll author uses the same native SDK identity and real output rule"
+        );
+    }
+
+    async fn native_content(pool: &sqlx::PgPool, id: &str) -> Option<(i64, String, Option<i64>)> {
+        sqlx::query_as(
+            "SELECT id,base64_encoded_message,edited_at FROM k_contents WHERE transaction_id=$1",
+        )
+        .bind(hex::decode(id).unwrap())
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_edits_delete_withdraw_and_reorg_preserve_existing_content() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let post = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 31), 1000);
+        capture(&pool, &post, 1, true, false).await;
+        consume(&consumer).await;
+        let original = native_content(&pool, &post.transaction_id).await.unwrap();
+        let recipient = format!("02{}", "44".repeat(32));
+        let tail = format!("{}:bmV3:[\"{recipient}\"]", post.transaction_id);
+        let edit = at(
+            signed("kchat", "edit", &tail, &format!("edit:{tail}"), 32),
+            1500,
+        );
+        capture(&pool, &edit, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(
+            native_content(&pool, &post.transaction_id).await.unwrap(),
+            (original.0, "bmV3".into(), Some(1500))
+        );
+        assert_eq!(count(&pool, "k_edits").await, 1);
+        let mention: i64 = sqlx::query_scalar(
+            "SELECT id FROM k_mentions WHERE content_id=$1 AND mentioned_pubkey=$2",
+        )
+        .bind(hex::decode(&post.transaction_id).unwrap())
+        .bind(hex::decode(&recipient).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        capture(&pool, &edit, 2, false, false).await;
+        consume(&consumer).await;
+        assert_eq!(
+            native_content(&pool, &post.transaction_id).await.unwrap(),
+            original
+        );
+        assert_eq!(count(&pool, "k_edits").await, 0);
+        assert_eq!(count(&pool, "k_mentions").await, 0);
+        capture(&pool, &edit, 3, true, false).await;
+        consume(&consumer).await;
+        let restored: i64 = sqlx::query_scalar("SELECT id FROM k_mentions WHERE content_id=$1")
+            .bind(hex::decode(&post.transaction_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(restored, mention);
+        let quote_tail = format!("{}:aGk=:{}", post.transaction_id, public_key());
+        let quote = at(signed("k", "quote", &quote_tail, &quote_tail, 33), 1600);
+        capture(&pool, &quote, 1, true, false).await;
+        consume(&consumer).await;
+        let quote_original = native_content(&pool, &quote.transaction_id).await.unwrap();
+        let withdraw = at(
+            signed(
+                "kchat",
+                "unquote",
+                &post.transaction_id,
+                &post.transaction_id,
+                34,
+            ),
+            1700,
+        );
+        capture(&pool, &withdraw, 1, true, false).await;
+        consume(&consumer).await;
+        assert!(native_content(&pool, &quote.transaction_id).await.is_none());
+        capture(&pool, &withdraw, 2, false, false).await;
+        consume(&consumer).await;
+        assert_eq!(
+            native_content(&pool, &quote.transaction_id).await.unwrap(),
+            quote_original
+        );
+        let deletion = at(
+            signed(
+                "kchat",
+                "delete",
+                &post.transaction_id,
+                &format!("delete:{}", post.transaction_id),
+                35,
+            ),
+            1800,
+        );
+        capture(&pool, &deletion, 1, true, false).await;
+        consume(&consumer).await;
+        assert!(native_content(&pool, &post.transaction_id).await.is_none());
+        assert!(
+            native_content(&pool, &quote.transaction_id).await.is_some(),
+            "other authors' references survive delete"
+        );
+        assert_eq!(count(&pool, "k_deletes").await, 1);
+        capture(&pool, &deletion, 2, false, false).await;
+        ready_all(&pool).await;
+        drain(&consumer).await;
+        assert_eq!(
+            native_content(&pool, &post.transaction_id).await.unwrap(),
+            (original.0, "bmV3".into(), Some(1500))
+        );
+        let again: i64 = sqlx::query_scalar(
+            "SELECT id FROM k_mentions WHERE content_id=$1 AND mentioned_pubkey=$2",
+        )
+        .bind(hex::decode(&post.transaction_id).unwrap())
+        .bind(hex::decode(recipient).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(again, mention);
+        assert_eq!(count(&pool, "k_deletes").await, 0);
+        assert_eq!(count(&pool, "kachat_delete_tombstones").await, 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_poll_votes_validate_each_copy_and_recover_parent_reorg() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let tail = "aGk=:eWVz,bm8=:2000:[]";
+        let poll = at(
+            signed("kchat", "poll", tail, &format!("poll:{tail}"), 41),
+            1000,
+        );
+        capture(&pool, &poll, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_polls").await, 1);
+        let original = native_content(&pool, &poll.transaction_id).await.unwrap();
+        let vote_tail = format!("{}:0", poll.transaction_id);
+        let late = at(
+            signed(
+                "kchat",
+                "pollvote",
+                &vote_tail,
+                &format!("pollvote:{vote_tail}"),
+                42,
+            ),
+            2000,
+        );
+        capture(&pool, &late, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_poll_votes").await, 0);
+        let timely = at(
+            signed(
+                "kchat",
+                "pollvote",
+                &vote_tail,
+                &format!("pollvote:{vote_tail}"),
+                43,
+            ),
+            1500,
+        );
+        capture(&pool, &timely, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "social_shared.current_poll_votes").await, 1);
+        capture(&pool, &late, 2, true, false).await;
+        consume(&consumer).await;
+        let id: String =
+            sqlx::query_scalar("SELECT encode(transaction_id,'hex') FROM k_poll_votes")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            id, timely.transaction_id,
+            "late same-signature copy cannot displace valid vote"
+        );
+        capture(&pool, &poll, 2, false, false).await;
+        assert_eq!(
+            count(&pool, "social_shared.current_poll_votes").await,
+            0,
+            "read view hides parent revoke before consumer"
+        );
+        ready_all(&pool).await;
+        drain(&consumer).await;
+        assert_eq!(count(&pool, "k_poll_votes").await, 0);
+        capture(&pool, &poll, 3, true, false).await;
+        ready_all(&pool).await;
+        drain(&consumer).await;
+        assert_eq!(
+            native_content(&pool, &poll.transaction_id).await.unwrap(),
+            original
+        );
+        assert_eq!(count(&pool, "social_shared.current_poll_votes").await, 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_kaposts_invalid_poll_progresses_old_poll_quiet_live_poll_positive() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let bad_tail = "aGk=:eWVz:2000:[]";
+        let bad = at(
+            signed("kchat", "poll", bad_tail, &format!("poll:{bad_tail}"), 51),
+            1000,
+        );
+        let unrelated = at(signed("k", "post", "aGk=:[]", "aGk=:[]", 52), 1100);
+        capture(&pool, &bad, 1, true, true).await;
+        capture(&pool, &unrelated, 1, true, false).await;
+        consume(&consumer).await;
+        consume(&consumer).await;
+        assert!(native_content(&pool, &bad.transaction_id).await.is_none());
+        assert!(
+            native_content(&pool, &unrelated.transaction_id)
+                .await
+                .is_some()
+        );
+        let old_tail = "aGk=:eWVz,bm8=:2500:[]";
+        let old = at(
+            signed("kchat", "poll", old_tail, &format!("poll:{old_tail}"), 53),
+            1200,
+        );
+        capture(&pool, &old, 1, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(
+            count(&pool, "notification_probe").await,
+            0,
+            "decoder replay never turns old eligible raw poll into new push"
+        );
+        let epoch: i64 = sqlx::query_scalar(
+            "SELECT since_ms FROM social_shared.decoder_epochs WHERE kind='kchat:1:extensions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let live_tail = format!("aGk=:eWVz,bm8=:{}:[]", epoch + 10000);
+        let live = at(
+            signed(
+                "kchat",
+                "poll",
+                &live_tail,
+                &format!("poll:{live_tail}"),
+                54,
+            ),
+            epoch + 10,
+        );
+        capture(&pool, &live, 1, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(
+            count(&pool, "notification_probe").await,
+            1,
+            "positive control really captures eligible poll insert"
+        );
+        capture(&pool, &live, 2, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "notification_probe").await, 1);
     }
 
     async fn capture_vector(

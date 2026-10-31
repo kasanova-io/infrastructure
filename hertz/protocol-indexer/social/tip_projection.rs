@@ -1,6 +1,6 @@
 //! Current accepted tip facts, reusing the native SDK and upstream payment rule.
 use crate::database::Transaction;
-use crate::k_protocol::{KActionType, KProtocolProcessor, VerifiedTip};
+use crate::k_protocol::{KProtocolProcessor, VerifiedTip};
 use crate::shared_social::{capture_snapshot, restore_snapshot};
 use crate::tip_evidence::TipOutputEvidence;
 use anyhow::{Context, Result};
@@ -13,6 +13,7 @@ pub(crate) enum TipReconcile {
     Busy,
     Pending,
     ProofPending,
+    PendingMetadata,
 }
 
 async fn clear_subject(tx: &mut sqlx::Transaction<'_, Postgres>, subject: &str) -> Result<()> {
@@ -36,7 +37,7 @@ async fn prepare_payment(
     let post = hex::decode(&tip.tip().post_id)?;
     let mut valid = None;
     if accepted {
-        let target=sqlx::query("SELECT accepting_block,source_transaction::text AS body FROM protocol_indexer.canonical WHERE transaction_id=$1 FOR SHARE SKIP LOCKED")
+        let target=sqlx::query("SELECT c.accepting_block,c.source_transaction::text AS body,COALESCE(a.original_time,(c.source_transaction->>'block_time')::bigint) AS original_time FROM protocol_indexer.canonical c LEFT JOIN social_shared.actions a USING(transaction_id) WHERE c.transaction_id=$1 FOR SHARE OF c SKIP LOCKED")
             .bind(&post).fetch_optional(&mut **tx).await?;
         let Some(target) = target else {
             return Ok(TipReconcile::Pending);
@@ -52,33 +53,35 @@ async fn prepare_payment(
                     .as_str()
                     .and_then(|v| v.strip_prefix("\\x"))
                     .map(str::to_owned),
-                block_time: target_body["block_time"].as_i64(),
+                block_time: target.get("original_time"),
             };
-            if let Some(parent) = processor.verify_transaction(&transaction) {
-                let parent_fields = match parent.action() {
-                    KActionType::Post(v) => Some((&v.sender_pubkey, &v.sender_signature)),
-                    KActionType::Reply(v) => Some((&v.sender_pubkey, &v.sender_signature)),
-                    KActionType::Quote(v) => Some((&v.sender_pubkey, &v.sender_signature)),
-                    _ => None,
-                };
-                if let Some((author, signature)) = parent_fields {
-                    if hex::decode(author)? == hex::decode(&tip.tip().author_pubkey)? {
-                        let raw:Option<String>=sqlx::query_scalar("SELECT receipt::text FROM protocol_indexer.evidence WHERE transaction_id=$1")
+            if transaction.block_time.is_none()
+                && processor
+                    .verify_kaposts_transaction(&transaction)
+                    .is_some_and(|value| {
+                        matches!(value.action(), crate::kaposts::KaPostsAction::Poll(_))
+                    })
+            {
+                return Ok(TipReconcile::Pending);
+            }
+            if let Some((author, signature)) =
+                crate::kaposts_projection::content_identity(processor, &transaction)
+            {
+                if hex::decode(&author)? == hex::decode(&tip.tip().author_pubkey)? {
+                    let raw:Option<String>=sqlx::query_scalar("SELECT receipt::text FROM protocol_indexer.evidence WHERE transaction_id=$1")
                             .bind(current).fetch_optional(&mut **tx).await?;
-                        let Some(raw) = raw else {
-                            return Ok(TipReconcile::ProofPending);
-                        };
-                        let receipt: Value = serde_json::from_str(&raw)?;
-                        let Ok(proof) =
-                            TipOutputEvidence::checked(network, current, body, &receipt)
-                        else {
-                            return Ok(TipReconcile::ProofPending);
-                        };
-                        let amount = proof.payment_to_author(tip)?;
-                        if let Ok(amount) = i64::try_from(amount) {
-                            if amount > 0 {
-                                valid = Some((amount, hex::decode(signature)?));
-                            }
+                    let Some(raw) = raw else {
+                        return Ok(TipReconcile::ProofPending);
+                    };
+                    let receipt: Value = serde_json::from_str(&raw)?;
+                    let Ok(proof) = TipOutputEvidence::checked(network, current, body, &receipt)
+                    else {
+                        return Ok(TipReconcile::ProofPending);
+                    };
+                    let amount = proof.payment_to_author(tip)?;
+                    if let Ok(amount) = i64::try_from(amount) {
+                        if amount > 0 {
+                            valid = Some((amount, hex::decode(signature)?));
                         }
                     }
                 }
