@@ -5,8 +5,11 @@ CREATE TABLE IF NOT EXISTS protocol_indexer.config (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     network text NOT NULL,
     source_revision text NOT NULL,
+    journal_id uuid NOT NULL DEFAULT gen_random_uuid(),
     activated_at_ms bigint NOT NULL
 );
+-- Process/container restarts retain the epoch; recreating a journal resets it.
+ALTER TABLE protocol_indexer.config ADD COLUMN IF NOT EXISTS journal_id uuid NOT NULL DEFAULT gen_random_uuid();
 
 CREATE TABLE IF NOT EXISTS protocol_indexer.pending (
     transaction_id bytea PRIMARY KEY CHECK (octet_length(transaction_id) = 32),

@@ -189,3 +189,10 @@ models or counters. Historical receipt `notify_allowed` is always false. This
 collector cannot mutate a running service, broadcast a transaction or emit a push.
 The external receipt supplies missing versioned payment evidence for the next
 consumer integration stage; routing alone does not authorize a payment claim.
+
+The journal config also has a persistent UUID `journal_id`, created once during
+installation and retained across reinstalls and process/container restarts. Native
+consumer batches carry it as `source_id`. A recreated journal gets a different
+identity, so a receiver cannot silently treat reset revision numbers as old work.
+The additive upgrade preserves existing config activation and captured history;
+consumer migration must reconcile identity changes instead of overriding them.

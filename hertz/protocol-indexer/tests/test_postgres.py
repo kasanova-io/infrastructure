@@ -63,6 +63,22 @@ class PostgresTests(unittest.TestCase):
     def scalar(self, query, params=()):
         return next(iter(self.db.execute(query, params).fetchone().values()))
 
+    def test_journal_epoch_is_stable_across_install_and_not_a_process_identity(self):
+        before = self.scalar("SELECT journal_id FROM protocol_indexer.config")
+        self.assertIsNotNone(before)
+        install(self.db, "testnet-10", activated_at_ms=999999)
+        self.assertEqual(self.scalar("SELECT journal_id FROM protocol_indexer.config"), before)
+        self.assertEqual(self.scalar("SELECT activated_at_ms FROM protocol_indexer.config"), 1000)
+
+    def test_old_journal_config_gains_identity_without_rewriting_captured_history(self):
+        txid = self.ingest()
+        before = self.db.execute("SELECT * FROM protocol_indexer.canonical WHERE transaction_id=%s", (txid,)).fetchone()
+        self.db.execute("ALTER TABLE protocol_indexer.config DROP COLUMN journal_id")
+        install(self.db, "testnet-10", activated_at_ms=999999)
+        self.assertIsNotNone(self.scalar("SELECT journal_id FROM protocol_indexer.config"))
+        self.assertEqual(self.scalar("SELECT activated_at_ms FROM protocol_indexer.config"), 1000)
+        self.assertEqual(self.db.execute("SELECT * FROM protocol_indexer.canonical WHERE transaction_id=%s", (txid,)).fetchone(), before)
+
     def test_all_six_scan_and_backfill_adapters_preserve_exact_body(self):
         cases = {
             Family.KACHAT_POSTS: b"kchat:1:post:key:sig:4oGgaGk=:[]",
