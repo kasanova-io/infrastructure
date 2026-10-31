@@ -47,6 +47,184 @@ fn signed(root: &str, action: &str, tail: &str, message: &str, id: u8) -> Transa
 }
 
 #[tokio::test]
+async fn pure_kaposts_all_five_upstream_forms_use_original_sdk_and_own_reviewed_input() {
+    use crate::kaposts::KaPostsAction;
+    let (processor, pool) = processor();
+    let target = "ab".repeat(32);
+    let cases = [
+        ("unquote", target.clone(), target.clone()),
+        ("delete", target.clone(), format!("delete:{target}")),
+        (
+            "edit",
+            format!("{target}:aGk=:[]"),
+            format!("edit:{target}:aGk=:[]"),
+        ),
+        (
+            "poll",
+            "aGk=:eWVz,bm8=:604800000:[]".into(),
+            "poll:aGk=:eWVz,bm8=:604800000:[]".into(),
+        ),
+        (
+            "pollvote",
+            format!("{target}:1"),
+            format!("pollvote:{target}:1"),
+        ),
+    ];
+    for (kind, tail, message) in cases {
+        let mut input = signed("kchat", kind, &tail, &message, 11);
+        let original = input.payload.clone();
+        let verified = processor
+            .verify_kaposts_transaction(&input)
+            .expect("upstream signing form verifies with original Kaspa SDK");
+        assert_eq!(verified.action().signing_string().unwrap(), message);
+        assert!(matches!(
+            (kind, verified.action()),
+            ("unquote", KaPostsAction::Unquote(_))
+                | ("delete", KaPostsAction::Delete(_))
+                | ("edit", KaPostsAction::Edit(_))
+                | ("poll", KaPostsAction::Poll(_))
+                | ("pollvote", KaPostsAction::PollVote(_))
+        ));
+        input.payload = Some("00".into());
+        input.transaction_id = "ee".repeat(32);
+        input.block_time = Some(999);
+        assert_eq!(verified.transaction().payload, original);
+        assert_eq!(verified.transaction().transaction_id, "0b".repeat(32));
+        assert_eq!(verified.transaction().block_time, Some(12345));
+        let mut compressed = verified.transaction().clone();
+        let wire =
+            String::from_utf8(hex::decode(compressed.payload.as_ref().unwrap()).unwrap()).unwrap();
+        let mut fields: Vec<String> = wire.split(':').map(str::to_owned).collect();
+        fields[3] = format!("02{}", public_key());
+        compressed.payload = Some(hex::encode(fields.join(":")));
+        assert!(
+            processor.verify_kaposts_transaction(&compressed).is_some(),
+            "compressed signer {kind}"
+        );
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn pure_kaposts_cross_action_changed_content_and_foreign_root_never_verify() {
+    let (processor, pool) = processor();
+    let id = "ab".repeat(32);
+    let cases = [
+        ("unquote", id.clone(), format!("unquote:{id}")),
+        ("delete", id.clone(), id.clone()),
+        ("edit", format!("{id}:aGk=:[]"), format!("{id}:aGk=:[]")),
+        (
+            "poll",
+            "aGk=:eWVz,bm8=:100000:[]".into(),
+            "aGk=:eWVz,bm8=:100000:[]".into(),
+        ),
+        ("pollvote", format!("{id}:1"), format!("pollvote:{id}:0")),
+    ];
+    for (kind, tail, wrong_message) in cases {
+        assert!(
+            processor
+                .verify_kaposts_transaction(&signed("kchat", kind, &tail, &wrong_message, 12))
+                .is_none(),
+            "wrong signed form {kind}"
+        );
+    }
+    for prefix in ["k:1:", "kchat:2:", "ciph_msg:1:"] {
+        let mut value = signed("kchat", "delete", &id, &format!("delete:{id}"), 12);
+        let wire =
+            String::from_utf8(hex::decode(value.payload.as_ref().unwrap()).unwrap()).unwrap();
+        value.payload = Some(hex::encode(wire.replacen("kchat:1:", prefix, 1)));
+        assert!(processor.verify_kaposts_transaction(&value).is_none());
+    }
+    let mut value = signed("kchat", "delete", &id, &format!("delete:{id}"), 12);
+    let wire = String::from_utf8(hex::decode(value.payload.as_ref().unwrap()).unwrap()).unwrap();
+    value.payload = Some(hex::encode(wire.replacen(&id, &"cd".repeat(32), 1)));
+    assert!(processor.verify_kaposts_transaction(&value).is_none());
+    pool.close().await;
+}
+
+#[test]
+fn pure_kaposts_optional_mentions_and_numeric_fields_match_upstream_parser() {
+    use crate::kaposts::parse_parts;
+    for (wire, expected) in [
+        ("edit:key:sig:abcd:aGk=", "edit:abcd:aGk=:[]"),
+        ("edit:key:sig:abcd:aGk=:not-json", "edit:abcd:aGk=:[]"),
+        (
+            "edit:key:sig:abcd:aGk=:[\"02aa\"]",
+            "edit:abcd:aGk=:[\"02aa\"]",
+        ),
+        (
+            "poll:key:sig:aGk=:eWVz,bm8=:001000",
+            "poll:aGk=:eWVz,bm8=:1000:[]",
+        ),
+        ("pollvote:key:sig:abcd:-1", "pollvote:abcd:-1"),
+        ("unquote:key:sig:abcd:extra", "abcd"),
+    ] {
+        let parsed = parse_parts(&wire.split(':').collect::<Vec<_>>()).unwrap();
+        assert_eq!(parsed.signing_string().unwrap(), expected);
+    }
+    for wire in [
+        "",
+        "delete:key:sig",
+        "edit:key:sig:id",
+        "poll:key:sig:question:options:9223372036854775808",
+        "pollvote:key:sig:id:2147483648",
+        "tip:key:sig:id:author:00",
+    ] {
+        assert!(
+            parse_parts(&wire.split(':').collect::<Vec<_>>()).is_err(),
+            "{wire}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pure_kaposts_signed_bad_storage_hex_is_rejected_before_materialization() {
+    let (processor, pool) = processor();
+    for (kind, tail, message) in [
+        ("delete", "not-hex", "delete:not-hex"),
+        ("unquote", "not-hex", "not-hex"),
+        ("edit", "not-hex:aGk=:[]", "edit:not-hex:aGk=:[]"),
+        ("pollvote", "not-hex:0", "pollvote:not-hex:0"),
+        (
+            "poll",
+            "aGk=:eWVz,bm8=:10000:[\"not-hex\"]",
+            "poll:aGk=:eWVz,bm8=:10000:[\"not-hex\"]",
+        ),
+    ] {
+        assert!(
+            processor
+                .verify_kaposts_transaction(&signed("kchat", kind, tail, message, 13))
+                .is_none()
+        );
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn pure_kaposts_malformed_transaction_and_signer_cannot_create_verified_envelope() {
+    let (processor, pool) = processor();
+    let target = "ab".repeat(32);
+    let base = signed("kchat", "delete", &target, &format!("delete:{target}"), 14);
+    for bad_id in ["not-hex".to_string(), "ab".repeat(31)] {
+        let mut value = base.clone();
+        value.transaction_id = bad_id;
+        assert!(processor.verify_kaposts_transaction(&value).is_none());
+    }
+    for payload in [None, Some("ff".into()), Some("not-hex".into())] {
+        let mut value = base.clone();
+        value.payload = payload;
+        assert!(processor.verify_kaposts_transaction(&value).is_none());
+    }
+    let wire = String::from_utf8(hex::decode(base.payload.as_ref().unwrap()).unwrap()).unwrap();
+    let mut fields: Vec<String> = wire.split(':').map(str::to_owned).collect();
+    fields[3] = format!("04{}", public_key());
+    let mut value = base;
+    value.payload = Some(hex::encode(fields.join(":")));
+    assert!(processor.verify_kaposts_transaction(&value).is_none());
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn pure_both_protocol_roots_preserve_all_existing_signed_actions_without_filters() {
     let (processor, pool) = processor();
     let target = format!("02{}", public_key());
