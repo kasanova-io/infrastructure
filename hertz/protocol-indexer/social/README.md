@@ -15,9 +15,10 @@ The existing standalone listener retains its original K-social inputs. Opt-in
 shared mode uses the common canonical journal, with revision fencing, native
 state reconciliation, stable cursors and quiet replay described below. The
 private candidate passed a bounded upgrade on retained genuine post/tip history;
-the worker stopped cleanly afterwards. The current lock describes a newer,
-unactivated canonical-read candidate and separately retains that accepted
-runtime identity. Legacy history/API reconciliation and six-family real-chain
+the worker stopped cleanly afterwards. The current canonical-read candidate also
+passed bounded view installation and API/history preservation against that same
+source. Its test worker is stopped; the lock retains the earlier SDK acceptance
+identity separately. Broader history/API reconciliation and six-family real-chain
 acceptance precede public cutover. No Python replacement
 signature parser is used.
 
@@ -186,3 +187,13 @@ already run. API eligibility still requires current ledger/canonical revisions.
 Native concurrency tests retain selected-row contention and canonical-fence
 checks unchanged. The frozen candidate passes 47 unit and 39 actual PostgreSQL
 contracts; this is isolated SQL acceptance, not new genuine chain acceptance.
+
+
+Bounded source-connected read acceptance passed 24 checks on the retained private
+DEV source: normal native bind installed ten views, all native/outbox/config rows
+were unchanged, and the new reader returned identical JSON for eight existing
+API requests, including the original post and both cursor directions. One post
+and three current verified tip facts totaling 1.2 KAS remain visible. This bind did
+not reverify those historical payments; their prior SDK acceptance is retained.
+All temporary services stopped. No public route, genuine new DM/room/extension,
+recipient tip notification or displayed counter acceptance is implied.

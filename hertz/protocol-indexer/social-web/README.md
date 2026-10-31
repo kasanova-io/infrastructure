@@ -7,9 +7,10 @@ replace the full webserver with KaChat's application-specific services. The
 original ISC notice is retained in both images. Exact input/provenance/image
 hashes and the dependency lock are recorded in `SOURCE.lock`.
 
-This is an unactivated private candidate for the existing configured indexer
-origins, `dev-indexer.kasanova.io` and `indexer.kasanova.io`. It changes no Caddy,
-Public routing, deployment or rollout setting. Existing Social routes now use
+This private candidate passed bounded acceptance against the retained DEV source;
+all temporary readers are stopped. The configured origins remain
+`dev-indexer.kasanova.io` and `indexer.kasanova.io`. Public routing, Caddy,
+deployment and rollout settings are unchanged. Existing Social routes now use
 canonical-filtered native views in shared mode, preserving their SQL, DTOs and
 cursors. Source-connected history reconciliation and six-family acceptance
 remain required before those origins can switch to this candidate.
@@ -109,7 +110,19 @@ first candidate failed these gates and two native concurrency regressions; those
 results remain retained. Synthetic cost coverage does not establish production
 history/query-plan acceptance or live protocol delivery.
 
-Source-connected preservation and real DEV/TN10 protocol acceptance, historical
-Social/API reconciliation, representative-history query-plan acceptance and
-complete six-family cutover remain required. These tests do not establish public route
+Source-connected preservation passed 24 checks: the original post, native rows,
+three retained tip facts, notification state and journal ownership were preserved.
+Eight legacy/current API responses, including both original cursor directions,
+were byte-identical. This single retained-post sample does not prove broader
+public history reconciliation. The notification viewer is an unrelated read key;
+empty-equivalence is not recipient or tip-notification delivery acceptance.
+
+Supervised test containers use Docker init to forward signals. Native exits 0,
+readers 143 and wrong-source startup 1 were verified; the first unsupervised reader
+ignored SIGTERM at PID 1 and was forcibly killed 137. That failed run and its
+cleanup failure remain retained. Public deployment lifecycle is unverified.
+
+Genuine new DEV/TN10 protocol acceptance, broader historical Social/API
+reconciliation, representative-history query-plan acceptance and complete
+six-family cutover remain required. These tests do not establish public route
 activation, a visible tip counter, notification delivery or native-wallet QA.

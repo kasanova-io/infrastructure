@@ -23,7 +23,7 @@
   "archive_sha256": "461ff1086d9523a86217793ac36aa89be28eef86aaad1ea8ce5567ff5aa66c6a",
   "upstream_revision": "917863f49623aa6802e5ad4c0e246581470d93cb",
   "upstream_archive_sha256": "6a9cc67b54a65a44736b1d68b840b438e003eda08776be2b23e0eaa569a85d2f",
-  "activated": false,
+  "activated": true,
   "public_route_changes": false,
   "build_archive": "/private/tmp/kasanova-shared-web-1376458d343c.tar",
   "rust_image": "rust@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41",
@@ -41,7 +41,7 @@
   },
   "private_candidate": true,
   "genuine_room_acceptance": false,
-  "source_journal_connected": false,
+  "source_journal_connected": true,
   "public_cutover": false,
   "native_unit_tests_passed": 9,
   "postgres_contracts_passed": 20,
@@ -53,5 +53,12 @@
     "simple_view_buffers": 409,
     "actual_feed_buffers": 561,
     "simple_view_execution_ms": 4.361
-  }
+  },
+  "activation_scope": "bounded supervised private DEV existing API/history/cursor acceptance; reader stopped afterwards",
+  "webserver_running": false,
+  "source_bound_read_acceptance": true,
+  "retained_api_response_comparisons": 8,
+  "source_acceptance_checks_passed": 24,
+  "source_acceptance_evidence_sha256": "2e2b66cad9bd2b16af3310cb9f9dbf05569969e84a50c81f3f63912eb33f3ecc",
+  "public_deployment_lifecycle_accepted": false
 }
