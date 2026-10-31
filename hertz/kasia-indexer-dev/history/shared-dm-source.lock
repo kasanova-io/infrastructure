@@ -36,10 +36,24 @@
   "private_api_checks": 43,
   "source_journal_connected": true,
   "activated": true,
-  "activation_scope": "bounded private retained-tip delivery; corrected copy-only durability/API follow-up passed; both earlier verifier failures retained",
+  "activation_scope": "bounded private retained-tip and naturally captured Kasia delivery; all native/connector/copy services stopped; earlier failed verifiers retained",
   "native_worker_running": false,
   "retained_real_payments_verified": 3,
   "original_history_and_cursor_preserved": true,
   "genuine_new_dm_acceptance": false,
-  "public_cutover": false
+  "public_cutover": false,
+  "genuine_kasia_native_acceptance": true,
+  "genuine_kasia_native_records": 7,
+  "kasia_actions": {
+    "comm": 2,
+    "handshake": 2,
+    "self_stash": 3
+  },
+  "kasia_source_acceptance_checks": 44,
+  "kasia_api_route_record_checks": 9,
+  "durable_records_checked": 10,
+  "original_store_inventory_sha256": "3bc30fe0e0732b85e1336478e05d25ff5e3f5b323f11ab76300c3071185ae2d1",
+  "kasia_source_evidence_sha256": "4106cccaf5fe6b5a944bf2f14d3f8ae2280bd7de267d329e8962fd332105587d",
+  "genuine_new_dm_acceptance_scope": "canonical kchat:1:dm/inbox; classic Kasia comm acceptance recorded separately",
+  "plaintext_decryption_verified": false
 }

@@ -139,6 +139,22 @@ shared adapter and replay retained DM inventory before evaluating cutover.
 activation delivered three retained real tip jobs to the original native store;
 a corrected copy-only follow-up verified durable revisions, payment API data,
 old records and the original cursor. Both earlier verifier failures remain
-retained. Consumers stopped cleanly afterwards. No new DM transaction was sent;
-genuine DM chain/decryption, broader history migration and the complete
-six-family public cutover remain separate acceptance requirements.
+retained.
+
+A subsequent bounded run delivered seven naturally captured accepted Kasia rows:
+two `ciph_msg:1:comm`, two handshake and three self-stash. All 44 operational
+checks passed. A fresh immutable cold backup preceded original-store delivery;
+separate baseline/audit copies preserved the backup. Ten exact durable
+acknowledgements (seven new plus three inherited tips) were verified only on a
+fresh marked copy. Nine native REST route/record pairs matched payload bytes,
+source acceptance and sender/owner, with exclusive cursors. All nine previous
+exported key/value records and the original payment/cursor remained; final 25 exported key/value records survived
+restart on the copy. All nine owned services stopped with exit 0; the temporary egress
+bridge was removed. The first preflight's malformed diagnostic image literal
+failed closed before any resource or original-store open and remains FAIL.
+
+No new transaction was sent by that run, and no plaintext decryption or push
+routing was tested. The lock's `genuine_new_dm_acceptance` remains false for
+canonical `kchat:1:dm`/inbox, distinct from the accepted classic Kasia records.
+KaChat dm/inbox, room/extension transactions, external backfill, broader history
+migration and the complete six-family public cutover remain separate gates.

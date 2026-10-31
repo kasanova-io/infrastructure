@@ -41,8 +41,10 @@ the check. The paired native DM image/connector also processed the three retaine
 tip jobs against the original native store. A separate copy-only audit verified
 durable source/revisions/payload/acceptance, old API rows and the original cursor.
 Both earlier verifier failures remain retained; the corrected follow-up passed.
-Native workers are stopped. Genuine DM/room/extension acceptance is still pending.
-Public services remain on their existing contracts. Full six-family genuine
+Seven naturally captured Kasia records also passed actual original-store native
+delivery and copy-only durability/API checks: two comm, two handshake and three
+self-stash. All native workers are stopped. Canonical KaChat dm/inbox, room and
+extension acceptance remain pending. Public services keep their existing contracts. Full six-family genuine
 live/backfill acceptance and history/API reconciliation precede public cutover.
 Raw recognition is separate from SDK signature/payment verification and delivery.
 
@@ -299,7 +301,24 @@ remain unchanged across that follow-up. The original source run failed because
 the fixed-list `/export` API omits journal partitions; the first follow-up failed
 on a read-only inventory permission error. Neither run was relabeled PASS.
 The fresh corrected follow-up passed with all consumers stopped afterwards.
-No new protocol transaction or genuine DM acceptance is implied.
+That tip-only run did not establish new message delivery.
+
+Subsequently, seven naturally captured accepted Kasia records passed 44 operational
+checks through that same native/connector pair, with no new chain broadcast.
+The original store retained all nine previous exported key/value hashes and the
+original payment response/cursor; its final 25 exported key/value records survived close/cold-copy/
+restart. A typed diagnostic opened only a fresh marked copy and verified all ten
+durable acknowledgements (seven new Kasia plus three retained tips). Actual
+native REST responses matched ciphertext, source acceptance and sender/owner for
+nine route/record pairs, including both handshake directions and exclusive
+cursors. This proves native opaque-data delivery, not plaintext decryption or
+notification routing. The first run's malformed image literal failed before any
+resource/native open and remains FAIL; the corrected run passed. All nine owned
+services stopped with exit 0 and the exclusive egress bridge was removed. The original
+post-delivery inventory is now 3bc30fe0e073; older 2be62069 is the preserved cold
+backup, not the current original. Social SQL/outbox, canonical source and all
+protected services remain unchanged. KaChat dm/inbox, rooms/extensions, external
+backfill and broad public history/cutover acceptance remain required.
 
 `chats_worker.py` reuses the history HTTP/cache tooling. Missing evidence is
 retried per job without acknowledging it. Verified immutable receipts and headers
