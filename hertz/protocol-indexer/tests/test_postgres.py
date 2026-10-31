@@ -129,6 +129,18 @@ class PostgresTests(unittest.TestCase):
         self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.canonical"), 0)
         self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.pending"), 0)
 
+    def test_missing_body_does_not_delay_ready_protocol_transactions(self):
+        missing, ready = self.txid(), self.txid()
+        self.accept(missing)
+        self.body(ready, b"kchat:1:tip:a:b:c")
+        self.accept(ready)
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(self.scalar("SELECT transaction_id FROM protocol_indexer.canonical"), ready)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.pending"), 1)
+        self.body(missing, b"ciph_msg:1:comm:a:b")
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.canonical WHERE accepting_block IS NOT NULL"), 2)
+
     def test_acceptance_during_uncommitted_body_cannot_leave_only_observed_event(self):
         txid = self.txid()
         inserted, release = threading.Event(), threading.Event()

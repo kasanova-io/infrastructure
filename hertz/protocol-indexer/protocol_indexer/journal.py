@@ -56,8 +56,10 @@ def capture_one(conn):
     """
     with conn.transaction():
         pending = conn.execute("""
-            SELECT * FROM protocol_indexer.pending ORDER BY queued_at, transaction_id
-            LIMIT 1 FOR UPDATE SKIP LOCKED
+            SELECT p.* FROM protocol_indexer.pending p
+            WHERE EXISTS (SELECT 1 FROM public.transactions t WHERE t.transaction_id = p.transaction_id)
+               OR EXISTS (SELECT 1 FROM protocol_indexer.canonical c WHERE c.transaction_id = p.transaction_id)
+            ORDER BY p.queued_at, p.transaction_id LIMIT 1 FOR UPDATE OF p SKIP LOCKED
         """).fetchone()
         if pending is None:
             return False
