@@ -31,6 +31,8 @@ def validate_source(metrics, network, database_name, database_host, database_por
         raise ValueError("Simply pruning must be disabled; use owned retention")
     if args.get("ignoreSelfSends"):
         raise ValueError("self-sends must be retained for Social and encrypted messages")
+    if args.get("ignoreCheckpoint") is not None or args.get("initializeDb"):
+        raise ValueError("normal collector must resume its saved checkpoint without resetting the database")
     critical_tables = {"VirtualChainProcessing", "TransactionAcceptance", "TransactionProcessing",
                        "TransactionsTable", "TransactionsInputs", "TransactionsOutputs"}
     critical_fields = {"TxPayload", "TxBlockTime", "TxBlockHash", "TxInPreviousOutpoint",

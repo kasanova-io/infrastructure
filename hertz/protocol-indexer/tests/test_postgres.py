@@ -342,6 +342,7 @@ class SourceContractTests(unittest.TestCase):
             ("disable", ["TransactionsOutputs"]), ("excludeFields", ["TxOutAmount"]),
             ("excludeFields", ["TxPayload"]), ("ignoreSelfSends", ["kaspatest:fixture"]),
             ("pruning", {"pruneDb": "0 * * * *"}),
+            ("ignoreCheckpoint", "v"), ("initializeDb", True),
         ):
             metrics = copy.deepcopy(self.metrics())
             metrics["settings"]["cli_args"][field] = value
