@@ -13,9 +13,9 @@ COPY prepare_manifests.py /tmp/prepare_manifests.py
 RUN python3 /tmp/prepare_manifests.py
 COPY transactional-protocol.patch /tmp/transactional-protocol.patch
 RUN patch -p1 < /tmp/transactional-protocol.patch
-COPY shared_social.rs shared_social.sql notification_capture.sql notification_capture.sha256 /src/K-transaction-processor/src/
+COPY shared_social.rs shared_social.sql tips.rs tip_evidence.rs tip_projection.rs notification_capture.sql notification_capture.sha256 /src/K-transaction-processor/src/
 COPY transaction_tests.rs /src/K-transaction-processor/src/shared_protocol_tests.rs
-COPY real_kpost.json /src/K-transaction-processor/src/real_kpost.json
+COPY real_kpost.json real_tip.json release_tip.json /src/K-transaction-processor/src/
 ENV CARGO_BUILD_JOBS=3 RUSTFLAGS="-C link-args=-s"
 
 # Preparation only: extract/review this lock before the tested immutable build.

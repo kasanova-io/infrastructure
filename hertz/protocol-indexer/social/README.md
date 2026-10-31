@@ -84,3 +84,37 @@ history; it is not an automatic migration/cutover tool. Remaining KaChat
 extensions (including verified public tips/rooms), private DM/inbox upgrades,
 legacy reconciliation and six-family real acceptance still precede public
 activation. Existing public consumers keep running throughout private testing.
+
+
+## Verified tip facts
+
+The tip parser, signing string and version-0 Schnorr p2pk output sum reuse pinned
+KaChat source e2f462. Native Kaspa SDK verification produces an opaque owned tip;
+output evidence binds its ID/payload/network and every output amount/script to
+the canonical source. The fee-paying input may use a different key or script;
+it is not substituted for the signed tipper. Memo ciphertext stays opaque.
+
+Each accepted payment gets a positive, signed-BIGINT-range fact before signature
+deduplication. A zero-paying or unavailable earlier copy cannot poison a later
+verified paying copy. The exact accepted target is verified through the existing
+SDK and its author must match. Current/selected tip and target revisions are
+fenced without waiting behind a subject owner. Missing target/proof defers the
+job; SQL/storage failures stay operational. Native tip+mention writes reuse the
+upstream CTE in the same transaction, with the existing snapshot helpers.
+
+`social_shared.current_tips` exposes verified current facts for later API/count
+integration. It checks canonical acceptance/pending removals of the payment,
+literal target and visible native representative. Signature aliases across the
+two post roots share a representative without changing the original tip target.
+A parent revocation hides counts immediately and removes/requeues dependent
+facts during native reconciliation. Tip/mention IDs and original times survive
+reacceptance. Decoder epoch is persistent; newly supported history stays quiet.
+
+This component supplies storage, not the app counter or notification rollout.
+The existing capture function has no tip trigger, so zero real outbox rows do not
+prove tip-notification suppression; an append-only positive-control contract
+checks eligibility until Notifications is extended. Live output-proof harvesting
+and the remaining KaChat extensions/DM/history/API/counter/UI integration remain
+required before public cutover. The genuine private tip sample uses an already
+retained full receipt, without injecting a source/revision/evidence row or sending
+another transaction.

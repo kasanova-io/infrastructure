@@ -73,6 +73,66 @@ pub(crate) fn selection_sql(table: &str) -> String {
     }
 }
 
+pub(crate) async fn restore_snapshot(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    table: &str,
+    id: &[u8],
+    previous: Option<&str>,
+) -> Result<()> {
+    if let Some(previous) = previous {
+        let saved: Value = serde_json::from_str(previous)?;
+        if let Some(saved_id) = saved["main"]["id"].as_i64() {
+            sqlx::query(&format!("UPDATE {table} SET id=$1 WHERE transaction_id=$2"))
+                .bind(saved_id)
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+        }
+        for child in ["k_mentions", "k_hashtags"] {
+            if let Some(rows) = saved[child].as_array() {
+                sqlx::query(&format!("DELETE FROM {child} WHERE content_id=$1"))
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await?;
+                sqlx::query(&format!("INSERT INTO {child} SELECT * FROM json_populate_recordset(NULL::{child},$1::json)"))
+                    .bind(serde_json::to_string(rows)?).execute(&mut **tx).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn capture_snapshot(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    table: &str,
+    id: &[u8],
+) -> Result<()> {
+    let main: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT row_to_json(t)::text FROM {table} t WHERE transaction_id=$1"
+    ))
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(main) = main {
+        let mut saved = json!({"main":serde_json::from_str::<Value>(&main)?});
+        for child in ["k_mentions", "k_hashtags"] {
+            let rows: String = sqlx::query_scalar(&format!(
+                "SELECT COALESCE(json_agg(t),'[]'::json)::text FROM {child} t WHERE content_id=$1"
+            ))
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+            saved[child] = serde_json::from_str(&rows)?;
+        }
+        sqlx::query("UPDATE social_shared.actions SET snapshot=$1::jsonb WHERE transaction_id=$2")
+            .bind(saved.to_string())
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
 impl SharedSocial {
     pub async fn bind(pool: PgPool, network: &str, source_id: &str) -> Result<Self> {
         let mut tx = pool.begin().await?;
@@ -207,8 +267,17 @@ impl SharedSocial {
             block_time: Some(time),
         };
         let processor = KProtocolProcessor::new(self.pool.clone());
+        let verified_tip = processor.verify_tip_transaction(&transaction);
         let verified = processor.verify_transaction(&transaction);
-        let key = verified.as_ref().map(subject);
+        let key = verified_tip
+            .as_ref()
+            .map(|v| {
+                (
+                    format!("k_tips:{}", v.tip().sender_signature.to_lowercase()),
+                    "k_tips",
+                )
+            })
+            .or_else(|| verified.as_ref().map(subject));
         if let Some((key, _)) = &key {
             // All actions for one signature/author/relation serialize; unrelated
             // subjects can progress. Rebuild never locks other canonical rows.
@@ -237,16 +306,41 @@ impl SharedSocial {
         }
         sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,subject=EXCLUDED.subject,native_table=EXCLUDED.native_table,status=EXCLUDED.status,state_action=EXCLUDED.state_action")
             .bind(&id).bind(revision).bind(key.as_ref().map(|v|v.0.as_str())).bind(key.as_ref().map(|v|v.1))
-            .bind(payload).bind(time).bind(if verified.is_some() {"verified"} else {"unsupported_or_invalid"})
-             .bind(verified.as_ref().map(operation)).execute(&mut *tx).await?;
+            .bind(payload).bind(time).bind(if verified.is_some() || verified_tip.is_some() {"verified"} else {"unsupported_or_invalid"})
+             .bind(if verified_tip.is_some() {Some("signed")} else {verified.as_ref().map(operation)}).execute(&mut *tx).await?;
+        if let Some(tip) = &verified_tip {
+            sqlx::query("INSERT INTO social_shared.tip_targets(transaction_id,post_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
+                .bind(&id).bind(hex::decode(&tip.tip().post_id)?).execute(&mut *tx).await?;
+        }
         if let Some((key, table)) = key {
-            if !self.rebuild(&mut tx, &processor, &key, table, &id).await? {
+            use crate::tip_projection::TipReconcile;
+            let outcome = if let Some(tip) = &verified_tip {
+                crate::tip_projection::reconcile_tip(
+                    &mut tx,
+                    &processor,
+                    &self.network,
+                    &key,
+                    &id,
+                    revision,
+                    row.get::<Option<Vec<u8>>, _>("accepting_block").is_some(),
+                    &body,
+                    tip,
+                )
+                .await?
+            } else if self.rebuild(&mut tx, &processor, &key, table, &id).await? {
+                TipReconcile::Applied
+            } else {
+                TipReconcile::Busy
+            };
+            if outcome != TipReconcile::Applied {
                 tx.rollback().await?;
-                // A different worker/source writer owns the selected row.
-                // Never wait behind it while holding this subject/current row:
-                // that worker may itself be waiting for our subject lock.
-                sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '50 milliseconds',last_error='subject_revision_busy' WHERE consumer='native-social-v1' AND transaction_id=$1")
-                    .bind(&id).execute(&self.pool).await?;
+                let (interval, error) = if outcome == TipReconcile::Busy {
+                    ("50 milliseconds", "subject_revision_busy")
+                } else {
+                    ("5 seconds", "tip_evidence_or_target_pending")
+                };
+                sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+$2::interval,last_error=$3 WHERE consumer='native-social-v1' AND transaction_id=$1")
+                    .bind(&id).bind(interval).bind(error).execute(&self.pool).await?;
                 return Ok(true);
             }
         }
@@ -318,56 +412,23 @@ impl SharedSocial {
                 .execute(&mut **tx)
                 .await?;
             processor.apply_verified_in(tx, &verified).await?;
-            // Restore stable existing cursor IDs, including mention/hashtag
-            // cursors, after original native SQL recreated an accepted row.
-            let previous: Option<String> = row.get("snapshot");
-            if let Some(previous) = previous {
-                let saved: Value = serde_json::from_str(&previous)?;
-                if let Some(saved_id) = saved["main"]["id"].as_i64() {
-                    sqlx::query(&format!("UPDATE {table} SET id=$1 WHERE transaction_id=$2"))
-                        .bind(saved_id)
-                        .bind(&id)
-                        .execute(&mut **tx)
-                        .await?;
-                }
-                for child in ["k_mentions", "k_hashtags"] {
-                    if let Some(rows) = saved[child].as_array() {
-                        sqlx::query(&format!("DELETE FROM {child} WHERE content_id=$1"))
-                            .bind(&id)
-                            .execute(&mut **tx)
-                            .await?;
-                        sqlx::query(&format!("INSERT INTO {child} SELECT * FROM json_populate_recordset(NULL::{child},$1::json)"))
-                            .bind(serde_json::to_string(rows)?).execute(&mut **tx).await?;
-                    }
-                }
-            }
-            let main: Option<String> = sqlx::query_scalar(&format!(
-                "SELECT row_to_json(t)::text FROM {table} t WHERE transaction_id=$1"
-            ))
-            .bind(&id)
-            .fetch_optional(&mut **tx)
+            restore_snapshot(
+                tx,
+                table,
+                &id,
+                row.get::<Option<String>, _>("snapshot").as_deref(),
+            )
             .await?;
-            if let Some(main) = main {
-                let mut saved = json!({"main":serde_json::from_str::<Value>(&main)?});
-                for child in ["k_mentions", "k_hashtags"] {
-                    let rows: String = sqlx::query_scalar(&format!("SELECT COALESCE(json_agg(t),'[]'::json)::text FROM {child} t WHERE content_id=$1"))
-                        .bind(&id).fetch_one(&mut **tx).await?;
-                    saved[child] = serde_json::from_str(&rows)?;
-                }
-                sqlx::query(
-                    "UPDATE social_shared.actions SET snapshot=$1::jsonb WHERE transaction_id=$2",
-                )
-                .bind(saved.to_string())
-                .bind(&id)
-                .execute(&mut **tx)
-                .await?;
-            }
+            capture_snapshot(tx, table, &id).await?;
         }
         // Only selected/current opportunities were evaluated and their exact
         // canonical rows are fenced. Another pending subject action may accept
         // or revoke concurrently; never silently consume that unseen change.
         sqlx::query("UPDATE social_shared.actions a SET notification_consumed=true FROM protocol_indexer.canonical c WHERE a.transaction_id=ANY($1) AND NOT a.notification_consumed AND a.transaction_id=c.transaction_id AND c.accepting_block IS NOT NULL")
             .bind(&evaluated).execute(&mut **tx).await?;
+        if table == "k_contents" {
+            crate::tip_projection::content_reconciled(tx, key).await?;
+        }
         // Leave no accidental live eligibility for a later statement in caller.
         sqlx::query("SELECT set_config('kasanova.social_notify_allowed','false',true)")
             .execute(&mut **tx)

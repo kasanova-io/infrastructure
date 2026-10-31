@@ -14,6 +14,14 @@ fn processor() -> (KProtocolProcessor, sqlx::PgPool) {
     (KProtocolProcessor::new(pool.clone()), pool)
 }
 
+fn fixture_transaction(value: &serde_json::Value) -> Transaction {
+    Transaction {
+        transaction_id: value["transaction_id"].as_str().unwrap().into(),
+        payload: value["payload"].as_str().map(str::to_owned),
+        block_time: value["block_time"].as_i64(),
+    }
+}
+
 fn public_key() -> String {
     let pair = Keypair::from_seckey_slice(&Secp256k1::new(), &[3; 32]).unwrap();
     pair.x_only_public_key().0.to_string()
@@ -284,6 +292,8 @@ mod shared_consumer {
             CREATE SCHEMA protocol_indexer;
             CREATE TABLE protocol_indexer.config(singleton boolean PRIMARY KEY DEFAULT true, network text, journal_id uuid);
             CREATE TABLE protocol_indexer.canonical(transaction_id bytea PRIMARY KEY,revision bigint,source_transaction jsonb,accepting_block bytea);
+            CREATE TABLE protocol_indexer.pending(transaction_id bytea PRIMARY KEY,acceptance_changed boolean NOT NULL DEFAULT false,accepting_block bytea);
+            CREATE TABLE protocol_indexer.evidence(transaction_id bytea PRIMARY KEY REFERENCES protocol_indexer.canonical,receipt jsonb);
             CREATE TABLE protocol_indexer.consumer_jobs(consumer text,transaction_id bytea REFERENCES protocol_indexer.canonical,available_at timestamptz DEFAULT clock_timestamp(),last_error text,PRIMARY KEY(consumer,transaction_id));
             CREATE TABLE protocol_indexer.events(transaction_id bytea,revision bigint,notify_allowed boolean,PRIMARY KEY(transaction_id,revision));
             CREATE TABLE notification_probe(id bigserial PRIMARY KEY,transaction_id bytea NOT NULL);
@@ -1088,4 +1098,561 @@ mod shared_consumer {
         assert!(consumer.run_one().await.is_err());
         assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 1);
     }
+    #[tokio::test]
+    async fn postgres_tip_upgrade_refuses_unowned_nonempty_tip_history_without_writes() {
+        let pool = setup().await;
+        sqlx::raw_sql("CREATE TABLE k_tips(legacy_marker bigint); INSERT INTO k_tips VALUES(42)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+                .await
+                .is_err()
+        );
+        let marker: i64 = sqlx::query_scalar("SELECT legacy_marker FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(marker, 42);
+        let untouched: bool = sqlx::query_scalar("SELECT to_regnamespace('social_shared') IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            untouched,
+            "failed adoption rolls back new metadata/schema, retaining legacy rows"
+        );
+    }
+
+    async fn capture_vector(
+        pool: &sqlx::PgPool,
+        fixture: &serde_json::Value,
+        revision: i64,
+        accepted: bool,
+        notify: bool,
+        proof: bool,
+    ) -> Transaction {
+        let value = fixture_transaction(&fixture["transaction"]);
+        capture(pool, &value, revision, accepted, notify).await;
+        let id = hex::decode(&value.transaction_id).unwrap();
+        sqlx::query("UPDATE protocol_indexer.canonical SET source_transaction=$1::jsonb WHERE transaction_id=$2")
+            .bind(fixture["body"].to_string()).bind(&id).execute(pool).await.unwrap();
+        if proof {
+            sqlx::query("INSERT INTO protocol_indexer.evidence VALUES($1,$2::jsonb) ON CONFLICT(transaction_id) DO UPDATE SET receipt=EXCLUDED.receipt")
+                .bind(id).bind(fixture["receipt"].to_string()).execute(pool).await.unwrap();
+        }
+        value
+    }
+    fn old_tip_vector() -> serde_json::Value {
+        serde_json::from_str(include_str!("real_tip.json")).unwrap()
+    }
+    fn parent_vector() -> Transaction {
+        fixture_transaction(&serde_json::from_str(include_str!("real_kpost.json")).unwrap())
+    }
+    async fn ready_all(pool: &sqlx::PgPool) {
+        sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    async fn drain(consumer: &SharedSocial) {
+        for _ in 0..30 {
+            if !consumer.run_one().await.unwrap() {
+                return;
+            }
+        }
+        panic!("bounded queue drain did not settle");
+    }
+    async fn tip_probe(pool: &sqlx::PgPool) {
+        sqlx::query("UPDATE social_shared.decoder_epochs SET since_ms=0 WHERE kind='kchat:1:tip'")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TRIGGER probe_tip AFTER INSERT ON k_tips FOR EACH ROW EXECUTE FUNCTION notification_probe_capture()").execute(pool).await.unwrap();
+    }
+    async fn boot_tip_parent(pool: &sqlx::PgPool, consumer: &SharedSocial) {
+        capture(pool, &parent_vector(), 1, true, false).await;
+        consume(consumer).await;
+    }
+    fn synthetic_tip_vector(
+        id: u8,
+        target: &Transaction,
+        amount: u64,
+        version: u16,
+        author_override: Option<String>,
+    ) -> serde_json::Value {
+        use serde_json::json;
+        let raw =
+            String::from_utf8(hex::decode(target.payload.as_ref().unwrap()).unwrap()).unwrap();
+        let author = author_override.unwrap_or_else(|| raw.split(':').nth(3).unwrap().to_owned());
+        let tail = format!("{}:{author}:0011", target.transaction_id);
+        let value = signed("kchat", "tip", &tail, &format!("tip:{tail}"), id);
+        let script = hex::encode(crate::tips::p2pk_script(
+            &crate::tips::xonly_bytes(&author).unwrap(),
+        ));
+        let payload = value.payload.as_ref().unwrap();
+        json!({"transaction":{"transaction_id":value.transaction_id,"payload":payload,"block_time":value.block_time},
+          "body":{"transaction_id":format!("\\x{}",value.transaction_id),"payload":format!("\\x{payload}"),"block_time":value.block_time,"outputs":[{"index":0,"amount":amount,"script_public_key":format!("\\x{script}")}]},
+          "receipt":{"schema_version":1,"network":"testnet-10","transaction_id":value.transaction_id,"payload":payload,
+            "archive_transaction":{"transaction_id":value.transaction_id,"payload":payload,"outputs":[{"index":0,"amount":amount,"script_public_key":script}]},
+            "rpc_transaction":{"verboseData":{"transactionId":value.transaction_id},"payload":payload,"outputs":[{"amount":amount,"scriptPublicKey":{"version":version,"scriptPublicKey":script}}]}}})
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_missing_parent_or_proof_retains_job_and_other_posts_progress() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let fixture = old_tip_vector();
+        capture_vector(&pool, &fixture, 1, true, false, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 0);
+        assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 1);
+        assert!(
+            !consumer.run_one().await.unwrap(),
+            "no missing-data busy loop"
+        );
+        boot_tip_parent(&pool, &consumer).await;
+        ready_all(&pool).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 0);
+        capture_vector(&pool, &fixture, 2, true, false, true).await;
+        ready_all(&pool).await;
+        drain(&consumer).await;
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 1);
+        assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_reorgs_parent_reorgs_restore_cursors_and_do_not_repeat_eligibility() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        tip_probe(&pool).await;
+        boot_tip_parent(&pool, &consumer).await;
+        let fixture = old_tip_vector();
+        let tip = capture_vector(&pool, &fixture, 1, false, false, true).await;
+        consume(&consumer).await;
+        capture_vector(&pool, &fixture, 2, true, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 1);
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 1);
+        assert_eq!(count(&pool, "notification_probe").await, 1);
+        let original_id: i64 = sqlx::query_scalar("SELECT id FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let original_mention: i64 =
+            sqlx::query_scalar("SELECT id FROM k_mentions WHERE content_type='tip'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let amount: i64 = sqlx::query_scalar("SELECT amount FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(amount > 0);
+        capture_vector(&pool, &fixture, 3, false, false, true).await;
+        assert_eq!(
+            count(&pool, "social_shared.current_tips").await,
+            0,
+            "current view hides revocation before native queue drains"
+        );
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 0);
+        capture_vector(&pool, &fixture, 4, true, true, true).await;
+        consume(&consumer).await;
+        let restored: i64 = sqlx::query_scalar("SELECT id FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(restored, original_id);
+        let parent = parent_vector();
+        capture(&pool, &parent, 2, false, false).await;
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 0);
+        drain(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 0);
+        assert_eq!(count(&pool, "k_mentions").await, 0);
+        capture(&pool, &parent, 3, true, false).await;
+        drain(&consumer).await;
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 1);
+        let restored: i64 = sqlx::query_scalar("SELECT id FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(restored, original_id);
+        let mention: i64 = sqlx::query_scalar("SELECT id FROM k_mentions WHERE content_type='tip'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mention, original_mention);
+        assert_eq!(
+            count(&pool, "notification_probe").await,
+            1,
+            "append-only trigger probe detects every repeated eligible attempt"
+        );
+        let stored: String = sqlx::query_scalar("SELECT encode(transaction_id,'hex') FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, tip.transaction_id);
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_invalid_zero_version_or_author_cannot_poison_a_valid_signature_copy() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        boot_tip_parent(&pool, &consumer).await;
+        let parent = parent_vector();
+        let bad = synthetic_tip_vector(10, &parent, 7, 1, None);
+        capture_vector(&pool, &bad, 1, true, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 0);
+        let good = synthetic_tip_vector(11, &parent, 10_000_000, 0, None);
+        capture_vector(&pool, &good, 1, true, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 1);
+        let winner: String = sqlx::query_scalar("SELECT encode(transaction_id,'hex') FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(winner, "0b".repeat(32));
+        let key = Keypair::from_seckey_slice(&Secp256k1::new(), &[4; 32])
+            .unwrap()
+            .x_only_public_key()
+            .0
+            .to_string();
+        let mismatch = synthetic_tip_vector(12, &parent, 20_000_000, 0, Some(format!("02{key}")));
+        capture_vector(&pool, &mismatch, 1, true, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(
+            count(&pool, "k_tips").await,
+            1,
+            "payment to a different claimed author is not a tip to this post"
+        );
+        assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_signature_duplicates_keep_rep_and_fall_back_to_verified_paying_copy() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        tip_probe(&pool).await;
+        boot_tip_parent(&pool, &consumer).await;
+        let parent = parent_vector();
+        let a = synthetic_tip_vector(10, &parent, 10_000_000, 0, None);
+        let b = synthetic_tip_vector(11, &parent, 50_000_000, 0, None);
+        capture_vector(&pool, &a, 1, true, true, true).await;
+        consume(&consumer).await;
+        let id: i64 = sqlx::query_scalar("SELECT id FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        capture_vector(&pool, &b, 1, true, true, true).await;
+        consume(&consumer).await;
+        let amount: i64 = sqlx::query_scalar("SELECT amount FROM social_shared.current_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(amount, 10_000_000);
+        assert_eq!(count(&pool, "k_tips").await, 1);
+        capture_vector(&pool, &a, 2, false, false, true).await;
+        consume(&consumer).await;
+        let amount: i64 = sqlx::query_scalar("SELECT amount FROM social_shared.current_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(amount, 50_000_000);
+        capture_vector(&pool, &a, 3, true, true, true).await;
+        consume(&consumer).await;
+        let amount: i64 = sqlx::query_scalar("SELECT amount FROM social_shared.current_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(amount, 50_000_000);
+        capture_vector(&pool, &b, 2, false, false, true).await;
+        consume(&consumer).await;
+        let restored: i64 = sqlx::query_scalar("SELECT id FROM k_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(restored, id);
+        assert_eq!(count(&pool, "notification_probe").await, 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_targets_a_valid_cross_root_signature_alias_and_pending_revocation_hides_count()
+     {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        boot_tip_parent(&pool, &consumer).await;
+        let parent = parent_vector();
+        let mut alias = parent.clone();
+        alias.transaction_id = "21".repeat(32);
+        let raw = String::from_utf8(hex::decode(alias.payload.as_ref().unwrap()).unwrap()).unwrap();
+        alias.payload = Some(hex::encode(raw.replacen("k:1:", "kchat:1:", 1)));
+        capture(&pool, &alias, 1, true, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_contents").await, 1);
+        let tip = synthetic_tip_vector(22, &alias, 10_000_000, 0, None);
+        let transaction = capture_vector(&pool, &tip, 1, true, false, true).await;
+        consume(&consumer).await;
+        let visible: String = sqlx::query_scalar(
+            "SELECT encode(content_transaction_id,'hex') FROM social_shared.current_tips",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(visible, parent.transaction_id);
+        sqlx::query("INSERT INTO protocol_indexer.pending(transaction_id,acceptance_changed,accepting_block) VALUES($1,true,NULL)")
+            .bind(hex::decode(&transaction.transaction_id).unwrap()).execute(&pool).await.unwrap();
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 0);
+        sqlx::query("DELETE FROM protocol_indexer.pending")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 1);
+        capture(&pool, &parent, 2, false, false).await;
+        assert_eq!(
+            count(&pool, "social_shared.current_tips").await,
+            0,
+            "revoked native representative cannot remain a current visible target"
+        );
+        drain(&consumer).await;
+        let visible: String = sqlx::query_scalar(
+            "SELECT encode(content_transaction_id,'hex') FROM social_shared.current_tips",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            visible, alias.transaction_id,
+            "accepted alias becomes current representative after reconciliation"
+        );
+        capture(&pool, &parent, 3, true, false).await;
+        drain(&consumer).await;
+        capture(&pool, &alias, 2, false, false).await;
+        assert_eq!(count(&pool, "social_shared.current_tips").await, 0);
+        drain(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_decoder_epoch_and_schema_restart_do_not_push_old_supported_later_history()
+    {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        boot_tip_parent(&pool, &consumer).await;
+        sqlx::raw_sql("CREATE TRIGGER probe_tip AFTER INSERT ON k_tips FOR EACH ROW EXECUTE FUNCTION notification_probe_capture()").execute(&pool).await.unwrap();
+        let epoch: i64 = sqlx::query_scalar(
+            "SELECT since_ms FROM social_shared.decoder_epochs WHERE kind='kchat:1:tip'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let tip = old_tip_vector();
+        capture_vector(&pool, &tip, 1, true, true, true).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "k_tips").await, 1);
+        assert_eq!(
+            count(&pool, "notification_probe").await,
+            0,
+            "older decoded history is quiet even if old source event was eligible"
+        );
+        let again = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        assert!(!again.run_one().await.unwrap());
+        let after: i64 = sqlx::query_scalar(
+            "SELECT since_ms FROM social_shared.decoder_epochs WHERE kind='kchat:1:tip'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(epoch, after);
+    }
+}
+
+#[tokio::test]
+async fn pure_tip_signature_and_output_binding_follow_upstream_without_fee_input_aliases() {
+    use crate::tip_evidence::TipOutputEvidence;
+    use crate::tips::{p2pk_script, xonly_bytes};
+    use serde_json::json;
+    let (processor, _) = processor();
+    let author = Keypair::from_seckey_slice(&Secp256k1::new(), &[4; 32])
+        .unwrap()
+        .x_only_public_key()
+        .0
+        .to_string();
+    let author = format!("02{author}");
+    let post = "ab".repeat(32);
+    let tail = format!("{post}:{author}:0011");
+    let message = format!("tip:{tail}");
+    let transaction = signed("kchat", "tip", &tail, &message, 7);
+    let verified = processor.verify_tip_transaction(&transaction).unwrap();
+    let script = hex::encode(p2pk_script(&xonly_bytes(&author).unwrap()));
+    let sender_script = hex::encode(p2pk_script(&xonly_bytes(&public_key()).unwrap()));
+    let outputs = vec![
+        (7u64, 0u16, script.clone()),
+        (11, 0, script.clone()),
+        (55, 1, script),
+        (999, 0, sender_script),
+    ];
+    let canonical: Vec<_> = outputs
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _, s))| json!({"index":i,"amount":n,"script_public_key":format!("\\x{s}")}))
+        .collect();
+    let detail: Vec<_> = outputs
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _, s))| json!({"index":i,"amount":n.to_string(),"script_public_key":s}))
+        .collect();
+    let rpc:Vec<_>=outputs.iter().map(|(n,v,s)|json!({"amount":n.to_string(),"scriptPublicKey":{"version":v,"scriptPublicKey":s}})).collect();
+    let payload = transaction.payload.as_ref().unwrap();
+    let body = json!({"transaction_id":format!("\\x{}",transaction.transaction_id),"payload":format!("\\x{payload}"),"outputs":canonical});
+    let receipt = json!({"schema_version":1,"network":"testnet-10","transaction_id":transaction.transaction_id,"payload":payload,
+        "archive_transaction":{"transaction_id":transaction.transaction_id,"payload":payload,"outputs":detail},
+        "rpc_transaction":{"verboseData":{"transactionId":transaction.transaction_id},"payload":payload,"outputs":rpc,"inputs":[{"arbitrary_funding_key":"separate fee payer"}]}});
+    let id = hex::decode(&transaction.transaction_id).unwrap();
+    let proof = TipOutputEvidence::checked("testnet-10", &id, &body, &receipt).unwrap();
+    assert_eq!(
+        proof.payment_to_author(&verified).unwrap(),
+        18,
+        "sum all matching version0 author outputs; exclude change/nonzero versions"
+    );
+    let mut other = transaction.clone();
+    other.transaction_id = "08".repeat(32);
+    assert!(
+        proof
+            .payment_to_author(&processor.verify_tip_transaction(&other).unwrap())
+            .is_err()
+    );
+    // Owned proof and verified envelope cannot change under caller mutations.
+    let mut changed = receipt.clone();
+    changed["rpc_transaction"]["outputs"][0]["amount"] = json!(999);
+    assert!(TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err());
+    assert_eq!(proof.payment_to_author(&verified).unwrap(), 18);
+    for path in ["network", "transaction_id", "payload"] {
+        let mut changed = receipt.clone();
+        changed[path] = json!("wrong");
+        assert!(
+            TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err(),
+            "{path}"
+        );
+    }
+    for value in [json!(true), json!(-1), json!(65536), json!("1.5")] {
+        let mut changed = receipt.clone();
+        changed["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"] = value;
+        assert!(TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err());
+    }
+    for value in [
+        json!(true),
+        json!(-1),
+        json!("18446744073709551616"),
+        json!("1.5"),
+    ] {
+        let mut changed = receipt.clone();
+        changed["rpc_transaction"]["outputs"][0]["amount"] = value;
+        assert!(TipOutputEvidence::checked("testnet-10", &id, &body, &changed).is_err());
+    }
+    let mut changed = body.clone();
+    changed["outputs"][1]["index"] = json!(0);
+    assert!(TipOutputEvidence::checked("testnet-10", &id, &changed, &receipt).is_err());
+    let raw = String::from_utf8(hex::decode(payload).unwrap()).unwrap();
+    for root in ["k:1:", "kchat:2:", "ciph_msg:1:"] {
+        let mut changed = transaction.clone();
+        changed.payload = Some(hex::encode(raw.replacen("kchat:1:", root, 1)));
+        assert!(processor.verify_tip_transaction(&changed).is_none());
+    }
+    for author in [
+        public_key(),
+        format!("03{}", public_key()),
+        format!("04{}", public_key()),
+    ] {
+        let tail = format!("{post}:{author}:0011");
+        let message = format!("tip:{tail}");
+        assert!(
+            processor
+                .verify_tip_transaction(&signed("kchat", "tip", &tail, &message, 9))
+                .is_none(),
+            "self/invalid alias"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pure_genuine_archived_tip_has_valid_signature_and_matching_author_payment() {
+    use crate::tip_evidence::TipOutputEvidence;
+    let (processor, _) = processor();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("real_tip.json")).unwrap();
+    let transaction: Transaction = fixture_transaction(&fixture["transaction"]);
+    let verified = processor
+        .verify_tip_transaction(&transaction)
+        .expect("actual archived kchat tip signature verifies with original Kaspa SDK");
+    let proof = TipOutputEvidence::checked(
+        "testnet-10",
+        &hex::decode(&transaction.transaction_id).unwrap(),
+        &fixture["body"],
+        &fixture["receipt"],
+    )
+    .unwrap();
+    assert_eq!(
+        verified.tip().post_id,
+        "f3941dc64ae4db441c746f7fd6bd7d6d44436ef84cf61c02c6516e6d4f8f4b61"
+    );
+    assert!(proof.payment_to_author(&verified).unwrap() > 0);
+}
+
+#[tokio::test]
+async fn pure_release_d4d85e_tip_protocol_schnorr_post_author_and_exact_payment() {
+    use crate::tip_evidence::TipOutputEvidence;
+    let (processor, _) = processor();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("release_tip.json")).unwrap();
+    let transaction: Transaction = fixture_transaction(&fixture["transaction"]);
+    assert_eq!(
+        transaction.transaction_id,
+        "d4d85e13185251e60e5dbb36ccbc2f029ffb2c5e23589a0ef8bd7bcd197df9f3"
+    );
+    let verified = processor
+        .verify_tip_transaction(&transaction)
+        .expect("published native tip's original Kaspa PersonalMessage/Schnorr verifies");
+    let post: Transaction =
+        fixture_transaction(&serde_json::from_str(include_str!("real_kpost.json")).unwrap());
+    let parent = processor
+        .verify_transaction(&post)
+        .expect("genuine referenced post signature verifies");
+    let KActionType::Post(post) = parent.action() else {
+        panic!("actual referenced content is post")
+    };
+    assert_eq!(verified.tip().post_id, parent.transaction().transaction_id);
+    assert_eq!(verified.tip().author_pubkey, post.sender_pubkey);
+    assert_eq!(
+        verified.tip().sender_pubkey,
+        "03b736ec7820b077f71daee7dae1b62d910983f25b11ff7fb87a79caa2e37d264f"
+    );
+    let proof = TipOutputEvidence::checked(
+        "testnet-10",
+        &hex::decode(&transaction.transaction_id).unwrap(),
+        &fixture["body"],
+        &fixture["receipt"],
+    )
+    .unwrap();
+    assert_eq!(
+        proof.payment_to_author(&verified).unwrap(),
+        10_000_000,
+        ".1TESTKAS to the exact signed target author"
+    );
 }

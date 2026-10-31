@@ -1,6 +1,6 @@
 --- a/K-transaction-processor/src/k_protocol.rs
 +++ b/K-transaction-processor/src/k_protocol.rs
-@@ -152,6 +152,21 @@
+@@ -152,7 +152,45 @@
      db_pool: DbPool,
  }
  
@@ -19,10 +19,34 @@
 +    pub fn action(&self) -> &KActionType { &self.action }
 +}
 +
++/// Signature-verified KaChat tip; payment/current-target checks remain separate.
++#[derive(Debug, Clone)]
++pub struct VerifiedTip {
++    transaction: Transaction,
++    tip: crate::tips::KTip,
++}
++impl VerifiedTip {
++    pub fn transaction(&self) -> &Transaction { &self.transaction }
++    pub fn tip(&self) -> &crate::tips::KTip { &self.tip }
++}
++
  impl KProtocolProcessor {
++    pub fn verify_tip_transaction(&self, transaction: &Transaction) -> Option<VerifiedTip> {
++        if hex::decode(&transaction.transaction_id).ok()?.len()!=32 { return None; }
++        let bytes=hex::decode(transaction.payload.as_ref()?).ok()?;
++        let payload=std::str::from_utf8(&bytes).ok()?.strip_prefix("kchat:1:")?;
++        let tip=crate::tips::parse_tip_parts(&payload.split(':').collect::<Vec<_>>()).ok()?;
++        let sender=crate::tips::xonly_bytes(&tip.sender_pubkey)?;
++        let author=crate::tips::xonly_bytes(&tip.author_pubkey)?;
++        if sender==author || !self.verify_kaspa_signature(&tip.signing_string(),&tip.sender_signature,&tip.sender_pubkey) {return None;}
++        Some(VerifiedTip {transaction:transaction.clone(),tip})
++    }
++
++
      pub fn new(db_pool: DbPool) -> Self {
          Self { db_pool }
-@@ -185,6 +200,9 @@
+     }
+@@ -185,6 +223,9 @@
          let public_key_bytes = match hex::decode(public_key_hex) {
              Ok(bytes) => {
                  if bytes.len() == 33 {
@@ -32,7 +56,7 @@
                      // Remove the compression prefix byte for x-only key (Schnorr uses x-only keys)
                      bytes[1..].to_vec()
                  } else if bytes.len() == 32 {
-@@ -231,12 +249,11 @@
+@@ -231,12 +272,11 @@
  
      /// Parse K protocol payload and extract action type
      pub fn parse_k_protocol_payload(&self, payload: &str) -> Result<KActionType> {
@@ -50,7 +74,7 @@
  
          // Split by colons to get the components
          let parts: Vec<&str> = k_payload.split(':').collect();
-@@ -469,118 +486,103 @@
+@@ -469,118 +509,103 @@
          }
      }
  
@@ -255,7 +279,7 @@
  
          // Extract block time
          let block_time = transaction.block_time.unwrap_or(0);
-@@ -612,7 +614,7 @@
+@@ -612,7 +637,7 @@
                  .bind(&sender_pubkey_bytes)
                  .bind(&sender_signature_bytes)
                  .bind(&k_post.base64_encoded_message)
@@ -264,7 +288,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -646,7 +648,7 @@
+@@ -646,7 +671,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_post.base64_encoded_message)
                  .bind(&hashtags)
@@ -273,7 +297,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -695,7 +697,7 @@
+@@ -695,7 +720,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_post.base64_encoded_message)
                  .bind(&mentioned_pubkeys_bytes)
@@ -282,7 +306,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -736,7 +738,7 @@
+@@ -736,7 +761,7 @@
                  .bind(&k_post.base64_encoded_message)
                  .bind(&mentioned_pubkeys_bytes)
                  .bind(&hashtags)
@@ -291,7 +315,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -758,30 +760,14 @@
+@@ -758,30 +783,14 @@
      }
  
      /// Save K reply to database
@@ -324,7 +348,7 @@
  
          // Store values we need for logging before they're moved
          let post_id_for_log = k_reply.post_id.clone();
-@@ -818,7 +804,7 @@
+@@ -818,7 +827,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_reply.base64_encoded_message)
                  .bind(&post_id_bytes)
@@ -333,7 +357,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -853,7 +839,7 @@
+@@ -853,7 +862,7 @@
                  .bind(&k_reply.base64_encoded_message)
                  .bind(&post_id_bytes)
                  .bind(&hashtags)
@@ -342,7 +366,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -904,7 +890,7 @@
+@@ -904,7 +913,7 @@
                  .bind(&k_reply.base64_encoded_message)
                  .bind(&post_id_bytes)
                  .bind(&mentioned_pubkeys_bytes)
@@ -351,7 +375,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -946,7 +932,7 @@
+@@ -946,7 +955,7 @@
                  .bind(&post_id_bytes)
                  .bind(&mentioned_pubkeys_bytes)
                  .bind(&hashtags)
@@ -360,7 +384,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -969,28 +955,14 @@
+@@ -969,28 +978,14 @@
      }
  
      /// Save K quote to database
@@ -391,7 +415,7 @@
  
          // Store values we need for logging before they're moved
          let content_id_for_log = k_quote.content_id.clone();
-@@ -1034,7 +1006,7 @@
+@@ -1034,7 +1029,7 @@
              .bind(&k_quote.base64_encoded_message)
              .bind(&content_id_bytes)
              .bind(&mentioned_pubkey_bytes)
@@ -400,7 +424,7 @@
              .await?;
  
              if result.rows_affected() == 0 {
-@@ -1079,7 +1051,7 @@
+@@ -1079,7 +1074,7 @@
              .bind(&content_id_bytes)
              .bind(&mentioned_pubkey_bytes)
              .bind(&hashtags)
@@ -409,7 +433,7 @@
              .await?;
  
              if result.rows_affected() == 0 {
-@@ -1101,37 +1073,14 @@
+@@ -1101,37 +1096,14 @@
      }
  
      /// Save K broadcast to database
@@ -449,7 +473,7 @@
  
          // Convert hex strings to bytea for database storage
          let transaction_id_bytes = hex::decode(transaction_id)?;
-@@ -1160,7 +1109,7 @@
+@@ -1160,7 +1132,7 @@
          .bind(k_broadcast.base64_encoded_nickname)
          .bind(k_broadcast.base64_encoded_profile_image)
          .bind(k_broadcast.base64_encoded_message)
@@ -458,7 +482,7 @@
          .await?;
  
          if result.rows_affected() == 0 {
-@@ -1178,28 +1127,14 @@
+@@ -1178,28 +1150,14 @@
      }
  
      /// Save K vote to database
@@ -489,7 +513,7 @@
  
          // Store values we need for logging before they're moved
          let post_id_for_log = k_vote.post_id.clone();
-@@ -1238,7 +1173,7 @@
+@@ -1238,7 +1196,7 @@
          .bind(&post_id_bytes)
          .bind(k_vote.vote)
          .bind(&mentioned_pubkey_bytes)
@@ -498,7 +522,7 @@
          .await?;
  
          if result.rows_affected() == 0 {
-@@ -1256,31 +1191,14 @@
+@@ -1256,31 +1214,14 @@
      }
  
      /// Process K block action (block/unblock) in database
@@ -532,7 +556,7 @@
  
          // Extract block time
          let block_time = transaction.block_time.unwrap_or(0);
-@@ -1311,7 +1229,7 @@
+@@ -1311,7 +1252,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_block.blocking_action)
                  .bind(&blocked_user_pubkey_bytes)
@@ -541,7 +565,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -1340,7 +1258,7 @@
+@@ -1340,7 +1281,7 @@
                  )
                  .bind(&sender_pubkey_bytes)
                  .bind(&blocked_user_pubkey_bytes)
@@ -550,7 +574,7 @@
                  .await?;
  
                  info!(
-@@ -1363,31 +1281,14 @@
+@@ -1363,31 +1304,14 @@
      }
  
      /// Process K follow action (follow/unfollow) in database
@@ -584,7 +608,7 @@
  
          // Extract block time
          let block_time = transaction.block_time.unwrap_or(0);
-@@ -1418,7 +1319,7 @@
+@@ -1418,7 +1342,7 @@
                  .bind(&sender_signature_bytes)
                  .bind(&k_follow.following_action)
                  .bind(&followed_user_pubkey_bytes)
@@ -593,7 +617,7 @@
                  .await?;
  
                  if result.rows_affected() == 0 {
-@@ -1447,7 +1348,7 @@
+@@ -1447,7 +1371,7 @@
                  )
                  .bind(&sender_pubkey_bytes)
                  .bind(&followed_user_pubkey_bytes)
@@ -604,13 +628,16 @@
                  info!(
 --- a/K-transaction-processor/src/main.rs
 +++ b/K-transaction-processor/src/main.rs
-@@ -8,0 +9 @@
+@@ -8,0 +9,4 @@
 +mod shared_social;
-@@ -73,0 +75,3 @@
++mod tips;
++mod tip_evidence;
++mod tip_projection;
+@@ -73,0 +78,3 @@
 +
 +    #[arg(long, help = "Use existing common canonical journal; never starts a scanner")]
 +    shared_source_id: Option<String>,
-@@ -111,0 +116,15 @@
+@@ -111,0 +119,15 @@
 +    if let Some(source_id) = &args.shared_source_id {
 +        anyhow::ensure!(!args.initialize_db && !args.upgrade_db,
 +            "shared mode requires an existing reconciled native schema; schema reset/upgrade is not permitted");
@@ -626,7 +653,7 @@
 +        };
 +    }
 +
-@@ -194,0 +214,3 @@
+@@ -194,0 +217,3 @@
 +
 +#[cfg(test)]
 +mod shared_protocol_tests;
