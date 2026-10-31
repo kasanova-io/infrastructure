@@ -1,0 +1,30 @@
+# Private additive overlay for compose.candidate.yaml + compose.chats.yaml.
+# Shares the bound Chats receipt cache/rate buckets; publishes no port or route.
+services:
+  output-evidence:
+    profiles: [evidence]
+    image: ${PROTOCOL_CHATS_CONNECTOR_IMAGE:?tested immutable connector image required}
+    pull_policy: never
+    entrypoint: [python, /tools/hertz/protocol-indexer/evidence_worker.py]
+    restart: unless-stopped
+    environment:
+      PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
+    command: [--network, '${PROTOCOL_NETWORK:?required}', --archive, '${PROTOCOL_ARCHIVE_URL:?configured HTTPS archive required}', --cache, /evidence]
+    volumes:
+      - chats_evidence:/evidence
+      - type: bind
+        source: ./source-binding.json
+        target: /run/protocol-indexer/source-binding.json
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [protocol, caddy_caddy_net]
+    depends_on:
+      chats-cache-init: {condition: service_completed_successfully}
+      indexer: {condition: service_healthy}
+    stop_grace_period: 90s
+    mem_limit: 512m
+    cpus: 1
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

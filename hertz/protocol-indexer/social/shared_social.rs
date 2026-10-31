@@ -334,6 +334,17 @@ impl SharedSocial {
             };
             if outcome != TipReconcile::Applied {
                 tx.rollback().await?;
+                if outcome == TipReconcile::ProofPending {
+                    // Only the native SDK-verified tip + parent/author path
+                    // admits archive work. Bind this durable queue state to
+                    // the exact canonical revision after releasing all locks.
+                    // A parent reacceptance can request evidence again without
+                    // requiring another tip transaction or inventory replay.
+                    sqlx::query("WITH admitted AS (UPDATE protocol_indexer.consumer_jobs j SET available_at=clock_timestamp()+interval '5 seconds',last_error=$3 WHERE j.consumer='native-social-v1' AND j.transaction_id=$1 AND EXISTS(SELECT 1 FROM protocol_indexer.canonical c CROSS JOIN protocol_indexer.config cfg WHERE c.transaction_id=$1 AND c.revision=$2 AND c.accepting_block IS NOT NULL AND cfg.network=$4 AND cfg.journal_id::text=$5) RETURNING transaction_id) INSERT INTO protocol_indexer.consumer_jobs(consumer,transaction_id) SELECT 'output-evidence-v1',transaction_id FROM admitted ON CONFLICT DO NOTHING")
+                        .bind(&id).bind(revision).bind(format!("verified_tip_output_pending:{revision}"))
+                        .bind(&self.network).bind(&self.source_id).execute(&self.pool).await?;
+                    return Ok(true);
+                }
                 let (interval, error) = if outcome == TipReconcile::Busy {
                     ("50 milliseconds", "subject_revision_busy")
                 } else {

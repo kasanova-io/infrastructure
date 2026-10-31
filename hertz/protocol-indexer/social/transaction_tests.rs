@@ -1218,11 +1218,61 @@ mod shared_consumer {
         ready_all(&pool).await;
         consume(&consumer).await;
         assert_eq!(count(&pool, "k_tips").await, 0);
+        let admission: String = sqlx::query_scalar("SELECT last_error FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(admission, "verified_tip_output_pending:1");
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='output-evidence-v1'").fetch_one(&pool).await.unwrap(), 1);
         capture_vector(&pool, &fixture, 2, true, false, true).await;
         ready_all(&pool).await;
         drain(&consumer).await;
         assert_eq!(count(&pool, "social_shared.current_tips").await, 1);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1'").fetch_one(&pool).await.unwrap(), 0);
+        // The separate harvester acknowledges its own queued proof work after
+        // observing the now-terminal exact native revision.
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='output-evidence-v1'").fetch_one(&pool).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_tip_archive_admission_requires_native_signature_and_matching_parent_author() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        boot_tip_parent(&pool, &consumer).await;
+        let fixture = old_tip_vector();
+        let mut invalid = fixture_transaction(&fixture["transaction"]);
+        let wire =
+            String::from_utf8(hex::decode(invalid.payload.as_ref().unwrap()).unwrap()).unwrap();
+        let mut parts: Vec<String> = wire.split(':').map(str::to_owned).collect();
+        parts[4] = "00".repeat(64);
+        invalid.payload = Some(hex::encode(parts.join(":")));
+        invalid.transaction_id = "ee".repeat(32);
+        capture(&pool, &invalid, 1, true, false).await;
+        consume(&consumer).await;
         assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 0);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM social_shared.actions WHERE transaction_id=$1")
+                .bind(hex::decode(&invalid.transaction_id).unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "unsupported_or_invalid");
+        let wrong =
+            synthetic_tip_vector(65, &parent_vector(), 10_000_000, 0, Some(parts[3].clone()));
+        let value = capture_vector(&pool, &wrong, 1, true, false, false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool, "protocol_indexer.consumer_jobs").await, 0);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM social_shared.actions WHERE transaction_id=$1")
+                .bind(hex::decode(&value.transaction_id).unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "verified",
+            "valid signature with wrong author is terminal without fetching outputs"
+        );
+        assert_eq!(count(&pool, "k_tips").await, 0);
     }
 
     #[tokio::test]

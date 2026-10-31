@@ -13,7 +13,7 @@ import urllib.parse
 
 from psycopg.types.json import Jsonb
 
-from protocol_indexer.archive import HEX64, checked_receipt, input0_evidence, integer, verify_transaction_evidence
+from protocol_indexer.archive import HEX64, bind_output_evidence, checked_receipt, input0_evidence, integer, verify_transaction_evidence
 from protocol_indexer.chats import ChatsConsumer, EvidencePending, NativeTransport, native_transaction
 from protocol_indexer.cli import check_source
 from protocol_indexer.journal import connect
@@ -39,11 +39,20 @@ class Resolver(history.History):
 
     def save(self, path, value):
         self.guard_capacity()
-        history.atomic_json(path, value)
+        try:
+            history.atomic_json(path, value)
+        except OSError as exc:
+            raise RuntimeError('archive cache storage failure') from exc
 
     def quarantine(self, path, txid):
         self.guard_capacity()
-        path.rename(self.root / "quarantine" / (txid + "-cached-" + str(time.time_ns()) + ".json.gz"))
+        try:
+            path.rename(self.root / "quarantine" / (txid + "-cached-" + str(time.time_ns()) + ".json.gz"))
+        except FileNotFoundError:
+            # Another consumer sharing this cache already quarantined the file.
+            pass
+        except OSError as exc:
+            raise RuntimeError('archive cache quarantine storage failure') from exc
 
     def refresh_network(self):
         from protocol_indexer.archive import check_network
@@ -60,7 +69,9 @@ class Resolver(history.History):
         verified = self.root / "verified" / (txid + ".json.gz")
         if verified.exists():
             try:
-                return checked_receipt(history.load(verified), txid, self.network)
+                # This file is an immutable body receipt. Funding-input
+                # enrichment is separately checked by the private consumer.
+                return checked_receipt(history.load(verified), txid, self.network, with_input=False)
             except (OSError, EOFError, ValueError, TypeError, KeyError, IndexError, AttributeError):
                 self.quarantine(verified, txid)
         # Do not cache a lagging detail or incomplete containing block. Only a
@@ -133,12 +144,33 @@ class Resolver(history.History):
             raise EvidencePending("archive_evidence_unavailable_or_conflicting") from exc
         # SQL/storage failures remain operational failures; never disguise them
         # as a bad public transaction or silently acknowledge the source job.
+        self.store_receipt(conn, row, receipt)
+        return transaction
+
+    def resolve_outputs(self, conn, row):
+        saved = conn.execute("SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s",
+                             (row['transaction_id'],)).fetchone()
+        try:
+            receipt = None
+            if saved:
+                try:
+                    receipt = checked_receipt(saved['receipt'], row['transaction_id'].hex(), self.network, with_input=False)
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                    self.save(self.root / 'quarantine' / (row['transaction_id'].hex() + '-db-' + str(time.time_ns()) + '.json.gz'), saved['receipt'])
+            if receipt is None:
+                receipt = self.collect_body(row['transaction_id'].hex())
+            bind_output_evidence(row, receipt)
+        except (OSError, EOFError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            raise EvidencePending('archive_output_evidence_unavailable_or_conflicting') from exc
+        self.store_receipt(conn, row, receipt)
+
+    @staticmethod
+    def store_receipt(conn, row, receipt):
         conn.execute("""INSERT INTO protocol_indexer.evidence (transaction_id,receipt) VALUES (%s,%s)
             ON CONFLICT (transaction_id) DO UPDATE SET receipt = CASE
               WHEN jsonb_typeof(protocol_indexer.evidence.receipt)='object'
               THEN protocol_indexer.evidence.receipt || EXCLUDED.receipt ELSE EXCLUDED.receipt END""",
             (row["transaction_id"], Jsonb(receipt)))
-        return transaction
 
 
 def main():

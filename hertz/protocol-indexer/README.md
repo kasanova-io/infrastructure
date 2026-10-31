@@ -17,8 +17,9 @@ flowchart LR
     Inbox --> Consumers[Existing Chats and Social consumers]
 ```
 
-The private native Chats consumer is connected and independently reviewed;
-public Social and remaining native projections are still pending. Raw records
+The private native Chats and signed Social/tip consumers are connected and
+independently reviewed; remaining protocol extensions and public cutover are
+still pending. Raw records
 are **not** signature-validated posts, payments, notifications, or public APIs.
 Existing public Chats/Social services remain on their current contracts. Full
 six-family live/backfill acceptance is required before replacing their scanners.
@@ -248,8 +249,9 @@ remain required before replacing any public scanner.
 The canonical journal now queues one durable `native-chats-v1` wakeup per
 transaction. The live writer and inventory backfill enqueue identically. This
 projection currently covers established Kasia/KaChat private actions and KaChat
-tips; DM/inbox, room broadcasts and public Social remain retained in the raw
-journal pending their established consumer adapters.
+tips; DM/inbox and room broadcasts remain retained in the raw journal pending
+their established consumer adapters. The independent native Social consumer
+handles supported signed public actions and verified tips.
 
 `chats_worker.py` reuses the history HTTP/cache tooling. Missing evidence is
 retried per job without acknowledging it. Verified immutable receipts and headers
@@ -277,3 +279,41 @@ Never print `compose config` with those values or reuse synthetic acceptance
 volumes. Initialize the additive SQL schema and replay the supported raw
 families before starting the connector. Existing public services keep their
 writers and volumes until full six-family live/backfill acceptance and cutover.
+
+## Public tip output evidence
+
+Both live capture and inventory replay also enqueue `output-evidence-v1` for
+`kchat:1:tip`. `evidence_worker.py` acquires immutable full output receipts using
+the existing archive resolver and importer bounds (one attempt, 10s socket,
+12s total deadline, 8MiB, shared nonblocking rate buckets and capacity pause).
+It validates the configured source before cache/HTTP access, binds the journal
+UUID and network, and rechecks them before each job. It does not scan the chain,
+write canonical acceptance, decrypt tips or emit notifications.
+
+Archive work requires the existing native SDK consumer's exact-revision
+`verified_tip_output_pending:<revision>` queue state. Native publishes that
+state only after verifying the tip signature and its accepted parent/author,
+then rolls back incomplete projection work. Unknown or stale admission defers;
+exact terminal native decisions (including wrong targets/authors) acknowledge
+without HTTP. Prefix routing alone never admits an archive lookup. Native can
+requeue proof work after parent reacceptance through the same durable queue.
+
+Output proofs bind the exact transaction/payload and every indexed output's
+amount/script to the canonical source, preserving full RPC script versions.
+They do not require funding-input address resolution or equality between the
+fee payer and tip signer. Signature validity, target authorization and payment
+sum are still checked by the existing native SDK consumer.
+
+Archive I/O holds only the evidence job, allowing source revisions to advance.
+The final canonical revision fence retains changed work; missing evidence defers
+only that job for five seconds. Revoked/observed rows are acknowledged without
+HTTP. Proof storage and its acknowledgement commit before waking the independent
+Social job, preserving the native consumer's job-before-canonical lock order.
+A crash between commit and wake leaves the existing native retry intact.
+
+`compose.evidence.yaml` is an opt-in overlay on the candidate and Chats overlays.
+It reuses the same immutable connector image and private bound evidence volume,
+with its own exclusive worker lock, shared cache/rate/cooldown and no endpoint or
+bearer token. Replay the supported inventory once when adding this consumer to
+an existing journal; historical rows are not silently marked as new acceptance.
+No public service or scanner is replaced by starting this private worker.

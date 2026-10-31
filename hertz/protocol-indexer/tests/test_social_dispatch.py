@@ -24,10 +24,10 @@ class SocialDispatchTests(PostgresHarness):
 
     def test_tip_delivers_to_private_payment_and_public_verified_social_consumers(self):
         txid = self.ingest(b'kchat:1:tip:key:sig:post:author:cipher')
-        self.assertEqual(self.consumers(txid), {'native-chats-v1', 'native-social-v1'})
+        self.assertEqual(self.consumers(txid), {'native-chats-v1', 'native-social-v1', 'output-evidence-v1'})
         self.db.execute('DELETE FROM transactions_acceptances WHERE transaction_id=%s', (txid,))
         self.assertTrue(capture_one(self.db))
-        self.assertEqual(self.consumers(txid), {'native-chats-v1', 'native-social-v1'})
+        self.assertEqual(self.consumers(txid), {'native-chats-v1', 'native-social-v1', 'output-evidence-v1'})
         self.assertEqual(self.scalar('SELECT revision FROM protocol_indexer.canonical WHERE transaction_id=%s', (txid,)), 2)
 
     def test_inventory_backfill_queues_existing_social_history_without_duplicate_jobs(self):

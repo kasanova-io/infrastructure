@@ -155,3 +155,33 @@ def checked_receipt(receipt, txid, network, *, with_input=True):
         require(all(receipt["input0"][k] == resolved[k] for k in ("address", "script", "amount")), "cached sender proof mismatch")
         checked["input0"] = resolved
     return checked
+
+
+def bind_output_evidence(row, receipt):
+    """Bind immutable outputs to the journal; acceptance stays canonical.
+
+    The archive receipt must already have been checked for the configured network.
+    A public tip does not require an addressable funding input or the sender's key.
+    Preserve full RPC script versions for the native SDK payment verifier.
+    """
+    body = row['source_transaction']
+    require(row['transaction_id'].hex() == receipt['transaction_id'], 'output proof transaction mismatch')
+    require(body['payload'] == '\\x' + receipt['payload'], 'output proof payload mismatch')
+    outputs, rpc = body.get('outputs'), receipt['rpc_transaction']['outputs']
+    require(isinstance(outputs, list) and outputs and len(outputs) == len(rpc), 'output proof count mismatch')
+    require(sorted(integer(out.get('index')) for out in outputs) == list(range(len(outputs))),
+            'output proof indexes mismatch')
+    prefix = 'kaspa:' if receipt['network'] == 'mainnet' else 'kaspatest:'
+    for source, full in zip(sorted(outputs, key=lambda out: integer(out['index'])), rpc):
+        require(integer(source.get('amount')) == integer(full.get('amount')), 'output proof amount mismatch')
+        script = full['scriptPublicKey']
+        integer(script.get('version'), 65535)
+        require(source.get('script_public_key') == '\\x' + raw_hex(script.get('scriptPublicKey')).hex(),
+                'output proof script mismatch')
+        claimed = source.get('script_public_key_address')
+        address = (full.get('verboseData') or {}).get('scriptPublicKeyAddress')
+        require(not claimed or (claimed if ':' in claimed else prefix + claimed).startswith(prefix),
+                'source output address network mismatch')
+        require(not claimed or not address or (claimed if ':' in claimed else prefix + claimed) == address,
+                'output proof address mismatch')
+    return receipt

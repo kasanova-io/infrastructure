@@ -12,6 +12,7 @@ pub(crate) enum TipReconcile {
     Applied,
     Busy,
     Pending,
+    ProofPending,
 }
 
 async fn clear_subject(tx: &mut sqlx::Transaction<'_, Postgres>, subject: &str) -> Result<()> {
@@ -65,13 +66,13 @@ async fn prepare_payment(
                         let raw:Option<String>=sqlx::query_scalar("SELECT receipt::text FROM protocol_indexer.evidence WHERE transaction_id=$1")
                             .bind(current).fetch_optional(&mut **tx).await?;
                         let Some(raw) = raw else {
-                            return Ok(TipReconcile::Pending);
+                            return Ok(TipReconcile::ProofPending);
                         };
                         let receipt: Value = serde_json::from_str(&raw)?;
                         let Ok(proof) =
                             TipOutputEvidence::checked(network, current, body, &receipt)
                         else {
-                            return Ok(TipReconcile::Pending);
+                            return Ok(TipReconcile::ProofPending);
                         };
                         let amount = proof.payment_to_author(tip)?;
                         if let Ok(amount) = i64::try_from(amount) {

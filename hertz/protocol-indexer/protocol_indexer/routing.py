@@ -60,6 +60,11 @@ def native_social(classified: Route | None) -> bool:
     )
 
 
+def output_evidence(classified: Route | None) -> bool:
+    """Public tips need output proofs independently of private sender lookup."""
+    return classified is not None and classified.root == 'kchat' and classified.action == 'tip'
+
+
 def route(payload: bytes) -> Route | None:
     """Select exactly one family; unknown versions/actions stay unprojected.
 

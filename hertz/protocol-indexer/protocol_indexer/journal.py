@@ -7,7 +7,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .routing import Family, native_chat, native_social, route
+from .routing import Family, native_chat, native_social, output_evidence, route
 from .source import SIMPLY_REVISION
 
 
@@ -93,7 +93,8 @@ def capture_one(conn):
 
 
 def enqueue_consumers(conn, txid, classified):
-    for consumer, accepts in (('native-chats-v1', native_chat), ('native-social-v1', native_social)):
+    for consumer, accepts in (('native-chats-v1', native_chat), ('native-social-v1', native_social),
+                             ('output-evidence-v1', output_evidence)):
         if accepts(classified):
             conn.execute("""INSERT INTO protocol_indexer.consumer_jobs (consumer, transaction_id)
                 VALUES (%s, %s) ON CONFLICT DO NOTHING""", (consumer, txid))
