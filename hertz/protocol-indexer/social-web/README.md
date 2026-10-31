@@ -9,18 +9,19 @@ hashes and the dependency lock are recorded in `SOURCE.lock`.
 
 This is an unactivated private candidate for the existing configured indexer
 origins, `dev-indexer.kasanova.io` and `indexer.kasanova.io`. It changes no Caddy,
-Public routing, deployment or rollout setting. Broader existing Social reads
-still need canonical filtering/history/API reconciliation; adding room methods
-does not establish that those older routes are ready on a shared database.
+Public routing, deployment or rollout setting. Existing Social routes now use
+canonical-filtered native views in shared mode, preserving their SQL, DTOs and
+cursors. Source-connected history reconciliation and six-family acceptance
+remain required before those origins can switch to this candidate.
 
 ## Shared binding and room reads
 
 The existing database/server CLI arguments are preserved. Opt-in room mode also
 requires BOTH `--shared-source-id <journal UUID>` and `--shared-network <full
 configured network>`. A half-specified binding fails CLI parsing. Startup checks
-the source journal, native projection ownership, native network and current room
-view. Every room read repeats that check on the same connection and repeatable
-read, read-only transaction as its data query. Wrong or absent ownership/view
+the source journal, native projection ownership, native network and all required
+native read views. Each reader repeats its binding and required-view checks on
+the same connection and repeatable-read, read-only transaction as its data query. Wrong or absent ownership/view
 fails503 without leaking database details. The existing server request budget
 also sets a transaction-local PostgreSQL statement timeout; it does not leak
 into later pooled sessions. HTTP timeout alone is not relied on to cancel SQL.
@@ -52,9 +53,9 @@ query-plan/cost acceptance before public cutover.
 
 ## Reproducible private build
 
-From this directory, prepare a new context containing only the ten reviewed
-inputs (including the unchanged owned compatibility patches and native room
-schema):
+From this directory, prepare a new context containing only the eighteen reviewed
+inputs (including unchanged compatibility patches, native schemas and shared
+read authorization predicates):
 
 ```sh
 python3 prepare_context.py --output /tmp/new-shared-social-web-context
@@ -75,10 +76,10 @@ unchanged search contract separately requires `SOCIAL_SEARCH_TEST_DATABASE_URL`
 pointing to `social_search_contract` and uses connection-local temporary tables.
 Each router contract must run in its own process: the unchanged upstream
 Prometheus recorder is global. Default Rust unit tests do not need either DB.
-The owner runner inventories eight exact cases and requires all eight individual
-PASS results plus exit0 and complete owned-process/network cleanup.
+The owner runner inventories twenty exact cases and requires every individual
+PASS result plus exit0 and complete owned-process/network cleanup.
 
-Nine native unit and eight actual PostgreSQL/router contracts passed on the
+Nine native unit and twenty actual PostgreSQL/router contracts passed on the
 recorded frozen image. Cases include523 equal-time rows, cross-route/channel/
 network cursors, pending removals/revision mismatch, source/view failure, SQL
 cancellation/pool hygiene, legacy404, MAINNET configuration and the original
@@ -86,7 +87,29 @@ search regression. Fixtures are explicit isolated materialization records,
 not chain transactions or SDK sender proofs. Previous combined-process tests
 failed on the global recorder and remain adverse evidence.
 
-Source-connected preservation and real DEV/TN10 protocol acceptance, broader
-Social/history/cursor reconciliation, query-plan acceptance and complete
-six-family cutover remain required. These tests do not establish public route
+Twelve of the database contracts exercise existing Social reads: source/view
+failures even on empty results, current revisions and pending removals, native
+profile/relationship selection, literal edit/unquote/delete targets, cumulative
+mentions, exact legacy feed/search JSON and tied cursors, ordinary vote lookup,
+notification pagination, hashtags, both configured networks and snapshot/pool
+hygiene. The legacy notification DTO has no tip variant, so its mention view
+excludes tips before LIMIT and counting; tip notifications belong to the owning
+notification implementation.
+
+One repeatable-read/read-only transaction covers binding and all queries in a
+method, including fallbacks. All eight views are resolved and locked before
+setting a transaction-local search path with no public fallback. Legacy mode
+still uses a plain pool checkout. The source-bound native writer installs these
+views; API reads never create or repair a schema.
+
+On 10,000 explicit materialized posts, the ordered view page uses 409 shared
+buffers (4.361 ms execution); the ACTUAL feed DAO uses 561 buffers and returns 21
+rows for legacy 20+lookahead pagination. Both bounded-cost assertions pass. The
+first candidate failed these gates and two native concurrency regressions; those
+results remain retained. Synthetic cost coverage does not establish production
+history/query-plan acceptance or live protocol delivery.
+
+Source-connected preservation and real DEV/TN10 protocol acceptance, historical
+Social/API reconciliation, representative-history query-plan acceptance and
+complete six-family cutover remain required. These tests do not establish public route
 activation, a visible tip counter, notification delivery or native-wallet QA.

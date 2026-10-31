@@ -15,8 +15,10 @@ The existing standalone listener retains its original K-social inputs. Opt-in
 shared mode uses the common canonical journal, with revision fencing, native
 state reconciliation, stable cursors and quiet replay described below. The
 private candidate passed a bounded upgrade on retained genuine post/tip history;
-the worker stopped cleanly afterwards. Legacy history/API reconciliation and
-six-family real-chain acceptance precede public cutover. No Python replacement
+the worker stopped cleanly afterwards. The current lock describes a newer,
+unactivated canonical-read candidate and separately retains that accepted
+runtime identity. Legacy history/API reconciliation and six-family real-chain
+acceptance precede public cutover. No Python replacement
 signature parser is used.
 
 `SOURCE.lock` records upstream/SDK/patch/lock/image identities. The SDK revision
@@ -165,3 +167,22 @@ also hides pending removals and stale revisions before reconciliation. New
 nonempty unowned room history is refused. Rooms remain quiet, without adding
 notifications, retention jobs, another scanner or public endpoints. This view
 is internal storage, not a claim of public room API or history compatibility.
+
+
+## Existing Social read compatibility
+
+The bound writer installs `social_shared_api` views over the existing native
+shapes. The existing K-webserver can use them through a local read-only search
+path, without new DTOs, cursor IDs or native row copies. Current acceptance,
+revision and pending removal are checked at read time before asynchronous
+reconciliation. Selection functions mirror native subject policy; a unit check
+requires their normalized SQL to match. Edit authorization and unquote tuple
+ordering are shared source predicates rather than parallel implementations.
+
+Writer selection retains immutable SDK verification when canonical metadata
+advances and fences the latest canonical revision before applying the selected
+action. It does not require that candidate's ledger metadata refresh to have
+already run. API eligibility still requires current ledger/canonical revisions.
+Native concurrency tests retain selected-row contention and canonical-fence
+checks unchanged. The frozen candidate passes 47 unit and 39 actual PostgreSQL
+contracts; this is isolated SQL acceptance, not new genuine chain acceptance.

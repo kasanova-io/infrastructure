@@ -9,10 +9,11 @@ ADD https://github.com/thesheepcat/K-indexer/archive/${UPSTREAM_REVISION}.tar.gz
 RUN test -n "$UPSTREAM_ARCHIVE_SHA256" && echo "$UPSTREAM_ARCHIVE_SHA256  /tmp/upstream.tar.gz" | sha256sum -c -
 WORKDIR /src
 RUN tar -xzf /tmp/upstream.tar.gz --strip-components=1
-COPY prepare_web.py historical-author-keys.patch exact-vote-details.patch content-search.patch shared-api.patch /inputs/
+COPY prepare_web.py historical-author-keys.patch exact-vote-details.patch content-search.patch shared-api.patch shared-read-api.patch /inputs/
 RUN python3 /inputs/prepare_web.py
-COPY shared_rooms.rs shared_room_tests.rs /src/K-webserver/src/
-COPY shared_room_schema.sql /src/K-webserver/src/shared_room_schema.sql
+COPY shared_rooms.rs shared_room_tests.rs shared_reads.rs shared_read_tests.rs /src/K-webserver/src/
+COPY shared_room_schema.sql shared_read_schema.sql shared_edit_authorization.sql shared_unquote_order.sql shared_social_schema.sql shared_kaposts_schema.sql /src/K-webserver/src/
+RUN cp /src/K-transaction-processor/src/migrations/schema/up.sql /src/K-webserver/src/native_schema.sql
 ENV CARGO_BUILD_JOBS=3 RUSTFLAGS="-C link-args=-s"
 FROM source AS lock
 RUN --mount=type=cache,id=kasanova-social-registry,target=/usr/local/cargo/registry cargo generate-lockfile

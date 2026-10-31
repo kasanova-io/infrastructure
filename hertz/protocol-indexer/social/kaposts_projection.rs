@@ -516,7 +516,8 @@ pub fn source_message<'a>(
 
 // Immutable SDK fields survive canonical metadata revisions. Current acceptance
 // and exact selected revision fences come from the journal, never that cache.
-const AUTHORIZED_EDIT: &str = "e.kind='edit' AND e.shape_valid AND e.sender=e.target_author AND e.target_kind<>'poll' AND e.original_time>e.target_time AND e.original_time::numeric-e.target_time::numeric<=7200000 AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id IN(e.transaction_id,e.target) AND p.acceptance_changed AND p.accepting_block IS NULL)";
+pub(crate) const AUTHORIZED_EDIT: &str = include_str!("edit_authorization.sql");
+pub(crate) const UNQUOTE_ORDER: &str = include_str!("unquote_order.sql");
 fn selected_fields() -> &'static str {
     "e.*,e.mentions::text AS mentions_text,a.snapshot::text AS snapshot,c.revision AS canonical_revision,t.revision AS target_revision"
 }
@@ -545,7 +546,7 @@ pub async fn content_policy(
         .await?;
     let deletes=sqlx::query(&format!("SELECT {} {} WHERE e.target_signature=$1 AND e.kind='delete' AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id IN(e.transaction_id,e.target) AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY e.original_time,e.transaction_id LIMIT 1",selected_fields(),mutation_join()))
         .bind(signature).fetch_all(&mut **tx).await?;
-    let withdraws=sqlx::query("SELECT e.*,c.revision AS canonical_revision FROM social_shared.content_keys k JOIN social_shared.extensions e ON e.kind='unquote' AND e.sender=k.author AND e.target=k.reference JOIN protocol_indexer.canonical c ON c.transaction_id=e.transaction_id WHERE k.transaction_id=$1 AND k.kind IN('quote','repost') AND e.shape_valid AND c.accepting_block IS NOT NULL AND (e.original_time,e.transaction_id)>=(k.original_time,k.transaction_id) AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=e.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY e.original_time DESC,e.transaction_id DESC LIMIT 1")
+    let withdraws=sqlx::query(&format!("SELECT e.*,c.revision AS canonical_revision FROM social_shared.content_keys k JOIN social_shared.extensions e ON e.kind='unquote' AND e.sender=k.author AND e.target=k.reference JOIN protocol_indexer.canonical c ON c.transaction_id=e.transaction_id WHERE k.transaction_id=$1 AND k.kind IN('quote','repost') AND e.shape_valid AND c.accepting_block IS NOT NULL AND {} AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=e.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY e.original_time DESC,e.transaction_id DESC LIMIT 1", UNQUOTE_ORDER))
         .bind(base_id).fetch_all(&mut **tx).await?;
     if !fenced(tx, &edits).await? || !fenced(tx, &deletes).await? || !fenced(tx, &withdraws).await?
     {

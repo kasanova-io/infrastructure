@@ -56,9 +56,11 @@ fn operation(action: &VerifiedAction) -> &'static str {
     }
 }
 
+/// SDK verification is immutable across metadata revisions. The selected
+/// current canonical revision is fenced even before its own refresh job runs.
 pub(crate) fn selection_sql(table: &str) -> String {
     let fields = "a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,a.snapshot::text AS snapshot";
-    let base = "FROM social_shared.actions a JOIN protocol_indexer.canonical c USING(transaction_id) WHERE a.subject=$1 AND c.accepting_block IS NOT NULL";
+    let base = "FROM social_shared.actions a JOIN protocol_indexer.canonical c USING(transaction_id) WHERE a.subject=$1 AND c.accepting_block IS NOT NULL AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL)";
     match table {
         "k_broadcasts" => format!(
             "SELECT {fields} {base} ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1"
@@ -188,6 +190,7 @@ impl SharedSocial {
         sqlx::raw_sql(include_str!("rooms.sql"))
             .execute(&mut *tx)
             .await?;
+        crate::read_views::install(&mut tx).await?;
         sqlx::query("INSERT INTO social_shared.config(network,source_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
             .bind(network).bind(source_id).execute(&mut *tx).await?;
         let row = sqlx::query("SELECT network,source_id FROM social_shared.config WHERE singleton")

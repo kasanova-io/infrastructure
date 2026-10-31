@@ -14,9 +14,11 @@ def prepare(output):
     lock = json.loads((HERE / 'SOURCE.lock').read_text())
     inputs = {name: HERE / name for name in [
         'Dockerfile', 'prepare_web.py', 'shared-api.patch', 'shared_rooms.rs',
-        'shared_room_tests.rs', 'Cargo.lock',
+        'shared_room_tests.rs', 'shared_reads.rs', 'shared_read_tests.rs', 'shared-read-api.patch', 'Cargo.lock',
     ]}
     inputs['shared_room_schema.sql'] = HERE.parent / 'social/rooms.sql'
+    for name, native in {'shared_read_schema.sql':'read_views.sql', 'shared_edit_authorization.sql':'edit_authorization.sql', 'shared_unquote_order.sql':'unquote_order.sql', 'shared_social_schema.sql':'shared_social.sql', 'shared_kaposts_schema.sql':'kaposts_projection.sql'}.items():
+        inputs[name] = HERE.parent / 'social' / native
     for name in ['historical-author-keys.patch', 'exact-vote-details.patch', 'content-search.patch']:
         inputs[name] = HERE.parent.parent / 'social-indexer-dev/patches' / name
     if set(inputs) != set(lock['files_sha256']):

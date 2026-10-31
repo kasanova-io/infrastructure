@@ -417,8 +417,12 @@ introducing competing source aliases or weakening SQL/metrics identity checks.
 all three deployed compatibility patches. Its opt-in, source-bound room reader
 uses the verified current view and upstream-compatible response fields, with
 additive exclusive cursors and bounded observed-channel discovery. Legacy mode
-keeps room routes absent. The private source has native unit and actual router/
-PostgreSQL contracts, including the original search regression; it is not
-connected to the source journal or publicly activated. Broader existing Social
-reads, history/cursors, source-connected/genuine six-family acceptance and query
-cost at representative history remain prerequisites to shared public cutover.
+keeps room routes absent. Existing Social database methods also reuse their SQL,
+DTOs and cursors through source-bound canonical native views; no raw public-table
+fallback is allowed in shared mode. The frozen reader passes 9 unit and 20 actual
+PostgreSQL/router contracts, including the original search regression, unchanged
+legacy JSON/cursors and bounded actual feed cost over 10,000 materialized posts.
+The paired native candidate passes 47 unit and 39 PostgreSQL contracts. These new
+images remain unactivated. Source-connected history/cursors, genuine six-family
+acceptance and query cost at representative history remain prerequisites to
+shared public cutover.
