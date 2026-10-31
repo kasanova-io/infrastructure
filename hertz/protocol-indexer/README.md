@@ -1,5 +1,19 @@
 # Shared protocol ingestion
 
+The unified service keeps the existing indexer origins selected by Ren:
+
+| Environment | Canonical origin | Existing route owner |
+| --- | --- | --- |
+| DEV | `https://dev-indexer.kasanova.io` | [DEV Chats Caddy block](../kasia-indexer-dev/Caddyfile) |
+| PROD | `https://indexer.kasanova.io` | [PROD Chats Caddy block](../kasia-indexer-prod/Caddyfile) |
+
+These origins already serve the Chats API. Shared-service cutover must extend
+that existing entry point, preserve its routes and maintenance exclusions, and
+point Social's existing vendor configuration to the compatible shared API.
+Do not create a second Caddy site for the same host or switch public traffic
+before history/API compatibility and full protocol acceptance are verified.
+The private candidate below remains separate until that cutover.
+
 This candidate extends the Simply Kaspa ingestion approach already used by Social.
 One configured Kaspa node feeds one Simply/PostgreSQL collector per network. Six
 adapter families share the collector's durable journal, rather than opening a
