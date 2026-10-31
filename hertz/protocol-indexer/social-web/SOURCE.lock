@@ -1,0 +1,41 @@
+{
+  "source_manifest": "723ce3321baa06e09bf70657e708dd56553c19b64ed3eef93b5b6744f36e6e46",
+  "files_sha256": {
+    "Dockerfile": "ed15dfaa084f2a125a0ebc9d9877ece52bca546da655cc1531cbf8d07fd7f02f",
+    "prepare_web.py": "179018474b7866f125800842041ca4ec6bce61b4983af20989e8bd07d80e78d3",
+    "shared-api.patch": "fcb4d605ee1896b99e560cb6398c694fff1a5d31620992d33ad43081f2eb9814",
+    "shared_rooms.rs": "284fade2b4eb31f425d2cd87df4d704606ba7908ca26afd682830ea1752cd6de",
+    "shared_room_tests.rs": "a4c2c1dcced943eac4ebedd1cc8b6ef3d2661bfad3f77d75c6b2af3647fee63a",
+    "shared_room_schema.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
+    "historical-author-keys.patch": "ef2eed4659c5a52c9674843f9123c57fb60a88dec3acbb31fe5d2a7716c1e020",
+    "exact-vote-details.patch": "7e80616ccdf6148f45e6a5fe8d9a9d800c22fc5d4a26ba1ada323764560e4c48",
+    "content-search.patch": "6eca1c9ec4584566c40404bc02009108d060e86e994d0311dbec33bcba96794d",
+    "Cargo.lock": "0e62efc0e201eeacd8acc9cfc4df671a23c26a03e6254344723c8531a45959a7"
+  },
+  "archive_sha256": "2a6fb9437fa576ee9453067810fc558542777e6552f606242ec736f62fdc1a6e",
+  "upstream_revision": "917863f49623aa6802e5ad4c0e246581470d93cb",
+  "upstream_archive_sha256": "6a9cc67b54a65a44736b1d68b840b438e003eda08776be2b23e0eaa569a85d2f",
+  "activated": false,
+  "public_route_changes": false,
+  "build_archive": "/private/tmp/kasanova-shared-web-723ce3321baa.tar",
+  "rust_image": "rust@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41",
+  "runtime_base_image": "alpine@sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63",
+  "runtime_image": "sha256:b567ff5a87302469a93d7be6dad15f98a81b9ec6234e06b1bfc64a5544367a42",
+  "contract_image": "sha256:d4c66bdd9368e7ec78b4e89f7cb0faf76ed8647d5132d463ee165e2f49a81874",
+  "cargo_lock_sha256": "0e62efc0e201eeacd8acc9cfc4df671a23c26a03e6254344723c8531a45959a7",
+  "native_room_projection_commit": "81c2182790d9fdb42d0abe5126e4d8c0c439d058",
+  "kachat_reference_revision": "e2f462171bee80ff26c6fe14ddafe06614f05efa",
+  "kachat_reference_files_sha256": {
+    "kachat-webserver/src/models.rs": "1194141e512dd5b786dd7cf2d39074c45040327636525a9bbae768ce7c5e89bc",
+    "kachat-webserver/src/web_server.rs": "e6c68fd36a033229c54b74a295377f8ad2832e8b107e75d6d32b1ea834485d34",
+    "kachat-webserver/src/database_postgres_impl.rs": "fd541ce93aed950131caacc6960feb9de684930caff4841cc022092a8ac2b57b",
+    "LICENSE": "9a8b1a60d485f688a44e1899fdcab02a7b9c426020611728d75aa63d2f043f39"
+  },
+  "private_candidate": true,
+  "genuine_room_acceptance": false,
+  "source_journal_connected": false,
+  "public_cutover": false,
+  "native_unit_tests_passed": 9,
+  "postgres_contracts_passed": 8,
+  "public_query_plan_acceptance": false
+}

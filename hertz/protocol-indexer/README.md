@@ -391,3 +391,15 @@ own `protocol_egress` bridge. Configure an unused private CIDR through
 `indexer`/`database` aliases can resolve another service, which the source binding
 correctly rejects. The isolated outbound bridge gives archive access without
 introducing competing source aliases or weakening SQL/metrics identity checks.
+
+## Private shared room API
+
+[`social-web`](social-web/README.md) reuses the pinned existing K-webserver and
+all three deployed compatibility patches. Its opt-in, source-bound room reader
+uses the verified current view and upstream-compatible response fields, with
+additive exclusive cursors and bounded observed-channel discovery. Legacy mode
+keeps room routes absent. The private source has native unit and actual router/
+PostgreSQL contracts, including the original search regression; it is not
+connected to the source journal or publicly activated. Broader existing Social
+reads, history/cursors, source-connected/genuine six-family acceptance and query
+cost at representative history remain prerequisites to shared public cutover.
