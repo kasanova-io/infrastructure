@@ -17,6 +17,12 @@ x-adapter: &adapter
   environment:
     PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
     SIMPLY_METRICS_URL: http://indexer:8501/api/metrics
+  volumes:
+    - type: bind
+      source: ./source-binding.json
+      target: /run/protocol-indexer/source-binding.json
+      read_only: true
+      bind: {create_host_path: false}
   depends_on:
     indexer: {condition: service_healthy}
   mem_limit: 512m

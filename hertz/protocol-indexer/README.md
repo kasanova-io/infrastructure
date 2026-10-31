@@ -46,13 +46,20 @@ validation. Historical KaPosts using `k` keep that original wire root.
 
 Simply source is pinned to
 `7b01229d8960f8f53f909ee0e69fb628053ac8ae` (the already-deployed v2.3.0), schema 23. The CLI checks its private
-metrics for source revision, configured network and exact SQL endpoint, plus
+metrics for source revision and configured network, plus
 required input/output/payload fields. It rejects self-send filtering, upstream
 pruning, and enabled unused chain-wide tables. Database network binding is
 immutable; DEV and PROD use separate databases and configured node endpoints.
 Upstream emits a seven-character commit ID; `SOURCE.lock` records the full Git
 revision and the tested immutable image behind that short metadata.
-Metrics contain database settings and must never be published or logged.
+Upstream censors its database/RPC URLs. `bind-source.py` verifies the running
+collector image, command, project, private network and SQL container, then records
+the actual PostgreSQL system identifier and database OID in a read-only binding.
+The adapter checks that binding against its real SQL connection before any work.
+This prevents another database with the same logical name from passing as the
+configured source. The receipt contains no credentials; the adapter receives its SQL credential
+through `PROTOCOL_DATABASE_URL` and has no Docker socket. Regenerate the binding and recreate adapter containers after changing
+source containers. Do not log unredacted Docker inspection/configuration.
 
 Source triggers queue raw-body and acceptance changes in their originating
 transactions. Unknown-body acceptance wakeups are necessary: Simply writes
@@ -112,6 +119,18 @@ report the reviewed source pin; a moving tag is not a release identity.
 Build the adapter using `Dockerfile`, supplying an approved immutable Python
 image through `PYTHON_IMAGE`. Dependencies are hash-locked in `requirements.txt`
 and `uv.lock`. The runtime runs as UID 10001.
+
+Start the private `database` and `indexer` services first. Then, from this
+candidate's directory on the Docker host, generate its binding:
+
+```sh
+python3 bind-source.py --project "protocol_indexer_${PROTOCOL_ENV}" --network "$PROTOCOL_NETWORK"
+```
+
+The resulting `source-binding.json` contains no credentials, stays ignored by
+Git, and is mounted read-only for `init` and `adapters`. Its parent task directory
+must stay private. The source's PostgreSQL role needs permission to read
+`pg_control_system()`; the candidate's existing database-owner role has it.
 
 Commands inside the private adapter container:
 

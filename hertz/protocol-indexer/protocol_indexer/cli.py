@@ -3,16 +3,18 @@
 import argparse
 import json
 import os
+import re
+from pathlib import Path
 import signal
 import time
 import urllib.request
-from urllib.parse import unquote, urlsplit
 
 from .journal import SIMPLY_REVISION, BackfillAdapter, ScanAdapter, capture_one, connect, discard_unrelated, install, prune_source
 from .routing import Family
+from .source import SIMPLY_IMAGE_REF
 
 
-def validate_source(metrics, network, database_name, database_host, database_port):
+def validate_source(metrics, network, database_name):
     # Upstream cli/build.rs intentionally emits the seven-character git SHA.
     # The full revision and tested immutable image are recorded in SOURCE.lock.
     if metrics.get("commitId") not in {SIMPLY_REVISION, SIMPLY_REVISION[:7]}:
@@ -22,11 +24,6 @@ def validate_source(metrics, network, database_name, database_host, database_por
         raise ValueError("Simply network does not match configured network")
     if (metrics.get("database") or {}).get("databaseName") != database_name:
         raise ValueError("Simply database does not match adapter database")
-    endpoint = urlsplit(args.get("databaseUrl") or "")
-    if (endpoint.scheme not in {"postgres", "postgresql"}
-        or endpoint.hostname != database_host or (endpoint.port or 5432) != database_port
-        or unquote(endpoint.path.removeprefix("/")) != database_name):
-        raise ValueError("Simply SQL endpoint does not match adapter SQL endpoint")
     if (args.get("pruning") or {}).get("pruneDb") is not None:
         raise ValueError("Simply pruning must be disabled; use owned retention")
     if args.get("ignoreSelfSends"):
@@ -45,17 +42,38 @@ def validate_source(metrics, network, database_name, database_host, database_por
         raise ValueError("Simply excludes required payload, payment or sender evidence")
 
 
-def check_source(conn, url, network):
-    # The metrics body contains upstream database settings: never log it.
+def validate_binding(binding, network, identity, metrics_url):
+    """Bind censored upstream metrics to the actual private SQL instance."""
+    if (binding.get("schema_version") != 1 or binding.get("network") != network
+        or binding.get("source_revision") != SIMPLY_REVISION
+        or binding.get("source_image_ref") != SIMPLY_IMAGE_REF
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", binding.get("source_image_id", ""))
+        or not re.fullmatch(r"[0-9a-f]{64}", binding.get("source_container", ""))
+        or binding.get("metrics_url") != metrics_url):
+        raise ValueError("source binding network/revision/image/metrics mismatch")
+    if binding.get("database") != identity:
+        raise ValueError("source binding SQL instance/endpoint does not match adapter database")
+
+
+def check_source(conn, url, network, binding_path):
+    binding = json.loads(Path(binding_path).read_text())
+    info = conn.execute("""SELECT system_identifier::text AS system_identifier,
+        (SELECT oid::bigint FROM pg_database WHERE datname = current_database()) AS oid
+        FROM pg_control_system()""").fetchone()
+    identity = {"host": conn.info.host, "port": conn.info.port, "name": conn.info.dbname, **info}
+    validate_binding(binding, network, identity, url)
+    # Upstream deliberately censors the database URL. The read-only binding is
+    # generated from the actual container command/network/database, not metrics.
     with urllib.request.urlopen(url, timeout=10) as response:
         metrics = json.load(response)
-    validate_source(metrics, network, conn.info.dbname, conn.info.host, conn.info.port)
+    validate_source(metrics, network, conn.info.dbname)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--network", required=True)
     parser.add_argument("--metrics-url", default=os.environ.get("SIMPLY_METRICS_URL", "http://indexer:8501/api/metrics"))
+    parser.add_argument("--source-binding", default=os.environ.get("PROTOCOL_SOURCE_BINDING_FILE", "/run/protocol-indexer/source-binding.json"))
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     worker = sub.add_parser("worker")
@@ -71,7 +89,7 @@ def main():
     if not dsn:
         parser.error("PROTOCOL_DATABASE_URL is required")
     with connect(dsn) as conn:
-        check_source(conn, args.metrics_url, args.network)
+        check_source(conn, args.metrics_url, args.network, args.source_binding)
         if args.command == "init":
             install(conn, args.network)
             return
@@ -105,7 +123,7 @@ def main():
         checked = time.monotonic()
         while running:
             if time.monotonic() - checked >= 60:
-                check_source(conn, args.metrics_url, args.network)
+                check_source(conn, args.metrics_url, args.network, args.source_binding)
                 checked = time.monotonic()
             changed = discard_unrelated(conn) > 0
             for _ in range(100):

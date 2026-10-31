@@ -8,8 +8,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .routing import Family, route
-
-SIMPLY_REVISION = "7b01229d8960f8f53f909ee0e69fb628053ac8ae"
+from .source import SIMPLY_REVISION
 
 
 def connect(dsn):

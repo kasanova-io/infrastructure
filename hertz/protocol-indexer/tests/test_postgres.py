@@ -10,7 +10,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from protocol_indexer.cli import validate_source
+from protocol_indexer.cli import validate_binding, validate_source
+from protocol_indexer.source import SIMPLY_IMAGE_REF
 from protocol_indexer.journal import (
     SIMPLY_REVISION, BackfillAdapter, ScanAdapter, capture_one, connect, discard_unrelated, install, prune_source,
 )
@@ -317,7 +318,7 @@ class PostgresTests(unittest.TestCase):
 class SourceContractTests(unittest.TestCase):
     def metrics(self):
         return {"commitId": SIMPLY_REVISION, "database": {"databaseName": "shared"}, "settings": {"cli_args": {
-            "databaseUrl": "postgres://user:secret@database:5432/shared",
+            "databaseUrl": "**hidden**",
             "network": "testnet-10", "disable": ["BlocksTable", "BlockParentTable", "AddressesTransactionsTable"],
             "excludeFields": ["TxMass"], "pruning": {"pruneDb": None}, "ignoreSelfSends": None,
         }}}
@@ -326,15 +327,15 @@ class SourceContractTests(unittest.TestCase):
         for network in ("mainnet", "testnet-10"):
             metrics = self.metrics()
             metrics["settings"]["cli_args"]["network"] = network
-            validate_source(metrics, network, "shared", "database", 5432)
+            validate_source(metrics, network, "shared")
 
     def test_upstream_short_revision_metadata_is_bound_to_the_full_source_pin(self):
         metrics = self.metrics()
         metrics["commitId"] = SIMPLY_REVISION[:7]
-        validate_source(metrics, "testnet-10", "shared", "database", 5432)
+        validate_source(metrics, "testnet-10", "shared")
         metrics["commitId"] = SIMPLY_REVISION[:6]
         with self.assertRaisesRegex(ValueError, "revision"):
-            validate_source(metrics, "testnet-10", "shared", "database", 5432)
+            validate_source(metrics, "testnet-10", "shared")
 
     def test_unsafe_upstream_configuration_is_rejected(self):
         for field, value in (
@@ -347,15 +348,39 @@ class SourceContractTests(unittest.TestCase):
             metrics = copy.deepcopy(self.metrics())
             metrics["settings"]["cli_args"][field] = value
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
-                validate_source(metrics, "testnet-10", "shared", "database", 5432)
+                validate_source(metrics, "testnet-10", "shared")
         metrics = self.metrics()
         metrics["commitId"] = "other"
         with self.assertRaises(ValueError):
-            validate_source(metrics, "testnet-10", "shared", "database", 5432)
+            validate_source(metrics, "testnet-10", "shared")
+
+    def binding(self):
+        return {"schema_version": 1, "network": "testnet-10", "source_revision": SIMPLY_REVISION,
+                "source_image_ref": SIMPLY_IMAGE_REF, "source_image_id": "sha256:" + "ab" * 32,
+                "source_container": "cd" * 32, "metrics_url": "http://indexer:8501/api/metrics",
+                "database": {"host": "database", "port": 5432, "name": "shared",
+                             "system_identifier": "123456789", "oid": 16384}}
+
+    def test_verified_binding_supports_upstream_censored_database_url(self):
+        validate_source(self.metrics(), "testnet-10", "shared")
+        binding = self.binding()
+        validate_binding(binding, "testnet-10", binding["database"], binding["metrics_url"])
 
     def test_same_database_name_on_different_server_does_not_pass_network_preflight(self):
-        with self.assertRaisesRegex(ValueError, "SQL endpoint"):
-            validate_source(self.metrics(), "testnet-10", "shared", "production-db", 5432)
+        binding = self.binding()
+        for field, value in (("host", "production-db"), ("system_identifier", "other-cluster"), ("oid", 99999)):
+            identity = {**binding["database"], field: value}
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "SQL instance"):
+                validate_binding(binding, "testnet-10", identity, binding["metrics_url"])
+
+    def test_binding_rejects_wrong_network_source_image_and_metrics_target(self):
+        binding = self.binding()
+        for field, value in (("network", "mainnet"), ("source_revision", "other"),
+                             ("source_image_ref", "sha256:other"), ("source_image_id", "invalid"),
+                             ("metrics_url", "http://other/metrics")):
+            wrong = {**binding, field: value}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_binding(wrong, "testnet-10", binding["database"], binding["metrics_url"])
 
 
 if __name__ == "__main__":
