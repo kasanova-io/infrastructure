@@ -31,9 +31,18 @@ flowchart LR
     Inbox --> Consumers[Existing Chats and Social consumers]
 ```
 
-The private DEV producer now runs the reviewed22-input1594b0d86405 snapshot
-(adapter40748e8) against the preserved collector/journal. Its normal inventory
-adapters replay all six families. The reviewed Social extension/room upgrade
+The earlier private DEV producer used the reviewed 22-input `1594b0d86405`
+snapshot (adapter `40748e8`) and replayed all six families. That collector and
+adapter are now stopped while the adopted retained copy catches up through the
+same Simply collector image, using its normal saved checkpoint. The current
+27-input `c504f25c287a` producer images have been built from feature revision
+`2d83a3c`; their adapter and connector workers remain stopped. The private
+collector has demonstrated durable checkpoint and all four pipeline-stage
+advancement, while preserving the native Social rows. This is catch-up, not
+public readiness. The earlier readiness failure and preflight refusal remain
+adverse evidence. No public route or native consumer has switched.
+
+The reviewed Social extension/room upgrade
 passed bounded preservation on the existing private journal, retaining old rows,
 IDs, timestamps and notification state. All three retained real tips are now
 SDK/payment-verified in its current-tip view. The consumer stopped cleanly after
