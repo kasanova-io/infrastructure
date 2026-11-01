@@ -206,10 +206,11 @@ def write(path, value, fresh=False):
         temporary.unlink(missing_ok=True)
 
 
-def recover(expected, baseline, previous_start, timeout, readonly_helper=None):
+def recover(expected, baseline, previous_start, timeout, readonly_helper=None, *, start_if_stopped=True):
     """Same original container; no image/config/volume replacement or rollback."""
     deadline = time.monotonic() + timeout
     last_error = None
+    live_sample = None
     while time.monotonic() < deadline:
         try:
             source = inspect(expected["id"])
@@ -225,12 +226,25 @@ def recover(expected, baseline, previous_start, timeout, readonly_helper=None):
                 reader = inspect(identity)
                 bind_helper(reader, readonly_helper)
             if not source["State"]["Running"]:
+                live_sample = None
+                if not start_if_stopped:
+                    raise ValueError("read-only recovery verification never starts a writer")
                 command(["docker", "start", expected["id"]])
             elif healthy(source) and source["State"]["StartedAt"] != previous_start:
                 after = metrics(expected["id"])
-                if all(after[name] >= baseline[name] for name in COUNTERS) and \
-                        after["blocks_processed"] > baseline["blocks_processed"]:
-                    return after
+                current = (source["State"]["StartedAt"], after["blocks_processed"])
+                if all(after[name] >= baseline[name] for name in COUNTERS):
+                    # blocks_processed is initialized from the retained/pruned
+                    # header partition at startup. It is not a durable lifetime
+                    # counter. Require advancement within THIS unchanged new
+                    # process, never a comparison with its predecessor's uptime.
+                    if live_sample and live_sample[0] == current[0] and current[1] > live_sample[1]:
+                        return after
+                    live_sample = current
+                else:
+                    live_sample = None
+            else:
+                live_sample = None
         except ValueError:
             raise
         except (RuntimeError, subprocess.TimeoutExpired) as exc:

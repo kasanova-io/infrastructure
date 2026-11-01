@@ -100,13 +100,55 @@ class RecoveryTest(unittest.TestCase):
         new["State"]["StartedAt"] = "after"
         after = {key: 2 for key in (*cold.COUNTERS, "blocks_processed")}
         with patch.object(cold, "bind"), patch.object(cold, "writers", return_value=["original"]), \
-                patch.object(cold, "inspect", side_effect=[old, new]), \
-                patch.object(cold, "metrics", return_value=after) as measured, \
+                patch.object(cold, "inspect", side_effect=[old, new, new]), \
+                patch.object(cold, "metrics", side_effect=[dict(after, blocks_processed=1), after]) as measured, \
                 patch.object(cold.time, "sleep"):
             result = cold.recover({"id": "original", "volume": "source"},
                                   {key: 1 for key in after}, "before", 10)
         self.assertEqual(result, after)
-        self.assertEqual(measured.call_count, 1)
+        self.assertEqual(measured.call_count, 2)
+
+    def test_process_counter_reset_is_accepted_only_after_same_new_process_advances(self):
+        new = {"State": {"Running": True, "StartedAt": "new", "Health": {"Status": "healthy"}}}
+        baseline = {key: 12 for key in cold.COUNTERS}; baseline["blocks_processed"] = 11036077
+        first = dict(baseline, blocks_processed=3002200)
+        second = dict(baseline, blocks_processed=3003314)
+        with patch.object(cold, "bind"), patch.object(cold, "inspect", return_value=new), \
+                patch.object(cold, "writers", return_value=["original"]), \
+                patch.object(cold, "metrics", side_effect=[first, second]), \
+                patch.object(cold.time, "sleep"), patch.object(cold, "command") as command:
+            self.assertEqual(cold.recover({"id": "original", "volume": "source"}, baseline,
+                                         "old", 10, start_if_stopped=False), second)
+        command.assert_not_called()
+
+    def test_stalled_new_process_never_passes_even_if_counter_exceeds_old(self):
+        new = {"State": {"Running": True, "StartedAt": "new", "Health": {"Status": "healthy"}}}
+        baseline = {key: 1 for key in (*cold.COUNTERS, "blocks_processed")}
+        with patch.object(cold, "bind"), patch.object(cold, "inspect", return_value=new), \
+                patch.object(cold, "writers", return_value=["original"]), \
+                patch.object(cold, "metrics", return_value=dict(baseline, blocks_processed=99)), \
+                patch.object(cold.time, "monotonic", side_effect=[0, 0, 1, 11]), patch.object(cold.time, "sleep"):
+            with self.assertRaises(TimeoutError):
+                cold.recover({"id": "original", "volume": "source"}, baseline, "old", 10)
+
+    def test_a_second_restart_resets_the_progress_observation(self):
+        new = {"State": {"Running": True, "StartedAt": "new", "Health": {"Status": "healthy"}}}
+        again = copy.deepcopy(new); again["State"]["StartedAt"] = "again"
+        baseline = {key: 1 for key in (*cold.COUNTERS, "blocks_processed")}
+        with patch.object(cold, "bind"), patch.object(cold, "inspect", side_effect=[new, again, again]), \
+                patch.object(cold, "writers", return_value=["original"]), \
+                patch.object(cold, "metrics", side_effect=[dict(baseline, blocks_processed=i) for i in [9, 10, 11]]) as measured, \
+                patch.object(cold.time, "sleep"):
+            result = cold.recover({"id": "original", "volume": "source"}, baseline, "old", 10)
+        self.assertEqual(measured.call_count, 3)
+        self.assertEqual(result["blocks_processed"], 11)
+
+    def test_readonly_reconciliation_never_starts_a_stopped_original(self):
+        with patch.object(cold, "bind"), patch.object(cold, "inspect", return_value={"State": {"Running": False}}), \
+                patch.object(cold, "writers", return_value=[]), patch.object(cold, "command") as command:
+            with self.assertRaisesRegex(ValueError, "never starts"):
+                cold.recover({"id": "original", "volume": "source"}, {}, "old", 10, start_if_stopped=False)
+        command.assert_not_called()
 
     def test_foreign_writer_is_preserved_and_original_not_started(self):
         stopped = {"State": {"Running": False}}
@@ -121,12 +163,12 @@ class RecoveryTest(unittest.TestCase):
         stopped = {"State": {"Running": False}}
         running = {"State": {"Running": True, "StartedAt": "after", "Health": {"Status": "healthy"}}}
         reader, identity = helper_fixture()
-        states = iter([stopped, running])
+        states = iter([stopped, running, running])
         after = {key: 2 for key in (*cold.COUNTERS, "blocks_processed")}
         with patch.object(cold, "bind"), \
                 patch.object(cold, "inspect", side_effect=lambda name: reader if name == identity["id"] else next(states)), \
                 patch.object(cold, "writers", return_value=[identity["id"]]), \
-                patch.object(cold, "metrics", return_value=after), \
+                patch.object(cold, "metrics", side_effect=[dict(after, blocks_processed=1), after]), \
                 patch.object(cold, "command") as command, patch.object(cold.time, "sleep"):
             cold.recover({"id": "original", "volume": "source"},
                          {key: 1 for key in after}, "before", 10,
