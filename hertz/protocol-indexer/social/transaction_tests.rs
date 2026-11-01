@@ -135,6 +135,180 @@ fn signed(root: &str, action: &str, tail: &str, message: &str, id: u8) -> Transa
     }
 }
 
+/// Native-shaped retained rows from real SDK-verified deterministic vectors.
+/// These are neither chain transactions nor original-wire recovery evidence.
+fn retained_audit_input(processor: &KProtocolProcessor, root: &str, transactions: &[Transaction]) -> serde_json::Value {
+    use serde_json::json;
+    let mut tables = json!({"public.k_contents":[],"public.k_votes":[],"public.k_broadcasts":[],
+        "public.k_follows":[],"public.k_blocks":[],"public.k_mentions":[]});
+    let mut mention_id = 0i64;
+    for (index, tx) in transactions.iter().enumerate() {
+        let verified = processor.verify_transaction(tx).unwrap();
+        let mut row = json!({"id":index+1,"transaction_id":format!("\\x{}",tx.transaction_id),
+            "block_time":tx.block_time.unwrap()});
+        let (table, key, signature, kind, mentions) = match verified.action() {
+            KActionType::Post(v) => {
+                row["content_type"]=json!("post");row["referenced_content_id"]=serde_json::Value::Null;
+                row["base64_encoded_message"]=json!(v.base64_encoded_message);
+                ("public.k_contents",&v.sender_pubkey,&v.sender_signature,"post",v.mentioned_pubkeys.clone())
+            }
+            KActionType::Reply(v) => {
+                row["content_type"]=json!("reply");row["referenced_content_id"]=json!(format!("\\x{}",v.post_id));
+                row["base64_encoded_message"]=json!(v.base64_encoded_message);
+                ("public.k_contents",&v.sender_pubkey,&v.sender_signature,"reply",v.mentioned_pubkeys.clone())
+            }
+            KActionType::Quote(v) => {
+                row["content_type"]=json!("quote");row["referenced_content_id"]=json!(format!("\\x{}",v.content_id));
+                row["base64_encoded_message"]=json!(v.base64_encoded_message);
+                ("public.k_contents",&v.sender_pubkey,&v.sender_signature,"quote",vec![v.mentioned_pubkey.clone()])
+            }
+            KActionType::Vote(v) => {
+                row["post_id"]=json!(format!("\\x{}",v.post_id));row["vote"]=json!(v.vote);
+                ("public.k_votes",&v.sender_pubkey,&v.sender_signature,"vote",vec![v.mentioned_pubkey.clone()])
+            }
+            KActionType::Broadcast(v) => {
+                row["base64_encoded_nickname"]=json!(v.base64_encoded_nickname);
+                row["base64_encoded_profile_image"]=json!(v.base64_encoded_profile_image);
+                row["base64_encoded_message"]=json!(v.base64_encoded_message);
+                ("public.k_broadcasts",&v.sender_pubkey,&v.sender_signature,"broadcast",vec![])
+            }
+            KActionType::Follow(v) => {
+                row["following_action"]=json!(v.following_action);row["followed_user_pubkey"]=json!(format!("\\x{}",v.followed_user_pubkey));
+                ("public.k_follows",&v.sender_pubkey,&v.sender_signature,"follow",vec![])
+            }
+            KActionType::Block(v) => {
+                row["blocking_action"]=json!(v.blocking_action);row["blocked_user_pubkey"]=json!(format!("\\x{}",v.blocked_user_pubkey));
+                ("public.k_blocks",&v.sender_pubkey,&v.sender_signature,"block",vec![])
+            }
+            KActionType::Unknown(_) => unreachable!(),
+        };
+        row["sender_pubkey"]=json!(format!("\\x{key}"));row["sender_signature"]=json!(format!("\\x{signature}"));
+        tables[table].as_array_mut().unwrap().push(row);
+        for mention in mentions {
+            mention_id+=1;
+            tables["public.k_mentions"].as_array_mut().unwrap().push(json!({"id":mention_id,
+                "content_id":format!("\\x{}",tx.transaction_id),"content_type":kind,
+                "mentioned_pubkey":format!("\\x{mention}"),"sender_pubkey":format!("\\x{key}"),"block_time":tx.block_time}));
+        }
+    }
+    let counts = tables.as_object().unwrap().iter().map(|(k,v)|(k.clone(),json!(v.as_array().unwrap().len()))).collect::<serde_json::Map<_,_>>();
+    json!({"schema":"kasanova-native-social-fields-v1","network":"testnet-10","native_schema_version":"2",
+        "assumed_root":root,"declared_snapshot_sha256":"a".repeat(64),"table_counts":counts,"tables":tables})
+}
+
+fn retained_audit(processor: &KProtocolProcessor, input: &serde_json::Value, network: &str) -> anyhow::Result<crate::retained_signature_audit::Report> {
+    crate::retained_signature_audit::audit(processor,network,&serde_json::to_vec(input)?)
+}
+
+#[tokio::test]
+async fn pure_retained_sdk_audit_recovers_all_original_native_action_shapes() {
+    let (p, _) = processor();
+    let parent="aa".repeat(32);let mentioned="bb".repeat(32);
+    for root in ["k","kchat"] {
+        let vectors=vec![
+            signed(root,"post","aGk=:[]","aGk=:[]",201),
+            signed(root,"post",&format!("aGk=:[\"{mentioned}\",\"{parent}\"]"),&format!("aGk=:[\"{mentioned}\",\"{parent}\"]"),202),
+            signed(root,"reply",&format!("{parent}:aGk=:[\"{mentioned}\"]"),&format!("{parent}:aGk=:[\"{mentioned}\"]"),203),
+            signed(root,"quote",&format!("{parent}:aGk=:{mentioned}"),&format!("{parent}:aGk=:{mentioned}"),204),
+            signed(root,"vote",&format!("{parent}:upvote:{mentioned}"),&format!("{parent}:upvote:{mentioned}"),205),
+            signed(root,"broadcast","bg==::aGk=","bg==::aGk=",206),
+            signed(root,"follow",&format!("follow:{mentioned}"),&format!("follow:{mentioned}"),207),
+            signed(root,"block",&format!("block:{mentioned}"),&format!("block:{mentioned}"),208),
+        ];
+        let mut input=retained_audit_input(&p,root,&vectors);
+        input["tables"]["public.k_mentions"].as_array_mut().unwrap().reverse();
+        let report=retained_audit(&p,&input,"testnet-10").unwrap();
+        assert_eq!(report.recoverable_records,8);assert_eq!(report.unrecoverable_records,0);
+        assert!(!report.original_wire_verified && !report.original_transaction_identity_verified && !report.chain_acceptance_verified && !report.complete_history_verified && !report.caller_snapshot_provenance_verified);
+        assert!(report.records.iter().all(|r|r.original_native_time==12345));
+    }
+}
+
+#[tokio::test]
+async fn pure_retained_audit_does_not_infer_wire_root_or_transaction_identity_from_signature() {
+    let (p, _) = processor();
+    let tx=signed("k","post","aGk=:[]","aGk=:[]",209);
+    let mut input=retained_audit_input(&p,"k",&[tx]);
+    input["assumed_root"]=serde_json::json!("kchat");
+    input["tables"]["public.k_contents"][0]["transaction_id"]=serde_json::json!(format!("\\x{}","fa".repeat(32)));
+    let report=retained_audit(&p,&input,"testnet-10").unwrap();
+    assert_eq!(report.recoverable_records,1);
+    assert!(!report.original_wire_verified && !report.original_transaction_identity_verified && !report.chain_acceptance_verified);
+}
+
+#[tokio::test]
+async fn pure_retained_audit_keeps_unrecoverable_fields_without_declaring_invalid_chain_facts() {
+    let (p, _) = processor();let target="aa".repeat(32);let mention="bb".repeat(32);
+    let vectors=vec![signed("k","post","aGk=:[]","aGk=:[]",210),
+        signed("k","vote",&format!("{target}:upvote:{mention}"),&format!("{target}:upvote:{mention}"),211)];
+    let mut input=retained_audit_input(&p,"k",&vectors);
+    input["tables"]["public.k_contents"][0]["base64_encoded_message"]=serde_json::json!("b3Bz");
+    input["tables"]["public.k_mentions"]=serde_json::json!([]);input["table_counts"]["public.k_mentions"]=serde_json::json!(0);
+    let report=retained_audit(&p,&input,"testnet-10").unwrap();
+    assert_eq!(report.records.len(),2);assert_eq!(report.unrecoverable_records,2);
+    assert!(report.records.iter().all(|r|r.reason.unwrap().contains("validity is undetermined")));
+    assert!(!report.chain_acceptance_verified);
+}
+
+#[tokio::test]
+async fn pure_retained_audit_binds_table_counts_network_and_unique_native_identity() {
+    let (p, _) = processor();let tx=signed("k","post","aGk=:[]","aGk=:[]",212);
+    let input=retained_audit_input(&p,"k",&[tx]);
+    assert!(retained_audit(&p,&input,"mainnet").is_err());
+    let mut mainnet=input.clone();mainnet["network"]=serde_json::json!("mainnet");
+    assert_eq!(retained_audit(&p,&mainnet,"mainnet").unwrap().recoverable_records,1);
+    let mut bad=input.clone();bad["table_counts"]["public.k_contents"]=serde_json::json!(2);assert!(retained_audit(&p,&bad,"testnet-10").is_err());
+    let mut bad=input.clone();let row=bad["tables"]["public.k_contents"][0].clone();bad["tables"]["public.k_contents"].as_array_mut().unwrap().push(row);bad["table_counts"]["public.k_contents"]=serde_json::json!(2);assert!(retained_audit(&p,&bad,"testnet-10").is_err());
+    let mut bad=input.clone();bad["tables"].as_object_mut().unwrap().remove("public.k_blocks");assert!(retained_audit(&p,&bad,"testnet-10").is_err());
+    let mut bad=input;bad["chain_acceptance_verified"]=serde_json::json!(true);assert!(retained_audit(&p,&bad,"testnet-10").is_err());
+}
+
+#[tokio::test]
+async fn pure_retained_audit_preserves_mention_order_and_native_compressed_key_rules() {
+    let (p, _) = processor();let a="aa".repeat(32);let b="bb".repeat(32);
+    let tx=signed("k","post",&format!("aGk=:[\"{a}\",\"{b}\"]"),&format!("aGk=:[\"{a}\",\"{b}\"]"),213);
+    let input=retained_audit_input(&p,"k",&[tx]);
+    let mut compressed=input.clone();let key=compressed["tables"]["public.k_contents"][0]["sender_pubkey"].as_str().unwrap().to_string();
+    compressed["tables"]["public.k_contents"][0]["sender_pubkey"]=serde_json::json!(format!("\\x02{}",&key[2..]));
+    assert_eq!(retained_audit(&p,&compressed,"testnet-10").unwrap().recoverable_records,1);
+    compressed["tables"]["public.k_contents"][0]["sender_pubkey"]=serde_json::json!(format!("\\x04{}",&key[2..]));
+    assert_eq!(retained_audit(&p,&compressed,"testnet-10").unwrap().unrecoverable_records,1);
+    let mut order=input;order["tables"]["public.k_mentions"][0]["id"]=serde_json::json!(2);order["tables"]["public.k_mentions"][1]["id"]=serde_json::json!(1);
+    assert_eq!(retained_audit(&p,&order,"testnet-10").unwrap().unrecoverable_records,1);
+}
+
+#[test]
+fn pure_retained_audit_cli_is_explicit_and_cannot_enable_mutating_modes() {
+    use clap::Parser;
+    assert!(crate::Args::try_parse_from(["processor","--shared-source-id","source"]).is_ok());
+    assert!(crate::Args::try_parse_from(["processor","--audit-retained-history","input"]).is_err());
+    assert!(crate::Args::try_parse_from(["processor","--audit-retained-history-report","output"]).is_err());
+    for other in ["--initialize-db","--upgrade-db","--shared-source-id"] {
+        let mut argv=vec!["processor","--audit-retained-history","input","--audit-retained-history-report","output",other];
+        if other=="--shared-source-id" {argv.push("source");}
+        assert!(crate::Args::try_parse_from(argv).is_err());
+    }
+}
+
+#[tokio::test]
+async fn pure_retained_audit_file_mode_never_overwrites_report_or_connects_its_configured_pool() {
+    use clap::Parser;
+    let (p, _) = processor();let tx=signed("k","post","aGk=:[]","aGk=:[]",214);
+    let input=retained_audit_input(&p,"k",&[tx]);
+    let root=std::env::temp_dir().join(format!("retained-audit-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir(&root).unwrap();let data=root.join("input.json");let output=root.join("report.json");
+    std::fs::write(&data,serde_json::to_vec(&input).unwrap()).unwrap();
+    let args=crate::Args::try_parse_from(["processor","--db-host","no-such-database.invalid","--db-port","1"]).unwrap();
+    let config=crate::config::AppConfig::from_args(&args);
+    crate::retained_signature_audit::run(&config,&data,&output).await.unwrap();
+    let original=std::fs::read(&output).unwrap();
+    assert!(crate::retained_signature_audit::run(&config,&data,&output).await.is_err());
+    assert_eq!(std::fs::read(&output).unwrap(),original);
+    let report:serde_json::Value=serde_json::from_slice(&original).unwrap();assert_eq!(report["recoverable_records"],1);
+    assert_eq!(report["chain_acceptance_verified"],false);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn pure_kaposts_poll_shape_unicode_and_chain_time_boundaries() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};

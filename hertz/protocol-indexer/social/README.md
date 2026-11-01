@@ -42,6 +42,57 @@ commit behavior and cross-root signature deduplication. It neither signs with a
 wallet fixture nor broadcasts a transaction; it is not real-chain acceptance.
 The original ISC notice is retained in source and both runtime images.
 
+## Offline retained signing fields
+
+The existing processor also has an explicit offline audit mode:
+
+```sh
+social-processor --network "$CONFIGURED_NETWORK" \
+  --audit-retained-history "$NATIVE_FIELD_SNAPSHOT" \
+  --audit-retained-history-report "$NEW_PRIVATE_REPORT"
+```
+
+The two paths are required together and conflict with schema initialization,
+schema upgrade and the shared worker. This mode returns before pool connection,
+schema changes, listeners or reindexing. It builds only a lazy, unacquired pool
+using the existing configured options, then reuses the original native parser
+and Kaspa SDK verifier. It creates a new mode-0600 metadata report and refuses
+to overwrite any existing report. No new dependency, signature algorithm,
+public endpoint or source ownership is introduced.
+
+Input schema `kasanova-native-social-fields-v1` contains the exact configured
+network, native schema version `2`, an explicit `assumed_root` (`k` or `kchat`),
+a caller-declared snapshot digest, counts, and retained PostgreSQL JSON rows for
+`public.k_contents`, `k_votes`, `k_broadcasts`, `k_follows`, `k_blocks` and
+`k_mentions`. All six names must be present in both maps. The regular input file
+is bounded to64MiB/100000rows. A wrong network, count, missing table or duplicate
+native identity fails the audit. Mentions are ordered by their retained native
+IDs; a missing or ambiguous single mention is not guessed from another author.
+
+The report says only whether retained fields reproduce a signing string accepted
+by the existing SDK. Both32-byte and valid33-byte signer forms keep the original
+verifier's rules. Unrecoverable fields remain listed and cause a nonzero exit
+after the report is persisted; they do not prove an invalid original transaction.
+The report does not expose message bodies, public keys or signatures.
+
+Original wire spelling/root, transaction identity, chain acceptance, source
+provenance and complete history are explicitly **not verified**. In particular,
+the wire root is outside these signing strings and a copied signature can verify
+under another transaction ID. The declared digest is not independently checked by
+this CLI: its caller must bind the input to an accepted native snapshot. Never
+use this report as a canonical receipt or automatic permission to adopt legacy
+rows. Native ownership/history reconciliation remains a separate reviewed step.
+
+The `retained_signature_audit_candidate` entry in `SOURCE.lock` records the
+current source inputs and offline image separately from the earlier accepted
+shared writer at the top of that file. The new image passed 54 native unit tests
+and a private offline check of all 26 retained native records (14 contents and
+12 votes, with 15 mention rows). All signing fields were recoverable. Original
+native IDs and timestamps were preserved, and wrong-network, overwrite and
+schema-initialization attempts were rejected. The 39 PostgreSQL contracts were
+not rerun for this isolated mode; storage, SQL and the verifier are unchanged.
+All test actors stopped. No public worker, routing or ownership was activated.
+
 ## Shared canonical consumer
 
 `--shared-source-id <journal UUID>` selects the canonical consumer before pool

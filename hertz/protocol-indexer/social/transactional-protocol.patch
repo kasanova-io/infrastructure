@@ -477,7 +477,7 @@
 +                .execute(&mut *connection)
 --- a/K-transaction-processor/src/main.rs
 +++ b/K-transaction-processor/src/main.rs
-@@ -8,0 +9,9 @@
+@@ -8,0 +9,10 @@
 +mod shared_social;
 +mod tips;
 +mod tip_evidence;
@@ -487,11 +487,24 @@
 +mod kaposts;
 +mod kaposts_projection;
 +mod read_views;
-@@ -73,0 +83,3 @@
++mod retained_signature_audit;
+@@ -73,0 +84,9 @@
 +
 +    #[arg(long, help = "Use existing common canonical journal; never starts a scanner")]
 +    shared_source_id: Option<String>,
-@@ -111,0 +124,15 @@
++
++    #[arg(long, requires = "audit_retained_history_report", conflicts_with_all = ["shared_source_id", "initialize_db", "upgrade_db"], help = "Offline SDK audit of retained native signing fields; never writes a database")]
++    audit_retained_history: Option<std::path::PathBuf>,
++
++    #[arg(long, requires = "audit_retained_history", help = "New metadata report file; never overwrites an existing artifact")]
++    audit_retained_history_report: Option<std::path::PathBuf>,
+@@ -95,0 +115,5 @@
++    if let Some(input) = &args.audit_retained_history {
++        let output = args.audit_retained_history_report.as_ref()
++            .ok_or_else(|| anyhow::anyhow!("retained audit requires a new report path"))?;
++        return retained_signature_audit::run(&config, input, output).await;
++    }
+@@ -111,0 +136,15 @@
 +    if let Some(source_id) = &args.shared_source_id {
 +        anyhow::ensure!(!args.initialize_db && !args.upgrade_db,
 +            "shared mode requires an existing reconciled native schema; schema reset/upgrade is not permitted");
@@ -507,7 +520,7 @@
 +        };
 +    }
 +
-@@ -194,0 +222,3 @@
+@@ -194,0 +234,3 @@
 +
 +#[cfg(test)]
 +mod shared_protocol_tests;
