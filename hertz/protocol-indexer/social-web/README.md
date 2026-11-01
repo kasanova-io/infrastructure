@@ -171,3 +171,11 @@ Genuine new DEV/TN10 protocol acceptance, broader historical Social/API
 reconciliation, representative-history query-plan acceptance and complete
 six-family cutover remain required. These tests do not establish public route
 activation, a visible tip counter, notification delivery or native-wallet QA.
+
+The action-protocol candidate adds optional `protocol` metadata on the same read
+snapshot as post bodies and verified tip counts. Canonical payload bytes establish
+`k` or `kchat`; presentation markers and signature aliases do not establish roots.
+Retained SDK snapshots reconstructed from an import hint report `unknown` until
+their actual payload is recovered. Counts and read-only history remain available.
+Legacy readers omit the additive field. This metadata alone is not write or
+public-cutover acceptance; the current candidate's verdict is in `SOURCE.lock`.

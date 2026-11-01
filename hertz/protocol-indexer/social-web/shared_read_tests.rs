@@ -109,7 +109,7 @@ async fn action(pool: &PgPool, n: u8, table: &str, subject: String, operation: &
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,snapshot) VALUES($1,1,$2,$3,'00',$4,'verified',$5,'{\"k_mentions\":[]}'::jsonb)")
+    sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,snapshot) VALUES($1,1,$2,$3,encode(convert_to('k:1:fixture','UTF8'),'hex'),$4,'verified',$5,'{\"k_mentions\":[]}'::jsonb)")
         .bind(id(n)).bind(subject).bind(table).bind(time).bind(operation).execute(pool).await.unwrap();
 }
 async fn post(pool: &PgPool, n: u8, time: i64) {
@@ -581,6 +581,10 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
     // original DTO field and exclusive cursor comparison against legacy.
     for post in a["posts"].as_array_mut().unwrap() {
         assert_eq!(
+            post.as_object_mut().unwrap().remove("protocol"),
+            Some(json!("k"))
+        );
+        assert_eq!(
             post.as_object_mut().unwrap().remove("tipsCount"),
             Some(json!(0))
         );
@@ -596,6 +600,10 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
         .unwrap();
     let mut a: serde_json::Value = serde_json::from_str(&a).unwrap();
     for post in a["posts"].as_array_mut().unwrap() {
+        assert_eq!(
+            post.as_object_mut().unwrap().remove("protocol"),
+            Some(json!("k"))
+        );
         assert_eq!(
             post.as_object_mut().unwrap().remove("tipsCount"),
             Some(json!(0))
@@ -656,7 +664,7 @@ async fn postgres_shared_reads_vote_lookup_preserves_unknown_but_fences_known_li
         .await
         .unwrap();
     // Same-signature target metadata cannot rescue its explicitly revoked ID.
-    sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action) VALUES($1,1,$2,'k_contents','00',1000,'verified','signed')")
+    sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action) VALUES($1,1,$2,'k_contents',encode(convert_to('k:1:fixture','UTF8'),'hex'),1000,'verified','signed')")
         .bind(id(99)).bind(format!("k_contents:{}",hex::encode(sig(1)))).execute(&db.pool).await.unwrap();
     sqlx::query("INSERT INTO social_shared.content_keys VALUES($1,$2,$3,'post',NULL,1000)")
         .bind(id(99))
@@ -726,7 +734,7 @@ async fn postgres_shared_reads_hashtags_and_both_network_configurations_keep_con
 #[tokio::test]
 async fn postgres_shared_reads_page_work_stays_bounded_with_unrelated_history() {
     let db = setup().await;
-    sqlx::query("WITH source AS (SELECT g,decode(md5('post-a-'||g)||md5('post-b-'||g),'hex') tx,decode(repeat(md5('signature-'||g),4),'hex') signature FROM generate_series(1,10000) g), canonical AS (INSERT INTO protocol_indexer.canonical SELECT tx,1,'{}',decode(repeat('ab',32),'hex') FROM source), actions AS (INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,snapshot) SELECT tx,1,'k_contents:'||encode(signature,'hex'),'k_contents','00',1700000000000+g,'verified','signed','{\"k_mentions\":[]}' FROM source), native AS (INSERT INTO public.k_contents(transaction_id,block_time,sender_pubkey,sender_signature,base64_encoded_message,content_type) SELECT tx,1700000000000+g,$1,signature,'aGk=','post' FROM source) INSERT INTO social_shared.content_keys SELECT tx,signature,$1,'post',NULL,1700000000000+g FROM source")
+    sqlx::query("WITH source AS (SELECT g,decode(md5('post-a-'||g)||md5('post-b-'||g),'hex') tx,decode(repeat(md5('signature-'||g),4),'hex') signature FROM generate_series(1,10000) g), canonical AS (INSERT INTO protocol_indexer.canonical SELECT tx,1,'{}',decode(repeat('ab',32),'hex') FROM source), actions AS (INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,snapshot) SELECT tx,1,'k_contents:'||encode(signature,'hex'),'k_contents',encode(convert_to('k:1:fixture','UTF8'),'hex'),1700000000000+g,'verified','signed','{\"k_mentions\":[]}' FROM source), native AS (INSERT INTO public.k_contents(transaction_id,block_time,sender_pubkey,sender_signature,base64_encoded_message,content_type) SELECT tx,1700000000000+g,$1,signature,'aGk=','post' FROM source) INSERT INTO social_shared.content_keys SELECT tx,signature,$1,'post',NULL,1700000000000+g FROM source")
         .bind(author()).execute(&db.pool).await.unwrap();
     sqlx::raw_sql("ANALYZE public.k_contents; ANALYZE social_shared.actions; ANALYZE protocol_indexer.canonical; ANALYZE protocol_indexer.pending; ANALYZE social_shared.extensions").execute(&db.pool).await.unwrap();
     // Measure the actual existing feed DAO as well as the ordered view scan.
@@ -803,6 +811,85 @@ async fn tip_fixture(db: &PostgresDbManager) {
         .execute(&db.pool)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_protocol_is_actual_representative_root_on_same_snapshot() {
+    let db = setup().await;
+    tip_fixture(&db).await;
+    // The signature alias is KaChat but the visible retained representative is K.
+    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:post:key:sig:4oGgaGk=:[]','UTF8'),'hex') WHERE transaction_id=ANY($1)")
+        .bind(vec![id(2), id(9)]).execute(&db.pool).await.unwrap();
+    // A marker on K content must not change the transaction's actual namespace.
+    sqlx::query(
+        "UPDATE public.k_contents SET base64_encoded_message='4oGgaGk=' WHERE transaction_id=$1",
+    )
+    .bind(id(1))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut posts = feed(&db).await;
+    let root = |posts: &[crate::models::KPostRecord], n| {
+        posts
+            .iter()
+            .find(|p| p.transaction_id == hex::encode(id(n)))
+            .unwrap()
+            .protocol
+            .clone()
+    };
+    assert_eq!(root(&posts, 1).as_deref(), Some("k"));
+    assert_eq!(root(&posts, 2).as_deref(), Some("kchat"));
+    let legacy = PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: None,
+    };
+    assert!(feed(&legacy).await.iter().all(|p| p.protocol.is_none()));
+    let mut read = db.read_session().await.unwrap();
+    let dsn = std::env::var("SOCIAL_SHARED_WEB_TEST_DATABASE_URL").unwrap();
+    let mut writer = <sqlx::PgConnection as sqlx::Connection>::connect(&dsn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE social_shared.actions SET source_payload=encode(convert_to('k:1:fixture','UTF8'),'hex') WHERE transaction_id=$1",
+    )
+    .bind(id(2))
+    .execute(&mut writer)
+    .await
+    .unwrap();
+    db.enrich_tip_counts(&mut read, &mut posts).await.unwrap();
+    assert_eq!(root(&posts, 2).as_deref(), Some("kchat"));
+    drop(read);
+    assert_eq!(root(&feed(&db).await, 2).as_deref(), Some("k"));
+    sqlx::query(
+        "UPDATE social_shared.actions SET provenance='retained_native' WHERE transaction_id=$1",
+    )
+    .bind(id(1))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let retained = feed(&db).await;
+    assert_eq!(root(&retained, 1).as_deref(), Some("unknown"));
+    assert_eq!(
+        retained
+            .iter()
+            .find(|p| p.transaction_id == hex::encode(id(1)))
+            .unwrap()
+            .tips_count,
+        Some(1)
+    );
+    sqlx::query(
+        "UPDATE social_shared.actions SET source_payload=encode(convert_to('other:1:post','UTF8'),'hex') WHERE transaction_id=$1",
+    )
+    .bind(id(2))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        db.get_all_posts(&hex::encode(viewer()), options(20))
+            .await
+            .is_err()
+    );
+    db.pool.close().await;
 }
 
 #[tokio::test]
