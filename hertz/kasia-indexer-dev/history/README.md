@@ -226,3 +226,30 @@ live notification pipeline still needs operational acceptance.
 synthetic source/authorization checks, not real chain or APNs acceptance. Live
 source catch-up, current-history reconciliation, ordinary-transfer Address
 Activity continuity and real notification delivery remain pre-cutover gates.
+
+
+## Shared ordinary Address Activity
+
+Ordinary payments now have durable raw-source activity state and pending work,
+separate from protocol parsing. The native worker reuses the registered watch
+union, existing Funds event factory and dispatcher. A watched candidate fetches
+its containing block through the existing RPC client; SDK transaction ID, full
+script versions, amounts, outpoints and header context must match. Current SQL
+body, real nonarchive acceptance, native/source identity and epoch are checked
+again under locks before queue admission and acknowledgement. Shared alerts wait
+for acceptance; standalone block-sighting behavior is unchanged.
+
+First actual native activation creates a persistent epoch after schema readiness
+and native binding. Old observed/queued/body times stay quiet. Failed queue
+admission retains work; handled state prevents normal replay/reacceptance from
+notifying twice. Retention protects pending/unhandled raw rows. Only its own
+acceptance deletion suppresses wakeups. Worker shutdown joins before SyncAll.
+External delivery retains the dispatcher's existing best-effort semantics.
+
+The current candidate passes 91 unique native cases (78 ordinary plus 13
+PostgreSQL), including all previous Chat authorization cases, and 131 common
+Python/PostgreSQL cases. Its compiled source fixture is the exact concatenation
+of Simply schema 23, the common schema and activity SQL. The earlier compile and
+quiet-batch failures remain adverse. Live worker restart, real payment/provider
+delivery, current-source reconciliation and DEV cutover remain unverified.
+The candidate is not activated; `shared-dm-source.lock` records exact images.

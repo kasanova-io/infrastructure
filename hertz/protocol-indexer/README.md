@@ -36,7 +36,8 @@ snapshot (adapter `40748e8`) and replayed all six families. That collector and
 adapter are now stopped while the adopted retained copy catches up through the
 same Simply collector image, using its normal saved checkpoint. The current
 27-input `c504f25c287a` producer images have been built from feature revision
-`2d83a3c`; their adapter and connector workers remain stopped. The private
+`2d83a3c`; the adapter now runs against a fresh binding to the healthy retained
+source. The connector and native consumers remain stopped. The private
 collector has demonstrated durable checkpoint and all four pipeline-stage
 advancement, while preserving the native Social rows. This is catch-up, not
 public readiness. The earlier readiness failure and preflight refusal remain

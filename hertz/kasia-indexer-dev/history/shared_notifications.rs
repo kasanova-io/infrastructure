@@ -89,13 +89,13 @@ fn event(incoming: &JournalTx, network: &str) -> Result<Option<PushEvent>> {
 }
 
 /// A configured private source, never a caller-supplied URL or binding.
-struct Source {
-    client: postgres::Client,
-    binding: serde_json::Value,
+pub(super) struct Source {
+    pub(super) client: postgres::Client,
+    pub(super) binding: serde_json::Value,
 }
 
 impl Source {
-    fn configured() -> Result<Self> {
+    pub(super) fn configured() -> Result<Self> {
         use std::str::FromStr;
         let binding_path = std::env::var("PROTOCOL_SOURCE_BINDING")
             .unwrap_or_else(|_| "/run/protocol-indexer/source-binding.json".into());
@@ -173,6 +173,24 @@ fn notify_with_source(
         .map_err(|_| anyhow::anyhow!("notification source admission unavailable"))
 }
 
+/// Validate the configured SQL instance before using any notification data.
+pub(super) fn source_identity(
+    sql: &mut postgres::Transaction<'_>, binding: &serde_json::Value, network: &str,
+) -> Result<String> {
+    let identity = sql.query_one("SELECT c.network,c.journal_id::text,c.source_revision,
+        system_identifier::text,(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),current_database()
+        FROM protocol_indexer.config c CROSS JOIN pg_control_system()", &[])?;
+    let expected = &binding["database"];
+    ensure!(binding["schema_version"] == 1 && binding["network"].as_str() == Some(network)
+        && identity.get::<_, String>(0) == network
+        && Some(identity.get::<_, String>(2).as_str()) == binding["source_revision"].as_str()
+        && Some(identity.get::<_, String>(3).as_str()) == expected["system_identifier"].as_str()
+        && Some(identity.get::<_, i64>(4)) == expected["oid"].as_i64()
+        && Some(identity.get::<_, String>(5).as_str()) == expected["name"].as_str(),
+        "notification SQL identity differs from bound source");
+    Ok(identity.get(1))
+}
+
 fn admit(
     mut sql: postgres::Transaction<'_>,
     binding: &serde_json::Value,
@@ -184,18 +202,8 @@ fn admit(
     dispatch: impl FnOnce(PushEvent) -> Result<()>,
 ) -> Result<JournalResult> {
     sql.batch_execute("SET LOCAL statement_timeout='3s'; SET LOCAL lock_timeout='500ms'; SET LOCAL synchronous_commit=on")?;
-    let identity = sql.query_one("SELECT c.network,c.journal_id::text,c.source_revision,
-        system_identifier::text,(SELECT oid::bigint FROM pg_database WHERE datname=current_database()),current_database()
-        FROM protocol_indexer.config c CROSS JOIN pg_control_system()", &[])?;
-    let expected = &binding["database"];
-    ensure!(binding["schema_version"] == 1 && binding["network"].as_str() == Some(network)
-        && identity.get::<_, String>(0) == network
-        && identity.get::<_, String>(1) == batch.source_id
-        && Some(identity.get::<_, String>(2).as_str()) == binding["source_revision"].as_str()
-        && Some(identity.get::<_, String>(3).as_str()) == expected["system_identifier"].as_str()
-        && Some(identity.get::<_, i64>(4)) == expected["oid"].as_i64()
-        && Some(identity.get::<_, String>(5).as_str()) == expected["name"].as_str(),
-        "notification SQL identity differs from bound source");
+    ensure!(source_identity(&mut sql, binding, network)? == batch.source_id,
+        "notification journal identity mismatch");
     // SKIP LOCKED never waits in the opposite order to a collector/capture
     // transaction. The real acceptance and canonical guards survive queue entry.
     let current = sql.query_opt("SELECT c.revision,encode(c.accepting_block,'hex'),c.source_transaction->>'payload'

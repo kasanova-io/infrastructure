@@ -43,6 +43,11 @@ COPY history/shared_notifications.rs /src/indexer/src/api/v1/shared_notification
 COPY history/shared_notification_tests.rs /src/indexer/src/api/v1/shared_notification_tests.rs
 COPY history/shared-notifications.patch /tmp/shared-notifications.patch
 RUN patch -p1 < /tmp/shared-notifications.patch
+COPY history/shared_activity.rs /src/indexer/src/api/v1/shared_activity.rs
+COPY history/shared_activity_tests.rs /src/indexer/src/api/v1/shared_activity_tests.rs
+COPY history/shared_activity_schema.sql /src/indexer/src/api/v1/shared_activity_schema.sql
+COPY history/shared-activity.patch /tmp/shared-activity.patch
+RUN patch -p1 < /tmp/shared-activity.patch
 COPY history/notification-Cargo.toml /src/indexer/Cargo.toml
 COPY history/notification-Cargo.lock /src/Cargo.lock
 RUN cargo test --locked --release --workspace

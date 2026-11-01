@@ -25,7 +25,10 @@
     "private_dev_producer_active": false,
     "normal_inventory_families_replayed": 6,
     "collector_database_binding_preserved": true,
-    "bounded_native_consumer_upgrades_verified": ["native-social-v1", "native-chats-v1"],
+    "bounded_native_consumer_upgrades_verified": [
+      "native-social-v1",
+      "native-chats-v1"
+    ],
     "native_consumer_workers_running": false,
     "native_chats_retained_real_payments_verified": 3,
     "native_chats_first_upgrade_run_status": "FAIL",
@@ -43,10 +46,10 @@
     "source_manifest": "c504f25c287afb282e1696d2fec8de563b3284b211439debc5e4474feac613a1",
     "adapter_image_built": "sha256:cc2adfcb5aaeb75742dbb98b47d68126b4454f8a80499f06de1d7aaa37f591d6",
     "connector_image_built": "sha256:413e6fe9cce166fc01b47167a051439fd6b3d64415d872e6d96fe7cfd6f1d78f",
-    "phase": "collector-advancing-not-ready",
+    "phase": "private-producer-running",
     "collector_running": true,
     "original_private_collector_and_adapter_stopped": true,
-    "adapter_worker_running": false,
+    "adapter_worker_running": true,
     "native_consumers_running": false,
     "native_history_unchanged": true,
     "normal_saved_checkpoint_resume": true,
@@ -55,6 +58,9 @@
     "new_chain_transactions": 0,
     "activation_receipt_sha256": "9d0cfd01c7e8843aa3bfde878f27f9d64a2253d9f53466183e761200bcce1331",
     "prior_readiness_failure_preserved": true,
-    "prior_preflight_refusal_preserved": true
+    "prior_preflight_refusal_preserved": true,
+    "collector_healthy": true,
+    "source_binding_sha256": "495862f4f73c4f5b4517cbc28ac85cf4e8a5299df78eb8fc93c1520089a65134",
+    "adapter_activation_receipt_sha256": "06c5ab14b6952c250d1dade5b7ce083762b54d512b296b6be1732eb66ec698de"
   }
 }

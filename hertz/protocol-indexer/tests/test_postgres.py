@@ -64,6 +64,12 @@ class PostgresHarness(unittest.TestCase):
     def scalar(self, query, params=()):
         return next(iter(self.db.execute(query, params).fetchone().values()))
 
+    def activity_handled(self):
+        # Model the separate native activity ACK, not protocol ingestion.
+        with self.db.transaction():
+            self.db.execute("UPDATE protocol_indexer.activity_transactions SET handled=true")
+            self.db.execute("DELETE FROM protocol_indexer.activity_pending")
+
 class PostgresTests(PostgresHarness):
     def test_journal_epoch_is_stable_across_install_and_not_a_process_identity(self):
         before = self.scalar("SELECT journal_id FROM protocol_indexer.config")
@@ -251,6 +257,8 @@ class PostgresTests(PostgresHarness):
         txid = self.ingest()
         adapter = ScanAdapter(Family.KACHAT_POSTS)
         adapter.run_one(self.db)
+        self.assertEqual(prune_source(self.db, 3000), 0)
+        self.activity_handled()
         self.assertEqual(prune_source(self.db, 3000), 1)
         self.assertEqual(self.scalar("SELECT count(*) FROM transactions"), 0)
         self.assertEqual(self.scalar("SELECT count(*) FROM transactions_acceptances"), 1)
@@ -272,6 +280,8 @@ class PostgresTests(PostgresHarness):
         other = self.txid()
         self.body(other, b"non-protocol-payload")
         self.accept(other)
+        self.assertEqual(prune_source(self.db, 3000), 0)
+        self.activity_handled()
         self.assertEqual(prune_source(self.db, 3000), 1)
         self.assertEqual(self.scalar("SELECT count(*) FROM transactions"), 1)
         capture_one(self.db)
@@ -281,9 +291,13 @@ class PostgresTests(PostgresHarness):
         txid = self.txid()
         self.body(txid, None)
         self.accept(txid)
+        self.assertEqual(prune_source(self.db, 3000), 0)
+        self.activity_handled()
         self.assertEqual(prune_source(self.db, 3000), 1)
         self.assertEqual(self.scalar("SELECT count(*) FROM transactions"), 0)
         self.assertEqual(self.scalar("SELECT count(*) FROM transactions_acceptances"), 0)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.activity_pending"), 0)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.activity_transactions"), 0)
 
     def test_ordinary_chain_wakeups_use_bulk_cleanup_instead_of_six_adapters(self):
         self.db.execute("""INSERT INTO transactions_acceptances

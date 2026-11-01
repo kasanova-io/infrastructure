@@ -36,6 +36,7 @@ def install(conn, network, activated_at_ms=None):
                VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
             (network, SIMPLY_REVISION, activated_at_ms if activated_at_ms is not None else time.time_ns() // 1_000_000),
         )
+        conn.execute(files(__package__).joinpath("activity.sql").read_text())
         # Insert triggers before inventorying so concurrent writes are queued.
         # Reinstallation only queues rows not already durably captured.
         conn.execute("""
@@ -231,14 +232,22 @@ def prune_source(conn, before_ms, limit=10000):
             SELECT t.transaction_id FROM public.transactions t
             WHERE t.block_time < %s
               AND NOT EXISTS (SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id = t.transaction_id)
+              AND NOT EXISTS (SELECT 1 FROM protocol_indexer.activity_pending p WHERE p.transaction_id = t.transaction_id)
+              AND NOT EXISTS (SELECT 1 FROM protocol_indexer.activity_transactions s
+                              WHERE s.transaction_id = t.transaction_id AND NOT s.handled)
               AND (NOT protocol_indexer.is_candidate(t.payload)
                    OR EXISTS (SELECT 1 FROM protocol_indexer.canonical c WHERE c.transaction_id = t.transaction_id))
             ORDER BY t.block_time LIMIT %s FOR UPDATE OF t SKIP LOCKED
         """, (before_ms, limit)).fetchall()]
         if ids:
+            # Only this connection's retention DELETE is quiet. Real VCP
+            # removals on independent collector connections still wake activity.
+            previous = conn.execute("SELECT current_setting('protocol_indexer.activity_pruning',true) AS value").fetchone()["value"]
+            conn.execute("SELECT set_config('protocol_indexer.activity_pruning','true',true)")
             conn.execute("""DELETE FROM public.transactions_acceptances a
                 WHERE transaction_id = ANY(%s)
                   AND NOT EXISTS (SELECT 1 FROM protocol_indexer.canonical c
                                   WHERE c.transaction_id = a.transaction_id)""", (ids,))
             conn.execute("DELETE FROM public.transactions WHERE transaction_id = ANY(%s)", (ids,))
+            conn.execute("SELECT set_config('protocol_indexer.activity_pruning',%s,true)", (previous or "",))
         return len(ids)

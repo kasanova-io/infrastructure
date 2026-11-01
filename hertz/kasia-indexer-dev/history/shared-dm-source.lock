@@ -125,5 +125,25 @@
     "activated": false,
     "retry_and_store_reopen_deduplication_verified": true,
     "native_process_restart_with_live_notifications_verified": false
+  },
+  "address_activity_candidate": {
+    "source_manifest": "ebb9e0b2ee67db0b20cda635ebd45ca246de4b1f6b5527ba7187d2fd957abc5a",
+    "native_input_count": 28,
+    "runtime_image": "sha256:2904bf5d672e254327b7bcacb19a79a9b00f7b9ac79d06315eb3b9d72838ad53",
+    "contract_image": "sha256:108a5579a26b0bf7bb2c9fdda68be80fbbd82ab1dc23005ecbbd66f93d43fc0c",
+    "native_cases_passed": 91,
+    "ordinary_cases": 78,
+    "explicit_postgresql_cases": 13,
+    "common_source_manifest": "7b2c1ffd701f850f547df1376676e20eaa95ce176625fdf4aa732129a4c221ae",
+    "common_cases_passed": 131,
+    "contract_receipt_sha256": "4911173bfd8519573be8a7ef8e9056c4b7927cd6b7a257c27cb7d3a4b81f81a7",
+    "scope": "synthetic source/proof/queue/retention contracts; existing alert compatibility implementation",
+    "activated": false,
+    "native_worker_running": false,
+    "native_process_restart_with_live_notifications_verified": false,
+    "genuine_funds_provider_delivery_verified": false,
+    "public_cutover": false,
+    "prior_compile_failure_preserved": true,
+    "prior_quiet_batch_failure_preserved": true
   }
 }
