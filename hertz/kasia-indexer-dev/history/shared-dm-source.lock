@@ -98,5 +98,32 @@
     "evidence_sha256": "33440d8e29802cd7849f735c5516056422fa19e60a4a01ca0cf79cba8de9d241",
     "audit_map_sha256": "ebdb47a190dc290cede4993570439492c8da14628a48029016f47d70a31db871",
     "original_count_assertion_failed_and_preserved": true
+  },
+  "live_notifications_candidate": {
+    "source_manifest": "395510acc1ddbfd0ebfd288e2d6709cae571ffb02f172f3114dfc5f4944ab009",
+    "native_input_count": 24,
+    "runtime_image": "sha256:01e040c53e7c39c9f5e2e3554bc8b0d3d25c05592c1793945550f8911d9f8ad6",
+    "contract_image": "sha256:d0e6547e2ed7896fce4d172480d8129f51b5a8abc9ed115bcd4baaabc9318c20",
+    "runtime_binary_sha256": "baec4ffc5523025c63793223690ffa7bb68ef3c13c958651b5f31f5d9d1456a5",
+    "cargo_lock_sha256": "6cad2c57480df1f20f87316d11b7426108c6bfe789cc7e0d362d6ec203483d9a",
+    "prior_package_pins_preserved": 505,
+    "new_packages": 17,
+    "dependency_feature_graph_unchanged": false,
+    "ordinary_native_tests": 77,
+    "explicit_postgresql_tests": 9,
+    "unique_native_cases_passed": 86,
+    "common_python_cases_passed": 125,
+    "scope": "synthetic native source/HTTP/queue-admission authorization; no chain, provider delivery or cutover acceptance",
+    "crash_exactly_once_external_delivery_claimed": false,
+    "native_worker_running": false,
+    "source_connected_replay_verified": false,
+    "ordinary_address_activity_replacement_verified": false,
+    "real_provider_delivery_verified": false,
+    "public_cutover": false,
+    "initial_wrong_fixture_context_run_status": "FAIL",
+    "corrected_contexts_run_status": "PASS",
+    "activated": false,
+    "retry_and_store_reopen_deduplication_verified": true,
+    "native_process_restart_with_live_notifications_verified": false
   }
 }

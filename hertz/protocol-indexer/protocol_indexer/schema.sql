@@ -126,6 +126,16 @@ CREATE TABLE IF NOT EXISTS protocol_indexer.deliveries (
     PRIMARY KEY (consumer, event_id)
 );
 
+-- Consumer activation is independent from the older journal's activation.
+-- Upgrading a quiet native consumer must not notify its already imported history.
+CREATE TABLE IF NOT EXISTS protocol_indexer.notification_consumers (
+    consumer text PRIMARY KEY,
+    activated_at_ms bigint NOT NULL
+);
+INSERT INTO protocol_indexer.notification_consumers (consumer,activated_at_ms)
+VALUES ('native-chat-push-v1',(extract(epoch FROM clock_timestamp())*1000)::bigint)
+ON CONFLICT DO NOTHING;
+
 -- Poll only outstanding work, rather than repeatedly anti-joining a family's
 -- entire acknowledged history. Inserted atomically with each new event.
 CREATE TABLE IF NOT EXISTS protocol_indexer.delivery_pending (

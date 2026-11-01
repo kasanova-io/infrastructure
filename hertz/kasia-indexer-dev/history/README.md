@@ -189,3 +189,40 @@ replay, a verified current-source delta, live notification continuity and the
 reviewed DEV cutover remain separate gates. The immutable snapshot is never
 opened by Fjall; only the marked writable clone is opened. No new transaction
 or public traffic switch is part of this acceptance.
+
+## Shared live chat notification candidate
+
+Journal imports remain quiet. After a successful import, the connector requests
+notification admission separately through the same private authenticated route.
+The native handler validates its configured source binding and PostgreSQL
+identity, current journal/revision/payload, real acceptance and pending changes.
+It holds its own source and canonical guards through admission to the existing
+`PushDispatcher`, so delayed HTTP work rechecks authority after a caller timeout.
+Existing device, recipient, privacy and self-send filtering remains there.
+Notification aliases and encrypted payment payloads keep the live actor's wire
+representation; storage normalization does not change push matching or content.
+
+The common schema persists a separate notification-consumer activation epoch.
+Both connector and native admission require an eligible event and transaction
+time after that boundary. Reinstall/restart preserves it, and an upgrade cannot
+notify old, previously quiet history. Native SQL delivery receipts make normal
+HTTP retries and restarts idempotent. Queue admission precedes receipt commit:
+external delivery retains the existing best-effort semantics, with no claim of
+crash-exactly-once delivery. Missing source configuration denies notification
+admission while quiet import and standalone behavior remain available.
+
+The pinned client lock adds PostgreSQL support while preserving all 505 prior
+package/source/checksum pins; it adds 17 packages, with some resolved feature
+edges changing. The final image remains the minimal runtime. The explicit
+`notification-contract` target executes 77 ordinary native cases in their
+standalone fixture context, then all nine PostgreSQL/HTTP cases with the shared
+test source configured. All 86 unique cases passed. The initial runner mixed
+these contexts and failed nine existing fixtures; that result remains adverse.
+The corrected runner changes no Rust feature code or test assertions.
+The retry persistence case reopens the native store; a process restart with the
+live notification pipeline still needs operational acceptance.
+
+`shared-dm-source.lock` records this separate candidate and its scope. These are
+synthetic source/authorization checks, not real chain or APNs acceptance. Live
+source catch-up, current-history reconciliation, ordinary-transfer Address
+Activity continuity and real notification delivery remain pre-cutover gates.

@@ -10,6 +10,7 @@ from .archive import integer, raw_hex, require
 from .routing import native_chat, route
 
 CONSUMER = "native-chats-v1"
+NOTIFICATIONS = "native-chat-push-v1"
 
 
 class EvidencePending(Exception):
@@ -57,6 +58,11 @@ class NativeTransport:
         if result["stale"]:
             raise DeliveryPending("native_revision_ahead")
         return result
+
+    def notify(self, batch):
+        # Same private authenticated route, but never confuse importing history
+        # with authorizing a live notification.
+        return self.send({**batch, "notification": True})
 
 
 def native_transaction(row, evidence, accepting_header):
@@ -140,9 +146,32 @@ class ChatsConsumer:
                     last_error=%s WHERE consumer=%s AND transaction_id=%s""",
                     (timedelta(seconds=5), type(exc).__name__, CONSUMER, job["transaction_id"]))
                 return "deferred"
+            # Native notification admission owns its own source SQL fence.
+            # Do not take our canonical acknowledgement lock across HTTP: a
+            # timed-out handler may continue and must recheck current authority.
+            eligible = conn.execute("""SELECT e.event_id FROM protocol_indexer.events e
+                JOIN protocol_indexer.notification_consumers n ON n.consumer=%s
+                WHERE e.transaction_id=%s AND e.notify_allowed
+                  AND e.recorded_at >= to_timestamp(n.activated_at_ms / 1000.0)
+                  AND (e.source_transaction->>'block_time')::bigint >= n.activated_at_ms
+                  AND NOT EXISTS (SELECT 1 FROM protocol_indexer.deliveries d
+                      WHERE d.consumer=n.consumer AND d.event_id=e.event_id)
+                ORDER BY e.event_id LIMIT 1""", (NOTIFICATIONS, job["transaction_id"])).fetchone()
+            if eligible and row["accepting_block"] is not None:
+                try:
+                    self.transport.notify(batch)
+                    if conn.execute("SELECT 1 FROM protocol_indexer.deliveries WHERE consumer=%s AND event_id=%s",
+                                    (NOTIFICATIONS, eligible["event_id"])).fetchone() is None:
+                        raise DeliveryPending("native_notification_receipt_pending")
+                except DeliveryPending as exc:
+                    conn.execute("""UPDATE protocol_indexer.consumer_jobs
+                        SET available_at=clock_timestamp()+%s,last_error=%s
+                        WHERE consumer=%s AND transaction_id=%s""",
+                        (timedelta(seconds=5), type(exc).__name__, CONSUMER, job["transaction_id"]))
+                    return "deferred"
             # Fence only after HTTP, keeping live capture unblocked during I/O.
-            # A writer after this lock cannot see the old job disappear: its
-            # canonical update/INSERT wakeup happens after this transaction ends.
+            # The native notifier itself commits the durable delivery receipt;
+            # a transport acknowledgement alone never invents one here.
             latest = conn.execute("SELECT revision FROM protocol_indexer.canonical WHERE transaction_id=%s FOR UPDATE",
                                   (job["transaction_id"],)).fetchone()
             if latest["revision"] == revision:

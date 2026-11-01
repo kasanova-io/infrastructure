@@ -1,6 +1,6 @@
 //! Shared-journal transport through the existing private history-import route.
 //! Uses native message partitions/parser, monotonic revisions and durable acks.
-//! No pushes are emitted here; the existing notification path is integrated separately.
+//! History stays quiet. A separately fenced notification request uses the existing dispatcher.
 use super::export::ExportApi;
 use super::history::{HistoryTx, address_on_network, configured_prefix, import_batch_wtx};
 use anyhow::{Result, ensure};
@@ -32,6 +32,8 @@ pub struct JournalBatch {
     pub source_id: String,
     pub network: String,
     pub transactions: Vec<JournalTx>,
+    #[serde(default)]
+    pub notification: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -113,9 +115,19 @@ pub async fn import_journal(state: ExportApi, headers: HeaderMap, batch: Journal
         )
             .into_response();
     }
-    let result =
-        tokio::task::spawn_blocking(move || apply_batch(&state.tx_keyspace, &configured, &batch))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        // Serialize native import and notification admission. The notifier
+        // independently fences current shared SQL acceptance, even if the
+        // originating HTTP caller has already timed out.
+        let _guard = state.shared_ingestion_lock.lock()
+            .map_err(|_| anyhow::anyhow!("shared ingestion lock unavailable"))?;
+        if batch.notification {
+            super::shared_notifications::notify_batch(&state.tx_keyspace, &configured, &batch,
+                state.shared_push_tx.as_ref())
+        } else {
+            apply_batch(&state.tx_keyspace, &configured, &batch)
+        }
+    }).await;
     match result {
         Ok(Ok(result)) => {
             (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response()
@@ -184,6 +196,7 @@ pub fn apply_batch(
     configured: &str,
     batch: &JournalBatch,
 ) -> Result<JournalResult> {
+    ensure!(!batch.notification, "notification requests cannot import history");
     ensure!(
         batch.schema_version == 1,
         "unsupported shared ingestion schema"
@@ -345,6 +358,7 @@ mod tests {
             source_id: "a0a0a0a0-1111-4444-8888-012345678901".into(),
             network: network.into(),
             transactions,
+            notification: false,
         }
     }
 

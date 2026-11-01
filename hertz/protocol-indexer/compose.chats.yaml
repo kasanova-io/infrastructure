@@ -15,8 +15,15 @@ services:
       KASANOVA_SHARED_INGESTION_ENABLED: 'true'
       KASANOVA_SHARED_NETWORK: ${PROTOCOL_NETWORK:?required}
       KASANOVA_SHARED_INGEST_TOKEN: ${KASANOVA_SHARED_INGEST_TOKEN:?private bearer required}
+      PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
       RUST_LOG: info
-    volumes: [chats_data:/app/data]
+    volumes:
+      - chats_data:/app/data
+      - type: bind
+        source: ./source-binding.json
+        target: /run/protocol-indexer/source-binding.json
+        read_only: true
+        bind: {create_host_path: false}
     networks: [protocol, caddy_caddy_net]
     stop_signal: SIGINT
     stop_grace_period: 90s

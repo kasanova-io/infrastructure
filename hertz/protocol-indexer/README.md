@@ -473,3 +473,29 @@ rows unchanged, eight legacy/current API responses and original cursors identica
 wrong-source startup denied. Test services are stopped; public routing is unchanged.
 Broader history/cursors, six-family backfill acceptance and query cost at
 representative history remain prerequisites to shared public cutover.
+
+## Native chat notification admission
+
+Shared Chat imports do not emit notifications. The connector separately requests
+live admission only for the new consumer's eligible events and checks the native
+SQL delivery receipt before acknowledging its durable job. The new activation
+epoch is inserted once by normal schema initialization; upgrading or replaying
+old inventory cannot manufacture live notification eligibility.
+
+The native consumer uses the same configured private database and read-only
+source binding. It independently locks current canonical and real acceptance
+rows before passing an event to the existing dispatcher. The connector takes
+its final canonical acknowledgement fence after HTTP, avoiding lock inversion
+and leaving a delayed native handler responsible for rechecking current source
+authority. Recreate native Chats as well as adapters after replacing a mounted
+source-binding inode. The overlay supplies the existing database configuration;
+no new chain scanner, public route or wallet connection flow is introduced.
+
+The frozen common source passes 125 Python/PostgreSQL cases. The paired native
+candidate passes all 86 cases across ordinary and explicit PostgreSQL phases,
+including delayed timeout/revocation, real dispatch-boundary locks, separate
+epoch cutoffs, configured private HTTP admission and retry/store-reopen deduplication.
+These checks use disposable sources. Real chat/funds notification continuity,
+native process restart with live notifications, live catch-up, full current-source
+deltas and the DEV existing-host cutover remain
+pending. PROD and public route ownership are unchanged.

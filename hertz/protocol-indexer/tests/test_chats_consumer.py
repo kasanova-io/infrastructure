@@ -19,11 +19,26 @@ class Transport:
     def __init__(self, callback=None):
         self.batches = []
         self.callback = callback
+        self.notifications = []
+        self.notify_callback = None
 
     def send(self, batch):
         self.batches.append(batch)
         if self.callback:
             self.callback(batch)
+        return {"applied": 1, "duplicates": 0, "stale": 0}
+
+    def notify(self, batch):
+        if self.notify_callback:
+            self.notify_callback(batch)
+        # Explicit native acknowledgement fixture only. Real native SQL
+        # authorization/receipt contracts run in the Rust PostgreSQL suite.
+        with connect(DSN) as native:
+            native.execute("""INSERT INTO protocol_indexer.deliveries(consumer,event_id)
+                SELECT 'native-chat-push-v1',event_id FROM protocol_indexer.events
+                WHERE transaction_id=%s AND notify_allowed ON CONFLICT DO NOTHING""",
+                (bytes.fromhex(batch['transactions'][0]['transaction']['tx_id']),))
+        self.notifications.append(batch)
         return {"applied": 1, "duplicates": 0, "stale": 0}
 
 
@@ -34,6 +49,103 @@ def resolved(conn, row):
 
 
 class ConsumerTests(PostgresHarness):
+    def setUp(self):
+        super().setUp()
+        # Explicit synthetic activation, matching the journal fixture clock.
+        self.db.execute("UPDATE protocol_indexer.notification_consumers SET activated_at_ms=1000")
+
+    def test_live_notification_is_separate_from_import_and_durably_once(self):
+        txid = self.ingest(b"ciph_msg:1:handshake:sealed")
+        transport = Transport()
+        consumer = ChatsConsumer("testnet-10", resolved, transport)
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(len(transport.batches), 1)
+        self.assertEqual(transport.notifications, transport.batches)
+        self.db.execute("INSERT INTO protocol_indexer.consumer_jobs (consumer,transaction_id) VALUES ('native-chats-v1',%s)", (txid,))
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(len(transport.batches), 2)
+        self.assertEqual(len(transport.notifications), 1)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.deliveries WHERE consumer='native-chat-push-v1'"), 1)
+
+    def test_historical_import_and_inventory_replay_stay_quiet(self):
+        txid = self.ingest(b"kchat:1:handshake:sealed", timestamp=999)
+        transport = Transport()
+        consumer = ChatsConsumer("testnet-10", resolved, transport)
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.db.execute("INSERT INTO protocol_indexer.consumer_jobs (consumer,transaction_id) VALUES ('native-chats-v1',%s)", (txid,))
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(len(transport.batches), 2)
+        self.assertEqual(transport.notifications, [])
+
+    def test_native_rejection_after_import_keeps_notification_job(self):
+        self.ingest(b"kchat:1:handshake:sealed")
+        transport = Transport()
+        transport.notify_callback = lambda _: (_ for _ in ()).throw(DeliveryPending("native source admission rejected"))
+        self.assertEqual(ChatsConsumer("testnet-10", resolved, transport).run_one(self.db), "deferred")
+        self.assertEqual(transport.notifications, [])
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 1)
+
+    def test_failed_notification_keeps_job_and_eligibility_for_retry(self):
+        self.ingest(b"kchat:1:handshake:sealed")
+        transport = Transport()
+        transport.notify_callback = lambda _: (_ for _ in ()).throw(DeliveryPending("fixture response lost"))
+        consumer = ChatsConsumer("testnet-10", resolved, transport)
+        self.assertEqual(consumer.run_one(self.db), "deferred")
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 1)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.deliveries WHERE consumer='native-chat-push-v1'"), 0)
+        transport.notify_callback = None
+        self.db.execute("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()")
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(len(transport.notifications), 1)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.deliveries WHERE consumer='native-chat-push-v1'"), 1)
+
+    def test_transport_ack_without_native_durable_receipt_cannot_consume_notification(self):
+        self.ingest(b"kchat:1:handshake:sealed")
+        transport = Transport()
+        transport.notify = lambda _: {"applied": 1, "duplicates": 0, "stale": 0}
+        self.assertEqual(ChatsConsumer("testnet-10", resolved, transport).run_one(self.db), "deferred")
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.consumer_jobs"), 1)
+        self.assertEqual(self.scalar("SELECT count(*) FROM protocol_indexer.deliveries WHERE consumer='native-chat-push-v1'"), 0)
+
+    def test_native_notification_precedes_canonical_ack_fence(self):
+        txid = self.ingest(b"kchat:1:handshake:sealed")
+        transport = Transport()
+        def native_checks_source(_):
+            def check():
+                with connect(DSN) as native, native.transaction():
+                    native.execute("SET LOCAL lock_timeout='100ms'")
+                    native.execute("SELECT revision FROM protocol_indexer.canonical WHERE transaction_id=%s FOR UPDATE", (txid,))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(check).result(timeout=3)
+        transport.notify_callback = native_checks_source
+        consumer = ChatsConsumer("testnet-10", resolved, transport)
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.db.execute("DELETE FROM transactions_acceptances WHERE transaction_id=%s", (txid,))
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.accept(txid, b"z" * 32)
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(len(transport.notifications), 1)
+
+    def test_upgrade_epoch_suppresses_previously_quiet_live_eligible_inventory(self):
+        from protocol_indexer.journal import BackfillAdapter, install
+        from protocol_indexer.routing import Family
+        txid = self.ingest(b"kchat:1:handshake:sealed", timestamp=2000)
+        # Old consumer imported this live-eligible item quietly before upgrade.
+        self.db.execute("DELETE FROM protocol_indexer.consumer_jobs WHERE transaction_id=%s", (txid,))
+        self.db.execute("UPDATE protocol_indexer.notification_consumers SET activated_at_ms=3000")
+        install(self.db, "testnet-10")
+        self.assertEqual(self.scalar("SELECT activated_at_ms FROM protocol_indexer.notification_consumers"), 3000)
+        BackfillAdapter(Family.KACHAT_MESSAGES).run_page(self.db)
+        transport = Transport()
+        consumer = ChatsConsumer("testnet-10", resolved, transport)
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(transport.notifications, [])
+        self.ingest(b"kchat:1:handshake:fresh", timestamp=4000)
+        self.assertEqual(consumer.run_one(self.db), "delivered")
+        self.assertEqual(len(transport.notifications), 1)
+
     def test_ack_binds_network_journal_id_and_latest_revision(self):
         txid = self.ingest(b"ciph_msg:1:handshake:sealed")
         transport = Transport()
@@ -123,6 +235,30 @@ class ConsumerTests(PostgresHarness):
 
 
 class TransportTests(unittest.TestCase):
+    def test_notification_uses_same_authenticated_route_and_explicit_quiet_import_default(self):
+        received = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append((self.path, self.headers.get('Authorization'),
+                    json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+                self.send_response(200); self.end_headers()
+                self.wfile.write(b'{"applied":1,"duplicates":0,"stale":0}')
+            def log_message(self, *_):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            transport = NativeTransport(f"http://127.0.0.1:{server.server_port}/history-import", "fixture-" * 8)
+            batch = {"transactions": [{}]}
+            transport.send(batch); transport.notify(batch)
+            self.assertEqual([r[0] for r in received], ['/history-import'] * 2)
+            self.assertEqual([r[1] for r in received], ['Bearer ' + 'fixture-' * 8] * 2)
+            self.assertNotIn('notification', received[0][2])
+            self.assertIs(received[1][2]['notification'], True)
+            self.assertNotIn('notification', batch)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
     def test_http_failure_malformed_ack_and_redirect_never_count_as_delivery(self):
         responses = [(200, {}), (200, {"applied": True, "duplicates": 0, "stale": 0}),
                      (200, {"applied": 0, "duplicates": 0, "stale": 1}), (503, {}), (302, {})]

@@ -39,10 +39,16 @@ COPY history/shared_mutator_tests.rs /src/indexer/src/api/v1/shared_mutator_test
 COPY history/shared_runtime.rs /src/indexer/src/shared_runtime.rs
 COPY history/shared-runtime.patch /tmp/shared-runtime.patch
 RUN patch -p1 < /tmp/shared-runtime.patch
+COPY history/shared_notifications.rs /src/indexer/src/api/v1/shared_notifications.rs
+COPY history/shared_notification_tests.rs /src/indexer/src/api/v1/shared_notification_tests.rs
+COPY history/shared-notifications.patch /tmp/shared-notifications.patch
+RUN patch -p1 < /tmp/shared-notifications.patch
+COPY history/notification-Cargo.toml /src/indexer/Cargo.toml
+COPY history/notification-Cargo.lock /src/Cargo.lock
 RUN cargo test --locked --release --workspace
 RUN cargo build --locked --release -p indexer
 
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS runtime
 RUN apk add --no-cache ca-certificates libssl3 libcrypto3 libgcc
 ARG UPSTREAM_REVISION=879d34a0840c3af0117bc6de7f0ffeeda53c9338
 LABEL org.opencontainers.image.source="https://github.com/KaspaSilver/KaChat-Indexer" \
@@ -54,3 +60,21 @@ EXPOSE 8080
 # Upstream flushes its embedded database on SIGINT. Allow it to finish.
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/app/indexer"]
+
+# Explicit QA target uses the exact compiled workspace test binaries. The normal
+# final image remains the minimal runtime and contains no compiler/test harness.
+FROM build AS notification-contract
+RUN mkdir /qa && cargo test --locked --release --workspace --no-run --message-format=json > /qa/artifacts.json \
+    && sed -n 's/.*"executable":"\([^"]*\/target\/release\/deps\/[^"]*\)".*/\1/p' /qa/artifacts.json > /qa/paths \
+    && test "$(wc -l < /qa/paths)" -eq 4 \
+    && while IFS= read -r executable; do \
+        file="${executable##*/}"; package="${file%%-*}"; \
+        case "$package" in indexer|indexer_db|indexer_actors|protocol) ;; *) exit 1 ;; esac; \
+        test ! -e "/qa/${package}.test" && cp "$executable" "/qa/${package}.test"; \
+    done < /qa/paths
+COPY history/run_notification_contracts.sh /qa/run-tests.sh
+RUN chmod 755 /qa/run-tests.sh
+USER 10001:10001
+ENTRYPOINT ["/qa/run-tests.sh"]
+
+FROM runtime AS release
