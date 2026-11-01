@@ -131,6 +131,63 @@ unchanged. These checks do not establish migration or cutover of the current
 public DEV store; its complete history and push registrations still require
 the consistent-copy and API verification workflow above.
 
+### Cold snapshot for shared-ingestion migration
+
+`history/cold_snapshot.py` prepares a fresh full-filesystem backup of an existing
+native store. This is a separate operation from the completed September migration
+above. A message-only `/export` omits the push registration and watch partitions;
+it cannot replace this backup. The helper reads files without opening Fjall.
+
+First run its read-only preflight with the full source container ID, immutable
+source/helper image IDs, and actual configured data volume:
+
+```sh
+python3 history/cold_snapshot.py preflight \
+  --container "$SOURCE_CONTAINER_ID" --image "$SOURCE_IMAGE_ID" \
+  --volume "$SOURCE_DATA_VOLUME" --utility-image "$PYTHON_HELPER_IMAGE_ID" \
+  --output "$PREFLIGHT_RECEIPT"
+```
+
+The preflight binds the sole healthy writer, full deployment configuration,
+capacity, and durable message/registration counters. It creates no Docker
+resource and stops no service. Current bounds are32GiB/32768entries and64GiB
+free for a backup plus separate working clone. A bound failure needs inspection,
+not an automatic increase. Do not execute the snapshot while another owner holds
+the shared DEV deployment or service; coordinate a concrete writer-stop slot.
+
+```sh
+python3 history/cold_snapshot.py snapshot \
+  --preflight "$PREFLIGHT_RECEIPT" --preflight-sha256 "$PREFLIGHT_SHA256" \
+  --backup-volume "$NEW_BACKUP_VOLUME" --helper "$NEW_HELPER_NAME" \
+  --receipt "$NEW_SNAPSHOT_RECEIPT"
+```
+
+Use a durable host process independent of the SSH connection. The snapshot uses
+the source's configured SIGINT with Docker's unlimited graceful-stop timeout;
+it never forces the original writer to exit. Only after a clean shutdown does a
+network-isolated helper copy the read-only source to a new run-labelled volume,
+preserve ownership/modes, fsync it, and compare all file hashes three ways.
+Every failure or handled terminal signal still attempts recovery of the exact
+original container/image/configuration/volume. An own helper's read-only source
+attachment cannot block recovery after a cleanup failure. Foreign attachments
+are preserved and reported, never stopped. Successful recovery requires a new
+process start, health, nondecreasing durable counters and advancing chain work.
+
+The local stop observation is bounded at3minutes, copy at30minutes and recovery
+at60minutes. These are failure ceilings, not a short-outage promise: the existing
+legacy writer previously took38minutes to recover its chain cache. Retain the
+host receipt and helper logs even after failure; they distinguish a complete
+backup from an incomplete volume and record whether source recovery was proven.
+No proxy route, environment, image, QA pin or original data is replaced.
+
+Never open the backup with Fjall. Create a separate writable working clone for
+candidate/history/API/push-registry checks. This staging snapshot alone cannot
+become a later cutover source: preserve every intervening message, acceptance
+change and registration through a fresh coordinated snapshot or verified delta
+before routing traffic. Old image/database rollback needs the same reconciliation.
+
+Local regressions: `python3 -B -m unittest discover -s history -p 'test_cold_snapshot.py' -v`.
+
 The private `/history-import` transport now accepts a versioned shared-journal
 object as well as the established legacy array. Both paths reuse the same native
 parser, transactional Fjall insertions and existing read APIs; there is no second
@@ -156,8 +213,8 @@ keys. Writes, revision receipt and acceptance changes commit atomically, with
 
 When shared mode is enabled, legacy arrays are rejected even if an old migration
 flag remains enabled. Native BlockAdded/VCP ingestion is disabled; ordinary RPC
-connection/request dispatch remains active. Periodic metric refresh/compaction is
-preserved, while native cursor pruning is disabled. Existing public ingress must
+connection/request dispatch remains active. API metrics remain available; shared
+mode skips the standalone periodic, compaction and cursor-pruning workers. Existing public ingress must
 continue hiding private import/export/maintenance routes. The token is neither a
 replacement for that boundary nor permission to expose this endpoint publicly.
 
@@ -167,12 +224,12 @@ bytes remain unchanged even if they happen to look like ASCII hex. Existing
 payment API serialization therefore returns tip memos exactly once as hex.
 The original serialized transaction remains intact in the provenance ledger.
 
-This is still a **consumer candidate**. The shared source connector, independent
-sender/payment/signature validation and full real scan/backfill migration remain
-pending. The879d34a native projection does not yet support current KaChat `dm`
-inbox tags or public `bcast` rooms; those are retained by the shared raw journal,
-not misclassified as private Chats. No push is emitted by this import path; the
-existing notification pipeline is integrated in the next ordered goal stage.
+This is still a **consumer candidate**. The shared source connector and independent
+sender/payment/signature validation have private DEV acceptance. KaChat `dm`
+inbox tags enter the existing native store, and public `bcast` rooms enter the
+Social projection. Full public-history migration, client decryption and cutover
+remain pending. No push is emitted by this import path; the existing notification
+pipeline is integrated in the next ordered goal stage.
 Do not replace the current public writer with this candidate yet.
 
 The consumer candidate also registers shutdown signals before startup/API serving,
