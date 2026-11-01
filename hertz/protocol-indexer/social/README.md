@@ -150,6 +150,17 @@ and 50 unit/HTTP), with no skips. Genuine retained-parent tip acceptance, full
 legacy API preservation and public cutover remain pending. No public adoption
 is recorded.
 
+A complete private DEV source copy also passed actual legacy adoption: all 26
+action snapshots and all 14 original post rows preserved their native IDs, times
+and fields. The prepared target already had the nullable `edited_at` extension;
+all original fields matched the old dump, that column was null, and the strict
+import inventory bound the complete target shape. Replay preserved canonical
+facts, proofs, the chain cursor and notification state. The three existing tips
+reverified against their exact receipts and amounts. Their parent already had a
+canonical fact, so this does not establish a new tip to a retained-only parent.
+Shared API/cursor and restart acceptance, full native Chats history preservation
+and public cutover remain separate pending checks.
+
 ## Shared canonical consumer
 
 `--shared-source-id <journal UUID>` selects the canonical consumer before pool

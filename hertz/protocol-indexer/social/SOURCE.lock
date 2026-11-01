@@ -160,7 +160,7 @@
     },
     "journal_installer_sha256": "a41652ad6c01f3ce86f1d3ce8fe54a606740bdf394c7f72dd7af00684367eaad",
     "common_python_postgres_acceptance": true,
-    "genuine_retained_history_adoption": false,
+    "genuine_retained_history_adoption": true,
     "genuine_retained_target_tip_acceptance": false,
     "public_activated": false,
     "native_worker_running": false,
@@ -173,6 +173,24 @@
       "skips": 0,
       "evidence_sha256": "5920d1931b4a9eb971d3c4820cdb9bb5519327772b8d5b0f81678b7c5035d5b3",
       "map_sha256": "3580205ab8b84a8ee575191c5e6b512917f69ba119e04f6a31621bc0e747a177"
+    },
+    "genuine_retained_history_acceptance": {
+      "scope": "bounded isolated complete physical DEV source copy, original legacy fields preserved; no public cutover",
+      "evidence_sha256": "738fec2d7e6bed33dbd791e00dcd15cb9b997f893d9191d3fcb44c0115786ff3",
+      "audit_map_sha256": "6ef5cabbb6b0d40a10abee90991db48182fc23974ecfb9e03b785924ab6aebc9",
+      "target_inventory_sha256": "e5e0d5b8b8e89a280b057e9c33518a08dd235b4278eccde6ab72ac75820f01b9",
+      "source_backup_sha256": "f2cd12fd9e37c7f62621ffd03d683cf90854812104fd0cf7d35c2a2eedd8b996",
+      "retained_action_snapshots": 26,
+      "retained_content_rows": 14,
+      "original_fields_preserved": true,
+      "quiet_notification_state_preserved": true,
+      "canonical_receipts_created_from_retained_history": 0,
+      "canonical_facts_proofs_and_cursor_preserved": true,
+      "existing_canonical_parent_tips_reverified": 3,
+      "genuine_retained_parent_tip_verified": false,
+      "shared_api_acceptance": false,
+      "public_cutover": false,
+      "original_wire_authority_inferred_from_retained_signature": false
     }
   }
 }
