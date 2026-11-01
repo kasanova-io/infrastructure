@@ -40,6 +40,13 @@ impl PostgresDbManager {
         // Existing binding uses the SAME repeatable-read, read-only transaction
         // for ownership, request-derived SQL timeout and the eventual data read.
         let mut tx = binding.begin(self).await?;
+        // These bounded API reads expand several authorization views. JIT's
+        // compilation cost exceeds their request budget even for one page.
+        // Keep this local to the read transaction and restore the pool setting.
+        sqlx::query("SET LOCAL jit=off")
+            .execute(&mut *tx)
+            .await
+            .map_err(error)?;
         // Resolve and lock every required view until this read ends. There is
         // no window in which a missing/dropped view can use a raw public table.
         sqlx::query("SELECT 1 FROM social_shared_api.k_contents, social_shared_api.k_votes, social_shared_api.k_broadcasts, social_shared_api.k_follows, social_shared_api.k_blocks, social_shared_api.k_mentions, social_shared_api.k_hashtags, social_shared_api.k_vars LIMIT 0")

@@ -146,8 +146,8 @@ accepted runtimes. It passed 55 native units and all 50 PostgreSQL contracts,
 including concurrent insert barriers, promotion/revocation/reacceptance, stable
 IDs/times, quiet replay, conflicting history, retry fairness and retained-parent
 tip authorization. The common Python suite passed all 117 cases (67 PostgreSQL
-and 50 unit/HTTP), with no skips. Genuine retained-parent tip acceptance, full
-legacy API preservation and public cutover remain pending. No public adoption
+and 50 unit/HTTP), with no skips. A genuine retained-only-parent tip, full native Chats history preservation
+and public cutover remain pending. No public adoption
 is recorded.
 
 A complete private DEV source copy also passed actual legacy adoption: all 26
@@ -168,6 +168,14 @@ protected rows remain identical after reader and database restarts. This is API
 presentation acceptance against accepted native views; signature/eligibility
 checks belong to the separately recorded native contracts and adoption. Full
 native Chats history preservation and public cutover remain pending.
+
+The subsequent `bounded_read_candidate` preserves that accepted import while
+binding indexed per-transaction source lookups in the native selector and
+matching API views. It passed 55 native units and all 50 PostgreSQL contracts;
+the corresponding reader passed its unchanged page-cost bounds and the 51-request
+real-history/restart corpus. The normal bound-consumer view upgrade preserved
+every protected row. Earlier accepted image and import provenance remain
+intact in `SOURCE.lock`.
 
 ## Shared canonical consumer
 

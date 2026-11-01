@@ -11,7 +11,11 @@ HERE = Path(__file__).resolve().parent
 def prepare(output):
     if output.exists():
         raise ValueError('fresh build directory required; preserve existing work')
-    lock = json.loads((HERE / 'SOURCE.lock').read_text())
+    history = json.loads((HERE / 'SOURCE.lock').read_text())
+    # Keep the accepted reader's historical inputs/images intact. A new frozen
+    # candidate records compatibility with the current native-owned SQL assets.
+    lock = history.get('bounded_read_candidate',
+                       history.get('retained_schema_candidate', history))
     inputs = {name: HERE / name for name in [
         'Dockerfile', 'prepare_web.py', 'shared-api.patch', 'shared_rooms.rs',
         'shared_room_tests.rs', 'shared_reads.rs', 'shared_read_tests.rs', 'shared-read-api.patch', 'Cargo.lock',
@@ -26,6 +30,10 @@ def prepare(output):
     for name, path in inputs.items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != lock['files_sha256'][name]:
             raise ValueError('reviewed build input changed: ' + name)
+    identity = hashlib.sha256(json.dumps(lock['files_sha256'], sort_keys=True,
+                                        separators=(',', ':')).encode()).hexdigest()
+    if identity != lock['source_manifest']:
+        raise ValueError('reviewed build manifest identity mismatch')
     output.mkdir(parents=True)
     for name, path in inputs.items():
         shutil.copy2(path, output / name)

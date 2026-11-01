@@ -481,8 +481,12 @@ async fn postgres_shared_reads_legacy_tip_mentions_do_not_strand_pagination_or_c
 #[tokio::test]
 async fn postgres_shared_reads_one_snapshot_timeout_and_pool_cleanup_preserve_legacy() {
     let mut db = setup().await;
+    let original_jit: String = sqlx::query_scalar("SHOW jit")
+        .fetch_one(&db.pool).await.unwrap();
     post(&db.pool, 1, 1000).await;
     let mut read = db.read_session().await.unwrap();
+    assert_eq!(sqlx::query_scalar::<_, String>("SHOW jit")
+        .fetch_one(&mut *read).await.unwrap(), "off");
     let first: i64 = sqlx::query_scalar("SELECT count(*) FROM k_contents")
         .fetch_one(&mut *read)
         .await
@@ -520,10 +524,11 @@ async fn postgres_shared_reads_one_snapshot_timeout_and_pool_cleanup_preserve_le
     };
     assert_eq!(feed(&legacy).await.len(), 1);
     let mut conn = db.pool.acquire().await.unwrap();
-    let row=sqlx::query("SELECT current_setting('transaction_read_only') ro,current_setting('search_path') path,current_setting('statement_timeout') timeout").fetch_one(&mut *conn).await.unwrap();
+    let row=sqlx::query("SELECT current_setting('transaction_read_only') ro,current_setting('search_path') path,current_setting('statement_timeout') timeout,current_setting('jit') jit").fetch_one(&mut *conn).await.unwrap();
     assert_eq!(row.get::<String, _>("ro"), "off");
     assert!(!row.get::<String, _>("path").contains("social_shared_api"));
     assert_eq!(row.get::<String, _>("timeout"), "0");
+    assert_eq!(row.get::<String, _>("jit"), original_jit);
     drop(conn);
     // Profile fallback executes its two reads without a second checkout at max1.
     tokio::time::timeout(

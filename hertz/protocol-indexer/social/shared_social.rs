@@ -60,7 +60,7 @@ pub(crate) fn operation(action: &VerifiedAction) -> &'static str {
 /// current canonical revision is fenced even before its own refresh job runs.
 pub(crate) fn selection_sql(table: &str) -> String {
     let fields = "a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot";
-    let base = "FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL)";
+    let base = "FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL)";
     match table {
         "k_broadcasts" => format!(
             "SELECT {fields} {base} ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1"

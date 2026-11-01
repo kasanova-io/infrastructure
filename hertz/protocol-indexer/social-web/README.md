@@ -52,6 +52,26 @@ retention/push. No default rooms are invented. Response size and query duration
 are bounded, but the DISTINCT view query still requires representative history
 query-plan/cost acceptance before public cutover.
 
+## Retained-history page bounds
+
+The current `bounded_read_candidate` also binds the retained-history native
+schemas. Per-transaction action and source lookups run before the subject
+selector, preserving the same eligibility, revision and pending-removal checks.
+Shared read transactions disable JIT locally: compiling the expanded view plan
+exceeded the request budget even when one page read little data. Legacy sessions
+keep their settings; timeout rollback restores the pooled connection's setting.
+
+The current frozen reader passed nine units and all twenty PostgreSQL/router
+contracts. The unchanged 10,000-row regression used 601 view buffers and 760 feed
+DAO buffers, below its original 5,000/10,000 limits and 10-second SQL timeout.
+The earlier retained-schema and first lookup candidates each failed that case;
+their distinct provenance remains in `SOURCE.lock`. These are synthetic query
+cost checks. The current native/reader images also passed the real-history
+corpus of 51 requests before and after reader and database restarts. All responses and
+protected rows match the preceding accepted image. The normal source-bound
+native bind installed these views on the adopted copy, with no native or
+notification row changes. Public cutover remains pending.
+
 ## Reproducible private build
 
 From this directory, prepare a new context containing only the eighteen reviewed

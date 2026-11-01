@@ -5,36 +5,40 @@ CREATE SCHEMA IF NOT EXISTS social_shared_api;
 CREATE OR REPLACE FUNCTION social_shared_api.selected_k_contents(subject text)
 RETURNS bytea LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp
 AS $selection_k_contents$
-SELECT picked.transaction_id FROM (SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND NOT EXISTS(SELECT 1 FROM social_shared.extensions e WHERE e.transaction_id=a.transaction_id AND e.kind='poll' AND NOT e.shape_valid) ORDER BY EXISTS(SELECT 1 FROM k_contents native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1) picked
+SELECT picked.transaction_id FROM (SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND NOT EXISTS(SELECT 1 FROM social_shared.extensions e WHERE e.transaction_id=a.transaction_id AND e.kind='poll' AND NOT e.shape_valid) ORDER BY EXISTS(SELECT 1 FROM k_contents native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1) picked
 $selection_k_contents$;
 
 CREATE OR REPLACE FUNCTION social_shared_api.selected_k_votes(subject text)
 RETURNS bytea LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp
 AS $selection_k_votes$
-SELECT picked.transaction_id FROM (SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY EXISTS(SELECT 1 FROM k_votes native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1) picked
+SELECT picked.transaction_id FROM (SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY EXISTS(SELECT 1 FROM k_votes native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1) picked
 $selection_k_votes$;
 
 CREATE OR REPLACE FUNCTION social_shared_api.selected_k_broadcasts(subject text)
 RETURNS bytea LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp
 AS $selection_k_broadcasts$
-SELECT picked.transaction_id FROM (SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) picked
+SELECT picked.transaction_id FROM (SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) picked
 $selection_k_broadcasts$;
 
 CREATE OR REPLACE FUNCTION social_shared_api.selected_k_follows(subject text)
 RETURNS bytea LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp
 AS $selection_k_follows$
-SELECT picked.transaction_id FROM (WITH reversal AS (SELECT a.original_time,a.transaction_id FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='deactivate' ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='activate' AND (NOT EXISTS(SELECT 1 FROM reversal) OR (a.original_time,a.transaction_id)>(SELECT original_time,transaction_id FROM reversal)) ORDER BY a.original_time,a.transaction_id LIMIT 1) picked
+SELECT picked.transaction_id FROM (WITH reversal AS (SELECT a.original_time,a.transaction_id FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='deactivate' ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='activate' AND (NOT EXISTS(SELECT 1 FROM reversal) OR (a.original_time,a.transaction_id)>(SELECT original_time,transaction_id FROM reversal)) ORDER BY a.original_time,a.transaction_id LIMIT 1) picked
 $selection_k_follows$;
 
 CREATE OR REPLACE FUNCTION social_shared_api.selected_k_blocks(subject text)
 RETURNS bytea LANGUAGE sql STABLE SET search_path=pg_catalog,public,pg_temp
 AS $selection_k_blocks$
-SELECT picked.transaction_id FROM (WITH reversal AS (SELECT a.original_time,a.transaction_id FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='deactivate' ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='activate' AND (NOT EXISTS(SELECT 1 FROM reversal) OR (a.original_time,a.transaction_id)>(SELECT original_time,transaction_id FROM reversal)) ORDER BY a.original_time,a.transaction_id LIMIT 1) picked
+SELECT picked.transaction_id FROM (WITH reversal AS (SELECT a.original_time,a.transaction_id FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='deactivate' ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1) SELECT a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot FROM social_shared.actions a JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) AND a.state_action='activate' AND (NOT EXISTS(SELECT 1 FROM reversal) OR (a.original_time,a.transaction_id)>(SELECT original_time,transaction_id FROM reversal)) ORDER BY a.original_time,a.transaction_id LIMIT 1) picked
 $selection_k_blocks$;
 
+-- Bound each canonical/retained UNION lookup to its action BEFORE joins.
+-- The offset preserves parameterization; eligibility and revision checks stay
+-- identical while an ordered page avoids repeated whole-history hash builds.
 CREATE OR REPLACE VIEW social_shared_api.current_actions AS
 SELECT a.* FROM social_shared.actions a
-JOIN social_shared.source_facts c USING(transaction_id)
+JOIN LATERAL (SELECT c.* FROM social_shared.source_facts c
+ WHERE c.transaction_id=a.transaction_id OFFSET 0) c ON true
 WHERE a.status='verified' AND a.revision=c.revision AND c.eligible
 AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL);
 
@@ -43,7 +47,8 @@ AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a
 CREATE OR REPLACE VIEW social_shared_api.current_edits AS
 SELECT e.* FROM social_shared.extensions e
 JOIN protocol_indexer.canonical c USING(transaction_id)
-JOIN social_shared.source_facts t ON t.transaction_id=e.target
+JOIN LATERAL (SELECT t.* FROM social_shared.source_facts t
+ WHERE t.transaction_id=e.target OFFSET 0) t ON true
 JOIN social_shared_api.current_actions a ON a.transaction_id=e.transaction_id
 JOIN social_shared_api.current_actions target_action ON target_action.transaction_id=e.target
 WHERE e.revision=c.revision AND __AUTHORIZED_EDIT__;
@@ -51,7 +56,8 @@ WHERE e.revision=c.revision AND __AUTHORIZED_EDIT__;
 CREATE OR REPLACE VIEW social_shared_api.k_contents AS
 SELECT p.* FROM public.k_contents p
 WHERE EXISTS (
-SELECT 1 FROM social_shared_api.current_actions a
+SELECT 1 FROM LATERAL (SELECT a.* FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=p.transaction_id OFFSET 0) a
 LEFT JOIN LATERAL (
  SELECT e.transaction_id,e.original_time,e.message FROM social_shared_api.current_edits e
  WHERE e.target_signature=p.sender_signature
@@ -75,6 +81,7 @@ AND NOT EXISTS(
  WHERE k.transaction_id=p.transaction_id AND k.kind IN('quote','repost')
  AND e.shape_valid AND e.revision=mutation.revision AND __UNQUOTE_ORDER__
 )
+-- Bound the native transaction lookup before evaluating the subject selector.
 -- Keep the native ordered/indexed relation as the outer pagination scan.
 -- OFFSET0 prevents flattening this per-row eligibility check into a ledger-first
 -- join/sort of the entire history; it does not change result membership.
@@ -83,19 +90,22 @@ OFFSET 0
 
 CREATE OR REPLACE VIEW social_shared_api.k_broadcasts AS
 SELECT native.* FROM public.k_broadcasts native
-WHERE EXISTS (SELECT 1 FROM social_shared_api.current_actions a
+WHERE EXISTS (SELECT 1 FROM LATERAL (SELECT a.* FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=native.transaction_id OFFSET 0) a
  WHERE a.transaction_id=native.transaction_id
  AND native.transaction_id=social_shared_api.selected_k_broadcasts(a.subject)
  OFFSET 0);
 CREATE OR REPLACE VIEW social_shared_api.k_follows AS
 SELECT native.* FROM public.k_follows native
-WHERE EXISTS (SELECT 1 FROM social_shared_api.current_actions a
+WHERE EXISTS (SELECT 1 FROM LATERAL (SELECT a.* FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=native.transaction_id OFFSET 0) a
  WHERE a.transaction_id=native.transaction_id
  AND native.transaction_id=social_shared_api.selected_k_follows(a.subject)
  OFFSET 0);
 CREATE OR REPLACE VIEW social_shared_api.k_blocks AS
 SELECT native.* FROM public.k_blocks native
-WHERE EXISTS (SELECT 1 FROM social_shared_api.current_actions a
+WHERE EXISTS (SELECT 1 FROM LATERAL (SELECT a.* FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=native.transaction_id OFFSET 0) a
  WHERE a.transaction_id=native.transaction_id
  AND native.transaction_id=social_shared_api.selected_k_blocks(a.subject)
  OFFSET 0);
@@ -104,7 +114,8 @@ WHERE EXISTS (SELECT 1 FROM social_shared_api.current_actions a
 -- semantics; a KNOWN revoked/pending-removal target cannot be rescued by an alias.
 CREATE OR REPLACE VIEW social_shared_api.k_votes AS
 SELECT native.* FROM public.k_votes native
-WHERE EXISTS (SELECT 1 FROM social_shared_api.current_actions a
+WHERE EXISTS (SELECT 1 FROM LATERAL (SELECT a.* FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=native.transaction_id OFFSET 0) a
 LEFT JOIN social_shared.ordinary_vote_targets dependency USING(transaction_id)
 WHERE a.transaction_id=native.transaction_id
 AND native.transaction_id=social_shared_api.selected_k_votes(a.subject)
