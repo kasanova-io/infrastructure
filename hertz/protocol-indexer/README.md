@@ -43,9 +43,17 @@ durable source/revisions/payload/acceptance, old API rows and the original curso
 Both earlier verifier failures remain retained; the corrected follow-up passed.
 Seven naturally captured Kasia records also passed actual original-store native
 delivery and copy-only durability/API checks: two comm, two handshake and three
-self-stash. All native workers are stopped. Canonical KaChat dm/inbox, room and
-extension acceptance remain pending. Public services keep their existing contracts. Full six-family genuine
-live/backfill acceptance and history/API reconciliation precede public cutover.
+self-stash. A subsequent real TN10 campaign passed 13 fixtures: KaChat posts,
+edits, polls/votes, quotes/unquotes, deletion, a public room, tagged DM and follow-up
+comm, plus K-Social reply/vote. The retry reused eleven confirmed transactions
+and broadcast only the two messages. A cold-copy check verified all twelve
+durable native acknowledgements, thirty exported records, the old payment/cursor
+and both new messages' exact ciphertext/acceptance through sender APIs, plus
+the DM inbox and exclusive cursor.
+All bounded consumers stopped cleanly. These checks do not establish plaintext
+decryption, notification delivery or UI acceptance. Public services keep their
+existing contracts. Full six-family backfill and history/API reconciliation
+precede public cutover.
 Raw recognition is separate from SDK signature/payment verification and delivery.
 
 ## Protocol adapters
@@ -275,8 +283,8 @@ transaction. The live writer and inventory backfill enqueue identically. This
 projection covers established Kasia/KaChat private actions, KaChat tips and
 canonical KaChat `dm` through the paired shared-native inbox adapter. The independent
 Social consumer handles supported signed public actions, verified tips and both
-public room roots. Room source-connected/genuine acceptance and public API
-cutover remain pending.
+public room roots. The real room fixture passed source-connected SDK/sender
+verification. Public API cutover remains pending.
 
 DM uses the existing native contextual-message storage plus the upstream
 recipient-derived inbox-tag index, atomically with acceptance and the native
@@ -289,8 +297,9 @@ the authenticated, source/network/revision-bound journal remains its writer.
 After upgrading both private consumers, explicitly replay retained
 `kachat_messages` inventory through the normal backfill adapter; enabling live
 dispatch alone does not enqueue an already captured DM backlog. This private
-implementation does not establish genuine DM delivery/decryption or public
-history/cutover acceptance.
+implementation's later real DM/comm campaign establishes opaque native delivery
+and cold-restart durability. Plaintext decryption and public history/cutover
+acceptance remain separate checks.
 
 The reviewed native image and connector passed bounded retained-tip delivery on
 the existing private store. Three actual queued revisions were delivered; a
@@ -315,10 +324,12 @@ cursors. This proves native opaque-data delivery, not plaintext decryption or
 notification routing. The first run's malformed image literal failed before any
 resource/native open and remains FAIL; the corrected run passed. All nine owned
 services stopped with exit 0 and the exclusive egress bridge was removed. The original
-post-delivery inventory is now 3bc30fe0e073; older 2be62069 is the preserved cold
-backup, not the current original. Social SQL/outbox, canonical source and all
-protected services remain unchanged. KaChat dm/inbox, rooms/extensions, external
-backfill and broad public history/cutover acceptance remain required.
+post-Kasia inventory was 3bc30fe0e073; that and the earlier 2be62069 cold backup
+remain preserved predecessors. After the later 13-fixture campaign, the current
+original inventory is 63470b5dad44. Its copy-only check verified twelve durable
+acknowledgements and thirty exported records, including every prior value.
+The real KaChat DM/inbox, room and extension fixtures passed. External backfill
+and broad public history/cutover acceptance remain required.
 
 `chats_worker.py` reuses the history HTTP/cache tooling. Missing evidence is
 retried per job without acknowledging it. Verified immutable receipts and headers
@@ -368,8 +379,9 @@ projections and independent ordinary Social access remain in the same path.
 verified-state views. They do not establish public API compatibility, a visible
 counter, notification delivery, or complete six-family cutover. Nonempty
 extension history without owning metadata requires explicit reconciliation.
-Genuine extension acceptance and public history/API migration remain separate
-delivery gates before switching the existing indexer origins.
+Real extension fixtures passed the production SDK and materialization checks.
+Public history/API migration remains a separate delivery gate before switching
+the existing indexer origins.
 
 ## Public tip and room evidence
 
@@ -445,5 +457,5 @@ The paired native candidate passes 47 unit and 39 PostgreSQL contracts. Bounded
 source-connected acceptance also passes 24 checks: retained native/notification
 rows unchanged, eight legacy/current API responses and original cursors identical,
 wrong-source startup denied. Test services are stopped; public routing is unchanged.
-Broader history/cursors, genuine six-family acceptance and query cost at
+Broader history/cursors, six-family backfill acceptance and query cost at
 representative history remain prerequisites to shared public cutover.
