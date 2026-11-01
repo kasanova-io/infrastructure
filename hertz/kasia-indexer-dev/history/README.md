@@ -158,3 +158,34 @@ routing was tested. The lock's `genuine_new_dm_acceptance` remains false for
 canonical `kchat:1:dm`/inbox, distinct from the accepted classic Kasia records.
 KaChat dm/inbox, room/extension transactions, external backfill, broader history
 migration and the complete six-family public cutover remain separate gates.
+
+
+## Shared runtime: full DEV history preservation
+
+The shared scanner replacement is tested against a writable clone of the
+complete verified DEV snapshot. The live service and immutable backup stay
+untouched. The current native image starts without loading the legacy scanner
+cache or starting independent chain maintenance.
+
+The complete before/after scan preserves all 27 partition fingerprints:
+7,615,542 key/value records, including 14,183 contextual message index records
+and 71 live device registration keys. The earlier snapshot reported a metric
+of 91 registrations. That metric uses Fjall's approximate length; it is not a
+live-key count. The new runtime also reported 94 while the 71-key registration
+fingerprint remained identical. Neither metric subtraction nor the old failed
+91-row assertion proves a registration delta. The original failure remains
+recorded separately from the subsequent count reconciliation.
+
+A 60-request corpus from 20 actual history query groups covers handshake and
+payment sender/receiver routes and contextual messages by sender. Complete DTOs,
+pagination headers and exclusive cursors match the existing live service,
+then remain identical across the shared process restart. Starts took 8.29 and
+8.74 seconds, below the unchanged 40-second bound. All private actors stopped
+cleanly. Raw queries, bodies, registration values, ciphertext and logs stay on
+the host; source metadata records counts and hashes only.
+
+This establishes full-copy idle/runtime/API preservation. Source-connected
+replay, a verified current-source delta, live notification continuity and the
+reviewed DEV cutover remain separate gates. The immutable snapshot is never
+opened by Fjall; only the marked writable clone is opened. No new transaction
+or public traffic switch is part of this acceptance.

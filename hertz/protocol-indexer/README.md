@@ -56,6 +56,15 @@ existing contracts. Full six-family backfill and history/API reconciliation
 precede public cutover.
 Raw recognition is separate from SDK signature/payment verification and delivery.
 
+The complete legacy DEV Chats snapshot has also passed shared-runtime API and
+restart preservation on a separate writable copy. All 27 partition fingerprints
+remain identical, covering 7,615,542 records and 14,183 messages. The exact
+registration partition has 71 live keys; historical metrics of 91/94 are
+approximate counts and cannot prove a delta. A 60-request client corpus matches
+the existing live API and the restarted shared copy. Source-connected replay,
+current-source reconciliation, live notification continuity and public cutover
+remain pending; the original service and immutable backup stay untouched.
+
 ## Protocol adapters
 
 Each family has a `ScanAdapter` and `BackfillAdapter`, using the same byte parser.

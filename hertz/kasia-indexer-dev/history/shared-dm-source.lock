@@ -55,5 +55,48 @@
   "original_store_inventory_sha256": "3bc30fe0e0732b85e1336478e05d25ff5e3f5b323f11ab76300c3071185ae2d1",
   "kasia_source_evidence_sha256": "4106cccaf5fe6b5a944bf2f14d3f8ae2280bd7de267d329e8962fd332105587d",
   "genuine_new_dm_acceptance_scope": "canonical kchat:1:dm/inbox; classic Kasia comm acceptance recorded separately",
-  "plaintext_decryption_verified": false
+  "plaintext_decryption_verified": false,
+  "full_legacy_snapshot_candidate": {
+    "scope": "complete legacy DEV snapshot on a marked writable private copy; no source-connected replay or public cutover",
+    "native_source_manifest": "d56c48d62b54d625b5d52211ffe905d41dc2a185a6b28081de8441da12a810fb",
+    "native_image": "sha256:b81e0bba4567b2ebaa9e087a04a39614c0ec89c24cc76695bd7c313df2495157",
+    "immutable_backup_volume": "kasanova_chats_cold_approved_20261101_v1",
+    "working_clone_volume": "kasanova_chats_shared_full_20261101_v1",
+    "physical_inventory_sha256": "74dbe801829afd47c5dcbd6808562e50f85b8fa6507c220afdef0c87815bd4c2",
+    "physical_bytes": 10302392863,
+    "physical_entries": 290,
+    "snapshot_registration_metric_estimate": 91,
+    "exact_live_registration_records": 71,
+    "native_runtime_registration_metric_observed": 94,
+    "registration_metrics_are_cardinality_proof": false,
+    "registration_delta_verified": false,
+    "partition_count": 27,
+    "logical_records": 7615542,
+    "logical_bytes": 449541061,
+    "all_partition_fingerprints_preserved": true,
+    "partition_map_sha256": "63ddca40d860df5d2b9130b060a6d7401a578165c517733cfc8deda4eaa0ff89",
+    "contextual_messages": 14183,
+    "legacy_api_request_corpus": 60,
+    "legacy_api_query_groups": 20,
+    "legacy_api_routes": 5,
+    "api_phases": [
+      "original-live",
+      "initial",
+      "restart"
+    ],
+    "complete_api_response_sha256": "6b5edfdceb43824fe9f431cace2695630ac275ab0d1757a7f7ccc2308861d870",
+    "startup_seconds": {
+      "initial": 8.29437825793866,
+      "restart": 8.743943643989041
+    },
+    "independent_chain_scanner_running": false,
+    "runtime_running": false,
+    "source_connected_replay_accepted": false,
+    "public_cutover": false,
+    "new_chain_transactions": 0,
+    "evidence": "full-chats-runtime-v2-evidence.json",
+    "evidence_sha256": "33440d8e29802cd7849f735c5516056422fa19e60a4a01ca0cf79cba8de9d241",
+    "audit_map_sha256": "ebdb47a190dc290cede4993570439492c8da14628a48029016f47d70a31db871",
+    "original_count_assertion_failed_and_preserved": true
+  }
 }
