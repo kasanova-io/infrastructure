@@ -188,9 +188,31 @@
       "canonical_facts_proofs_and_cursor_preserved": true,
       "existing_canonical_parent_tips_reverified": 3,
       "genuine_retained_parent_tip_verified": false,
-      "shared_api_acceptance": false,
+      "shared_api_acceptance": true,
       "public_cutover": false,
       "original_wire_authority_inferred_from_retained_signature": false
+    },
+    "genuine_shared_api_acceptance": {
+      "scope": "real adopted full-source DEV copy, existing HTTP routes and original cursors; no public cutover",
+      "evidence_sha256": "8c4e7e350524f21790a9caca661134f2e7a8f94eebae3e43c16a6bcb3452acf8",
+      "audit_map_sha256": "bf90d6a1aea6068f6e2358d85c912037dde3ce03e7fec5f1f2ca0b12abf28f62",
+      "reader_image": "sha256:47706dcf3c39c4890267709730fac9465a641f5f3b60a61da7e8926a4d417a5b",
+      "distinct_request_corpus": 51,
+      "repeat_phases": 3,
+      "original_details_preserved": 14,
+      "original_vote_dtos_preserved": 12,
+      "current_feed_records": 10,
+      "current_feed_protocol_counts": {
+        "canonical_k": 1,
+        "canonical_kchat": 1,
+        "retained_native": 8
+      },
+      "current_response_sha256": "35880413b8fe8df18252d91ee241ec4f5d407f335d6cd5e7b1d4a1716ccda759",
+      "reader_restart_preserved": true,
+      "database_restart_preserved": true,
+      "protected_native_journal_rows_preserved": true,
+      "positive_notification_delivery_verified": false,
+      "public_cutover": false
     }
   }
 }

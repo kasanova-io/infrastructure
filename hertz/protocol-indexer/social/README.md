@@ -158,8 +158,16 @@ import inventory bound the complete target shape. Replay preserved canonical
 facts, proofs, the chain cursor and notification state. The three existing tips
 reverified against their exact receipts and amounts. Their parent already had a
 canonical fact, so this does not establish a new tip to a retained-only parent.
-Shared API/cursor and restart acceptance, full native Chats history preservation
-and public cutover remain separate pending checks.
+The shared reader then passed 51 real HTTP requests, preserving the original
+signed fields, IDs and times in all 14 post-detail responses, all 12 original
+vote DTOs and original cursor tokens. Its current
+10-record feed includes one canonical KaChat post, one canonical K-Social post
+and eight retained native posts. Membership, counts and ordering use current
+accepted state; valid additions are allowed. Complete current responses and all
+protected rows remain identical after reader and database restarts. This is API
+presentation acceptance against accepted native views; signature/eligibility
+checks belong to the separately recorded native contracts and adoption. Full
+native Chats history preservation and public cutover remain pending.
 
 ## Shared canonical consumer
 
