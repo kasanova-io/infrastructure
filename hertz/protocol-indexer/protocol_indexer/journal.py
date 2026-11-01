@@ -27,6 +27,7 @@ def install(conn, network, activated_at_ms=None):
         if not row or row["value"] != "23":
             raise ValueError("review adapter against Simply Kaspa schema; expected version 23")
         conn.execute(files(__package__).joinpath("schema.sql").read_text())
+        conn.execute(files(__package__).joinpath("source_fence.sql").read_text())
         current = conn.execute("SELECT * FROM protocol_indexer.config").fetchone()
         if current and (current["network"] != network or current["source_revision"] != SIMPLY_REVISION):
             raise ValueError("database is bound to another network/source revision")

@@ -13,7 +13,7 @@ pub struct SharedSocial {
     source_id: String,
 }
 
-fn subject(action: &VerifiedAction) -> (String, &'static str) {
+pub(crate) fn subject(action: &VerifiedAction) -> (String, &'static str) {
     // Match the original native byte-key/signature uniqueness, including 32/33
     // byte author forms. Do not silently change existing relationship semantics.
     let (table, key) = match action.action() {
@@ -35,7 +35,7 @@ fn subject(action: &VerifiedAction) -> (String, &'static str) {
     (format!("{table}:{key}"), table)
 }
 
-fn operation(action: &VerifiedAction) -> &'static str {
+pub(crate) fn operation(action: &VerifiedAction) -> &'static str {
     match action.action() {
         KActionType::Follow(v) => {
             if v.following_action == "follow" {
@@ -59,8 +59,8 @@ fn operation(action: &VerifiedAction) -> &'static str {
 /// SDK verification is immutable across metadata revisions. The selected
 /// current canonical revision is fenced even before its own refresh job runs.
 pub(crate) fn selection_sql(table: &str) -> String {
-    let fields = "a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,a.snapshot::text AS snapshot";
-    let base = "FROM social_shared.actions a JOIN protocol_indexer.canonical c USING(transaction_id) WHERE a.subject=$1 AND c.accepting_block IS NOT NULL AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL)";
+    let fields = "a.transaction_id,a.source_payload,a.original_time,a.notification_consumed,c.revision,c.retained_native,a.snapshot::text AS snapshot";
+    let base = "FROM social_shared.actions a JOIN social_shared.source_facts c USING(transaction_id) WHERE a.subject=$1 AND c.eligible AND a.status='verified' AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL)";
     match table {
         "k_broadcasts" => format!(
             "SELECT {fields} {base} ORDER BY a.original_time DESC,a.transaction_id DESC LIMIT 1"
@@ -87,8 +87,9 @@ pub(crate) async fn restore_snapshot(
     if let Some(previous) = previous {
         let saved: Value = serde_json::from_str(previous)?;
         if let Some(saved_id) = saved["main"]["id"].as_i64() {
-            sqlx::query(&format!("UPDATE {table} SET id=$1 WHERE transaction_id=$2"))
+            sqlx::query(&format!("UPDATE {table} SET id=$1,block_time=$2 WHERE transaction_id=$3"))
                 .bind(saved_id)
+                .bind(saved["main"]["block_time"].as_i64().context("snapshot original time missing")?)
                 .bind(id)
                 .execute(&mut **tx)
                 .await?;
@@ -181,26 +182,7 @@ impl SharedSocial {
                 );
             }
         }
-        sqlx::raw_sql(include_str!("shared_social.sql"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::raw_sql(include_str!("kaposts_projection.sql"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::raw_sql(include_str!("rooms.sql"))
-            .execute(&mut *tx)
-            .await?;
-        crate::read_views::install(&mut tx).await?;
-        sqlx::query("INSERT INTO social_shared.config(network,source_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
-            .bind(network).bind(source_id).execute(&mut *tx).await?;
-        let row = sqlx::query("SELECT network,source_id FROM social_shared.config WHERE singleton")
-            .fetch_one(&mut *tx)
-            .await?;
-        ensure!(
-            row.get::<String, _>("network") == network
-                && row.get::<String, _>("source_id") == source_id,
-            "Social projection belongs to another source/network"
-        );
+        Self::install_in(&mut tx, network, source_id).await?;
         tx.commit().await?;
         Ok(Self {
             pool,
@@ -209,7 +191,33 @@ impl SharedSocial {
         })
     }
 
-    async fn check_source(
+    pub(crate) async fn install_in(
+        tx: &mut sqlx::Transaction<'_, Postgres>, network: &str, source_id: &str,
+    ) -> Result<()> {
+        sqlx::raw_sql(include_str!("shared_social.sql"))
+            .execute(&mut **tx)
+            .await?;
+        sqlx::raw_sql(include_str!("kaposts_projection.sql"))
+            .execute(&mut **tx)
+            .await?;
+        sqlx::raw_sql(include_str!("rooms.sql"))
+            .execute(&mut **tx)
+            .await?;
+        crate::read_views::install(tx).await?;
+        sqlx::query("INSERT INTO social_shared.config(network,source_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
+            .bind(network).bind(source_id).execute(&mut **tx).await?;
+        let row = sqlx::query("SELECT network,source_id FROM social_shared.config WHERE singleton")
+            .fetch_one(&mut **tx)
+            .await?;
+        ensure!(
+            row.get::<String, _>("network") == network
+                && row.get::<String, _>("source_id") == source_id,
+            "Social projection belongs to another source/network"
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn check_source(
         tx: &mut sqlx::Transaction<'_, Postgres>,
         network: &str,
         source_id: &str,
@@ -230,6 +238,7 @@ impl SharedSocial {
                 .fetch_one(&mut **tx)
                 .await?;
         ensure!(schema == "2", "unsupported native Social schema");
+        crate::retained_history::require_if_adopted(tx).await?;
         // The existing Notifications installer takes SHARE ROW EXCLUSIVE on
         // these tables before replacing capture/triggers. Hold its compatible
         // DML lease BEFORE reading the approved function body, so an older
@@ -320,6 +329,29 @@ impl SharedSocial {
                 .execute(&mut *tx)
                 .await?;
         }
+        match crate::retained_history::observe(
+            &mut tx, &processor, &transaction, verified.as_ref(), revision,
+        ).await? {
+            crate::retained_history::Observation::Ordinary => {},
+            crate::retained_history::Observation::Busy => {
+                tx.rollback().await?;
+                sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '50 milliseconds',last_error='retained_subject_busy' WHERE consumer='native-social-v1' AND transaction_id=$1")
+                    .bind(&id).execute(&self.pool).await?;
+                return Ok(true);
+            },
+            crate::retained_history::Observation::Conflict { subject: old_key, table: old_table } => {
+                if !self.rebuild(&mut tx, &processor, &old_key, &old_table, &id, false).await? {
+                    tx.rollback().await?;
+                    sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '50 milliseconds',last_error='retained_subject_busy' WHERE consumer='native-social-v1' AND transaction_id=$1")
+                        .bind(&id).execute(&self.pool).await?;
+                    return Ok(true);
+                }
+                sqlx::query("DELETE FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1")
+                    .bind(&id).execute(&mut *tx).await?;
+                tx.commit().await?;
+                return Ok(true);
+            },
+        }
         let old = sqlx::query(
             "SELECT source_payload,subject FROM social_shared.actions WHERE transaction_id=$1",
         )
@@ -338,10 +370,12 @@ impl SharedSocial {
                 );
             }
         }
-        sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,subject=EXCLUDED.subject,native_table=EXCLUDED.native_table,status=EXCLUDED.status,state_action=EXCLUDED.state_action")
+        let imported_replay:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_shared.retained_replay WHERE transaction_id=$1)")
+            .bind(&id).fetch_one(&mut *tx).await?;
+        sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,notification_consumed) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,subject=EXCLUDED.subject,native_table=EXCLUDED.native_table,status=EXCLUDED.status,state_action=EXCLUDED.state_action")
             .bind(&id).bind(revision).bind(key.as_ref().map(|v|v.0.as_str())).bind(key.as_ref().map(|v|v.1))
             .bind(payload).bind(time).bind(if verified.is_some() || verified_tip.is_some() || verified_extension.is_some() {"verified"} else {"unsupported_or_invalid"})
-             .bind(if verified_tip.is_some() || verified_extension.is_some() {Some("signed")} else {verified.as_ref().map(operation)}).execute(&mut *tx).await?;
+             .bind(if verified_tip.is_some() || verified_extension.is_some() {Some("signed")} else {verified.as_ref().map(operation)}).bind(imported_replay).execute(&mut *tx).await?;
         if let Some(core) = &verified {
             crate::kaposts_projection::record_core(&mut tx, core).await?;
         }
@@ -503,9 +537,7 @@ impl SharedSocial {
         let mut evaluated = vec![current.to_vec()];
         for selected in &active {
             let id: Vec<u8> = selected.get("transaction_id");
-            let locked:Option<i64>=sqlx::query_scalar("SELECT revision FROM protocol_indexer.canonical WHERE transaction_id=$1 FOR SHARE SKIP LOCKED")
-                .bind(&id).fetch_optional(&mut **tx).await?;
-            if locked != Some(selected.get::<i64, _>("revision")) {
+            if !crate::retained_history::fence(tx, &id, selected.get::<i64, _>("revision"), selected.get("retained_native")).await? {
                 return Ok(false);
             }
             evaluated.push(id);

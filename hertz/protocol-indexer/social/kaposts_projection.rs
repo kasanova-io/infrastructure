@@ -4,9 +4,8 @@ use crate::database::Transaction;
 use crate::k_protocol::{KActionType, KProtocolProcessor, VerifiedAction, VerifiedKaPosts};
 use crate::kaposts::{KPoll, KaPostsAction};
 use crate::shared_social::{capture_snapshot, restore_snapshot};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde_json::Value;
 use sqlx::{Postgres, Row};
 
 type Tx<'a> = sqlx::Transaction<'a, Postgres>;
@@ -229,11 +228,11 @@ enum TargetState {
 }
 
 async fn target(tx: &mut Tx<'_>, processor: &KProtocolProcessor, id: &[u8]) -> Result<TargetState> {
-    let row=sqlx::query("SELECT c.source_transaction::text AS body,c.accepting_block,COALESCE(a.original_time,(c.source_transaction->>'block_time')::bigint) AS original_time FROM protocol_indexer.canonical c LEFT JOIN social_shared.actions a USING(transaction_id) WHERE c.transaction_id=$1 FOR SHARE OF c SKIP LOCKED")
+    let row=sqlx::query("SELECT revision,verification_payload,eligible,original_time,retained_native FROM social_shared.source_facts WHERE transaction_id=$1")
         .bind(id).fetch_optional(&mut **tx).await?;
     let Some(row) = row else {
         let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM protocol_indexer.canonical WHERE transaction_id=$1)",
+            "SELECT EXISTS(SELECT 1 FROM social_shared.source_facts WHERE transaction_id=$1)",
         )
         .bind(id)
         .fetch_one(&mut **tx)
@@ -244,20 +243,19 @@ async fn target(tx: &mut Tx<'_>, processor: &KProtocolProcessor, id: &[u8]) -> R
             TargetState::Missing
         });
     };
-    let body: Value = serde_json::from_str(row.get::<&str, _>("body"))?;
+    if !crate::retained_history::fence(tx, id, row.get("revision"), row.get("retained_native")).await? {
+        return Ok(TargetState::Busy);
+    }
     let time: Option<i64> = row.get("original_time");
     let Some(time) = time else {
         return Ok(TargetState::Missing);
     };
     let transaction = Transaction {
         transaction_id: hex::encode(id),
-        payload: body["payload"]
-            .as_str()
-            .and_then(|s| s.strip_prefix("\\x"))
-            .map(str::to_owned),
+        payload: row.get("verification_payload"),
         block_time: Some(time),
     };
-    let accepted = row.get::<Option<Vec<u8>>, _>("accepting_block").is_some();
+    let accepted = row.get::<bool, _>("eligible");
     let fields = if let Some(core) = processor.verify_transaction(&transaction) {
         match core.action() {
             KActionType::Post(v) => Some((
@@ -478,8 +476,7 @@ async fn fenced(tx: &mut Tx<'_>, rows: &Rows) -> Result<bool> {
         if let Some(target) = row.try_get::<Option<Vec<u8>>, _>("target").ok().flatten() {
             let target_revision: Option<i64> = row.try_get("target_revision").ok().flatten();
             if let Some(expected) = target_revision {
-                let actual:Option<i64>=sqlx::query_scalar("SELECT revision FROM protocol_indexer.canonical WHERE transaction_id=$1 FOR SHARE SKIP LOCKED").bind(target).fetch_optional(&mut **tx).await?;
-                if actual != Some(expected) {
+                if !crate::retained_history::fence(tx, &target, expected, row.try_get("target_retained").unwrap_or(false)).await? {
                     return Ok(false);
                 }
             }
@@ -519,10 +516,10 @@ pub fn source_message<'a>(
 pub(crate) const AUTHORIZED_EDIT: &str = include_str!("edit_authorization.sql");
 pub(crate) const UNQUOTE_ORDER: &str = include_str!("unquote_order.sql");
 fn selected_fields() -> &'static str {
-    "e.*,e.mentions::text AS mentions_text,a.snapshot::text AS snapshot,c.revision AS canonical_revision,t.revision AS target_revision"
+    "e.*,e.mentions::text AS mentions_text,a.snapshot::text AS snapshot,c.revision AS canonical_revision,t.revision AS target_revision,t.retained_native AS target_retained"
 }
 fn mutation_join() -> &'static str {
-    "FROM social_shared.extensions e JOIN social_shared.actions a USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN protocol_indexer.canonical t ON t.transaction_id=e.target"
+    "FROM social_shared.extensions e JOIN social_shared.actions a USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.source_facts t ON t.transaction_id=e.target"
 }
 
 pub(crate) fn edit_selection_sql() -> String {
@@ -544,7 +541,7 @@ pub async fn content_policy(
         .bind(signature)
         .fetch_all(&mut **tx)
         .await?;
-    let deletes=sqlx::query(&format!("SELECT {} {} WHERE e.target_signature=$1 AND e.kind='delete' AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id IN(e.transaction_id,e.target) AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY e.original_time,e.transaction_id LIMIT 1",selected_fields(),mutation_join()))
+    let deletes=sqlx::query(&format!("SELECT {} {} WHERE e.target_signature=$1 AND e.kind='delete' AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.eligible AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id IN(e.transaction_id,e.target) AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY e.original_time,e.transaction_id LIMIT 1",selected_fields(),mutation_join()))
         .bind(signature).fetch_all(&mut **tx).await?;
     let withdraws=sqlx::query(&format!("SELECT e.*,c.revision AS canonical_revision FROM social_shared.content_keys k JOIN social_shared.extensions e ON e.kind='unquote' AND e.sender=k.author AND e.target=k.reference JOIN protocol_indexer.canonical c ON c.transaction_id=e.transaction_id WHERE k.transaction_id=$1 AND k.kind IN('quote','repost') AND e.shape_valid AND c.accepting_block IS NOT NULL AND {} AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=e.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL) ORDER BY e.original_time DESC,e.transaction_id DESC LIMIT 1", UNQUOTE_ORDER))
         .bind(base_id).fetch_all(&mut **tx).await?;
@@ -626,7 +623,7 @@ async fn edit_audit(tx: &mut Tx<'_>, signature: &[u8]) -> Result<bool> {
 }
 
 async fn delete_audit(tx: &mut Tx<'_>, post: &[u8]) -> Result<bool> {
-    let selected=sqlx::query(&format!("SELECT {} {} WHERE e.target=$1 AND e.kind='delete' AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL ORDER BY EXISTS(SELECT 1 FROM k_deletes WHERE transaction_id=e.transaction_id) DESC,e.original_time,e.transaction_id LIMIT 1",selected_fields(),mutation_join()))
+    let selected=sqlx::query(&format!("SELECT {} {} WHERE e.target=$1 AND e.kind='delete' AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.eligible ORDER BY EXISTS(SELECT 1 FROM k_deletes WHERE transaction_id=e.transaction_id) DESC,e.original_time,e.transaction_id LIMIT 1",selected_fields(),mutation_join()))
         .bind(post).fetch_all(&mut **tx).await?;
     if !fenced(tx, &selected).await? {
         return Ok(false);
@@ -665,7 +662,7 @@ async fn reconcile_mentions(
     all: bool,
 ) -> Result<bool> {
     let pubkeys: Vec<Vec<u8>> = if all {
-        sqlx::query_scalar(&format!("SELECT DISTINCT m.mentioned_pubkey FROM social_shared.edit_mentions m JOIN social_shared.extensions e USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN protocol_indexer.canonical t ON t.transaction_id=e.target WHERE e.target_signature=$1 AND {}",AUTHORIZED_EDIT))
+        sqlx::query_scalar(&format!("SELECT DISTINCT m.mentioned_pubkey FROM social_shared.edit_mentions m JOIN social_shared.extensions e USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.source_facts t ON t.transaction_id=e.target WHERE e.target_signature=$1 AND {}",AUTHORIZED_EDIT))
             .bind(signature).fetch_all(&mut **tx).await?
     } else {
         sqlx::query_scalar(
@@ -784,7 +781,7 @@ pub async fn apply_policy(
     {
         sqlx::query("UPDATE social_shared.actions SET notification_consumed=true WHERE transaction_id=$1 AND NOT notification_consumed").bind(row.get::<Vec<u8>,_>("transaction_id")).execute(&mut **tx).await?;
     }
-    sqlx::query("UPDATE social_shared.actions a SET notification_consumed=true FROM social_shared.extensions e JOIN protocol_indexer.canonical c USING(transaction_id) JOIN protocol_indexer.canonical t ON t.transaction_id=e.target WHERE a.transaction_id=$1 AND e.transaction_id=a.transaction_id AND NOT a.notification_consumed AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL AND (e.kind='delete' OR (e.kind='edit' AND e.target_kind<>'poll' AND e.original_time>e.target_time AND e.original_time::numeric-e.target_time::numeric<=7200000))")
+    sqlx::query("UPDATE social_shared.actions a SET notification_consumed=true FROM social_shared.extensions e JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.source_facts t ON t.transaction_id=e.target WHERE a.transaction_id=$1 AND e.transaction_id=a.transaction_id AND NOT a.notification_consumed AND e.shape_valid AND e.sender=e.target_author AND c.accepting_block IS NOT NULL AND t.eligible AND (e.kind='delete' OR (e.kind='edit' AND e.target_kind<>'poll' AND e.original_time>e.target_time AND e.original_time::numeric-e.target_time::numeric<=7200000))")
         .bind(current).execute(&mut **tx).await?;
     sqlx::query("SELECT set_config('kasanova.social_notify_allowed','false',true)")
         .execute(&mut **tx)
@@ -833,7 +830,7 @@ async fn apply_poll_vote(
             .execute(&mut **tx)
             .await?;
     }
-    let selected=sqlx::query("SELECT e.*,a.original_time,c.revision AS canonical_revision,t.revision AS target_revision FROM social_shared.poll_vote_facts f JOIN social_shared.extensions e USING(transaction_id) JOIN social_shared.actions a USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN protocol_indexer.canonical t ON t.transaction_id=e.target WHERE e.signature=$1 AND f.revision=c.revision AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL AND EXISTS(SELECT 1 FROM k_contents WHERE sender_signature=f.post_signature AND content_type='poll') ORDER BY EXISTS(SELECT 1 FROM k_poll_votes WHERE transaction_id=e.transaction_id) DESC,a.original_time,e.transaction_id LIMIT 1")
+    let selected=sqlx::query("SELECT e.*,a.original_time,c.revision AS canonical_revision,t.revision AS target_revision,t.retained_native AS target_retained FROM social_shared.poll_vote_facts f JOIN social_shared.extensions e USING(transaction_id) JOIN social_shared.actions a USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.source_facts t ON t.transaction_id=e.target WHERE e.signature=$1 AND f.revision=c.revision AND c.accepting_block IS NOT NULL AND t.eligible AND EXISTS(SELECT 1 FROM k_contents WHERE sender_signature=f.post_signature AND content_type='poll') ORDER BY EXISTS(SELECT 1 FROM k_poll_votes WHERE transaction_id=e.transaction_id) DESC,a.original_time,e.transaction_id LIMIT 1")
         .bind(&signature).fetch_all(&mut **tx).await?;
     if !fenced(tx, &selected).await? {
         return Ok(false);
@@ -868,7 +865,7 @@ pub async fn ordinary_vote_hidden(
             if !acquired {
                 return Ok(None);
             }
-            let deleted:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_shared.extensions e JOIN protocol_indexer.canonical c USING(transaction_id) JOIN protocol_indexer.canonical t ON t.transaction_id=e.target WHERE e.kind='delete' AND e.shape_valid AND e.sender=$2 AND (e.target=$1 OR e.target_signature=$3) AND c.accepting_block IS NOT NULL AND t.accepting_block IS NOT NULL)")
+            let deleted:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_shared.extensions e JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.source_facts t ON t.transaction_id=e.target WHERE e.kind='delete' AND e.shape_valid AND e.sender=$2 AND (e.target=$1 OR e.target_signature=$3) AND c.accepting_block IS NOT NULL AND t.eligible)")
                 .bind(hex::decode(&v.post_id)?).bind(parent.author).bind(parent.signature).fetch_one(&mut **tx).await?;
             Ok(Some(deleted))
         }

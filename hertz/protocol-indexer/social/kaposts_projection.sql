@@ -102,8 +102,8 @@ SELECT vote.*,post.transaction_id AS content_transaction_id FROM k_poll_votes vo
 JOIN protocol_indexer.canonical c USING(transaction_id)
 JOIN social_shared.poll_vote_facts fact ON fact.transaction_id=vote.transaction_id AND fact.revision=c.revision
 JOIN social_shared.extensions e ON e.transaction_id=vote.transaction_id AND e.option_index=vote.option_index AND e.signature=vote.sender_signature
-JOIN protocol_indexer.canonical target ON target.transaction_id=vote.poll_id
+JOIN social_shared.source_facts target ON target.transaction_id=vote.poll_id
 JOIN k_contents post ON post.sender_signature=fact.post_signature AND post.content_type='poll'
-JOIN protocol_indexer.canonical representative ON representative.transaction_id=post.transaction_id
-WHERE c.accepting_block IS NOT NULL AND target.accepting_block IS NOT NULL AND representative.accepting_block IS NOT NULL
+JOIN social_shared.source_facts representative ON representative.transaction_id=post.transaction_id
+WHERE c.accepting_block IS NOT NULL AND target.eligible AND representative.eligible
 AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id IN(vote.transaction_id,vote.poll_id,post.transaction_id) AND p.acceptance_changed AND p.accepting_block IS NULL);

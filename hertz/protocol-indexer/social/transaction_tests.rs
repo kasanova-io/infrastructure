@@ -677,6 +677,18 @@ async fn pure_verified_envelope_owns_reviewed_transaction_not_latest_mutable_inp
     assert_eq!(verified.transaction().block_time, Some(12345));
 }
 
+#[test]
+fn pure_retained_adoption_cli_requires_explicit_source_and_excludes_other_modes() {
+    use clap::Parser;
+    assert!(crate::Args::try_parse_from(["social","--adopt-retained-history","inventory.json"]).is_err());
+    let base=["social","--network","mainnet","--shared-source-id","a179f285-19a7-4646-9eef-cf1bf2c20a56","--adopt-retained-history","inventory.json"];
+    let args=crate::Args::try_parse_from(base).unwrap();
+    assert!(args.adopt_retained_history.is_some());
+    for extra in [vec!["--initialize-db"],vec!["--upgrade-db"],vec!["--audit-retained-history","fields.json","--audit-retained-history-report","new.json"]] {
+        assert!(crate::Args::try_parse_from(base.into_iter().chain(extra)).is_err());
+    }
+}
+
 #[cfg(feature = "shared-postgres-contract")]
 async fn database() -> sqlx::PgPool {
     let dsn = std::env::var("SOCIAL_TEST_DATABASE_URL")
@@ -772,7 +784,7 @@ mod shared_consumer {
             INSERT INTO k_vars(key,value) VALUES('network','testnet-10');
             CREATE SCHEMA protocol_indexer;
             CREATE TABLE protocol_indexer.config(singleton boolean PRIMARY KEY DEFAULT true, network text, journal_id uuid);
-            CREATE TABLE protocol_indexer.canonical(transaction_id bytea PRIMARY KEY,revision bigint,source_transaction jsonb,accepting_block bytea);
+            CREATE TABLE protocol_indexer.canonical(transaction_id bytea PRIMARY KEY,revision bigint,source_transaction jsonb,accepting_block bytea,family text);
             CREATE TABLE protocol_indexer.pending(transaction_id bytea PRIMARY KEY,acceptance_changed boolean NOT NULL DEFAULT false,accepting_block bytea);
             CREATE TABLE protocol_indexer.evidence(transaction_id bytea PRIMARY KEY REFERENCES protocol_indexer.canonical,receipt jsonb);
             CREATE TABLE protocol_indexer.consumer_jobs(consumer text,transaction_id bytea REFERENCES protocol_indexer.canonical,available_at timestamptz DEFAULT clock_timestamp(),last_error text,PRIMARY KEY(consumer,transaction_id));
@@ -786,6 +798,9 @@ mod shared_consumer {
             CREATE TRIGGER probe_content AFTER INSERT ON k_contents FOR EACH ROW EXECUTE FUNCTION notification_probe_capture();
             CREATE TRIGGER probe_follow AFTER INSERT ON k_follows FOR EACH ROW EXECUTE FUNCTION notification_probe_capture();")
             .execute(&pool).await.unwrap();
+        let mut fence_install=pool.begin().await.unwrap();
+        sqlx::raw_sql(include_str!("source_fence.sql")).execute(&mut *fence_install).await.unwrap();
+        fence_install.commit().await.unwrap();
         sqlx::query(
             "INSERT INTO protocol_indexer.config(network,journal_id) VALUES('testnet-10',$1::uuid)",
         )
@@ -806,7 +821,7 @@ mod shared_consumer {
         let mut tx = pool.begin().await.unwrap();
         let id = hex::decode(&value.transaction_id).unwrap();
         let body = serde_json::json!({"payload":format!("\\x{}",value.payload.as_ref().unwrap()),"block_time":value.block_time});
-        sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,$2,$3::jsonb,$4) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,source_transaction=EXCLUDED.source_transaction,accepting_block=EXCLUDED.accepting_block")
+        sqlx::query("INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,accepting_block) VALUES($1,$2,$3::jsonb,$4) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,source_transaction=EXCLUDED.source_transaction,accepting_block=EXCLUDED.accepting_block")
             .bind(&id).bind(revision).bind(body.to_string()).bind(accepted.then(||vec![9u8;32]))
             .execute(&mut *tx).await.unwrap();
         sqlx::query("INSERT INTO protocol_indexer.events VALUES($1,$2,$3)")
@@ -830,6 +845,257 @@ mod shared_consumer {
 
     async fn consume(consumer: &SharedSocial) {
         assert!(consumer.run_one().await.unwrap());
+    }
+
+
+    async fn retained_inventory(pool: &sqlx::PgPool) -> Vec<u8> {
+        let mut tables=serde_json::Map::new();
+        for table in ["public.k_contents","public.k_votes","public.k_broadcasts","public.k_follows",
+                      "public.k_blocks","public.k_mentions","public.k_hashtags","public.k_vars",
+                      "social_notifications.activation","social_notifications.outbox"] {
+            let exists:bool=sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL").bind(table).fetch_one(pool).await.unwrap();
+            if !exists {continue}
+            let row:(i64,String)=sqlx::query_as(&format!("SELECT count(*),encode(sha256(convert_to(COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text,'UTF8')),'hex') FROM {table} t"))
+                .fetch_one(pool).await.unwrap();
+            tables.insert(table.into(),serde_json::json!({"count":row.0,"rows_sha256":row.1}));
+        }
+        serde_json::to_vec(&serde_json::json!({"schema":"kasanova-retained-native-inventory-v1","network":"testnet-10",
+            "native_schema_version":"2","protocol_hint":"k","source_backup_sha256":"ab".repeat(32),"tables":tables})).unwrap()
+    }
+
+    async fn old_post(pool: &sqlx::PgPool, id: u8) -> Transaction {
+        let target=format!("02{}",public_key());let mentions=format!(r#"["{target}"]"#);
+        let tail=format!("aGkgI2thc3Bh:{mentions}");
+        let mut value=signed("k","post",&tail,&tail,id);value.block_time=Some(1000);
+        KProtocolProcessor::new(pool.clone()).process_k_transaction(&value).await.unwrap();
+        value
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_explicit_adoption_preserves_native_state_and_is_idempotent() {
+        let pool=setup().await;let old=old_post(&pool,71).await;
+        sqlx::raw_sql("CREATE SCHEMA social_notifications; CREATE TABLE social_notifications.activation(epoch bigint); INSERT INTO social_notifications.activation VALUES(42); CREATE TABLE social_notifications.outbox(id bigserial PRIMARY KEY,body text); INSERT INTO social_notifications.outbox(body) VALUES('preserved')")
+            .execute(&pool).await.unwrap();
+        let before:(i64,i64)=sqlx::query_as("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap();
+        let mentions:String=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(t) ORDER BY id)::text FROM k_mentions t").fetch_one(&pool).await.unwrap();
+        let manifest=retained_inventory(&pool).await;
+        assert!(SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.is_err());
+        let adopted=crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        assert_eq!(adopted["retained_native_records"],1);assert_eq!(adopted["canonical_receipts_created"],0);
+        SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        assert_eq!(count(&pool,"protocol_indexer.canonical").await,0);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,0);
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,1);
+        assert_eq!(count(&pool,"social_shared_api.k_mentions").await,1);
+        assert_eq!(count(&pool,"social_shared_api.k_hashtags").await,1);
+        assert_eq!(sqlx::query_as::<_,(i64,i64)>("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap(),before);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT jsonb_agg(to_jsonb(t) ORDER BY id)::text FROM k_mentions t").fetch_one(&pool).await.unwrap(),mentions);
+        let notify:bool=sqlx::query_scalar("SELECT bool_and(notification_consumed) FROM social_shared.actions").fetch_one(&pool).await.unwrap();assert!(notify);
+        assert_eq!(count(&pool,"notification_probe").await,0);assert_eq!(count(&pool,"social_notifications.outbox").await,1);
+        let follow=signed("kchat","follow",&format!("follow:{}",public_key()),&format!("follow:{}",public_key()),72);
+        capture(&pool,&follow,1,true,false).await;
+        let again=crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        assert_eq!(again["already_imported"],true);assert_eq!(again["import_id"],adopted["import_id"]);
+        assert_eq!(count(&pool,"protocol_indexer.canonical").await,1);
+        let body:serde_json::Value=sqlx::query_scalar("SELECT snapshot FROM social_shared.actions WHERE transaction_id=$1").bind(hex::decode(old.transaction_id).unwrap()).fetch_one(&pool).await.unwrap();
+        assert_eq!(body["main"]["id"],before.0);assert_eq!(body["main"]["block_time"],1000);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_inventory_and_signatures_fail_before_ownership_or_schema_writes() {
+        let pool=setup().await;old_post(&pool,73).await;
+        let manifest=retained_inventory(&pool).await;
+        for field in ["network","hash","count","tables","root"] {
+            let mut bad:serde_json::Value=serde_json::from_slice(&manifest).unwrap();
+            match field {
+                "network"=>bad["network"]="mainnet".into(),
+                "hash"=>bad["tables"]["public.k_contents"]["rows_sha256"]="cc".repeat(32).into(),
+                "count"=>bad["tables"]["public.k_contents"]["count"]=2.into(),
+                "tables"=>{bad["tables"].as_object_mut().unwrap().remove("public.k_mentions");},
+                _=>bad["protocol_hint"]="unknown".into(),
+            }
+            assert!(crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&bad).unwrap()).await.is_err(),"{field}");
+            assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('social_shared.config') IS NULL").fetch_one(&pool).await.unwrap());
+            assert_eq!(count(&pool,"k_contents").await,1);
+        }
+        assert!(crate::retained_history::adopt(pool.clone(),"testnet-10","00000000-0000-0000-0000-000000000000",&manifest).await.is_err());
+        sqlx::query("UPDATE k_contents SET base64_encoded_message='ZGFtYWdlZA=='").execute(&pool).await.unwrap();
+        let damaged=retained_inventory(&pool).await;
+        assert!(crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&damaged).await.is_err());
+        assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('social_shared.config') IS NULL").fetch_one(&pool).await.unwrap());
+        assert_eq!(count(&pool,"k_contents").await,1);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_canonical_promotion_revocation_and_reacceptance_keep_native_identity_time() {
+        let pool=setup().await;let mut old=old_post(&pool,74).await;
+        let before:(i64,i64)=sqlx::query_as("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap();
+        let manifest=retained_inventory(&pool).await;crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        // Root is now supplied by the actual canonical body, never by guessing.
+        old.payload=Some(hex::encode(String::from_utf8(hex::decode(old.payload.as_ref().unwrap()).unwrap()).unwrap().replacen("k:1:","kchat:1:",1)));
+        old.block_time=Some(1304);
+        capture(&pool,&old,1,true,true).await;
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,0,"unmatched canonical body immediately suppresses retained fallback");
+        consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,1);
+        assert_eq!(sqlx::query_as::<_,(i64,i64)>("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap(),before);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT provenance FROM social_shared.actions").fetch_one(&pool).await.unwrap(),"canonical");
+        capture(&pool,&old,2,false,false).await;
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,0);
+        consume(&consumer).await;assert_eq!(count(&pool,"k_contents").await,0);
+        capture(&pool,&old,3,true,true).await;consume(&consumer).await;
+        assert_eq!(sqlx::query_as::<_,(i64,i64)>("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap(),before);
+        assert_eq!(count(&pool,"social_shared_api.k_mentions").await,1);assert_eq!(count(&pool,"notification_probe").await,0);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_pending_removal_and_signed_alias_never_restore_stale_history_or_notify() {
+        let pool=setup().await;let old=old_post(&pool,75).await;
+        let native_id:i64=sqlx::query_scalar("SELECT id FROM k_contents").fetch_one(&pool).await.unwrap();
+        let manifest=retained_inventory(&pool).await;crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        let mut alias=old.clone();alias.transaction_id="76".repeat(32);
+        capture(&pool,&alias,1,true,true).await;consume(&consumer).await;
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT id FROM k_contents").fetch_one(&pool).await.unwrap(),native_id);
+        assert_eq!(count(&pool,"k_contents").await,1);assert_eq!(count(&pool,"notification_probe").await,0);
+        sqlx::query("INSERT INTO protocol_indexer.pending(transaction_id,acceptance_changed) VALUES($1,true)")
+            .bind(hex::decode(&old.transaction_id).unwrap()).execute(&pool).await.unwrap();
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,0,"pending removal cannot be rescued by signature alias before reconciliation");
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_contradiction_is_durable_and_does_not_starve_other_subjects() {
+        let pool=setup().await;let old=old_post(&pool,77).await;
+        let manifest=retained_inventory(&pool).await;crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        let changed=signed("kchat","post","ZGlmZmVyZW50:[]","ZGlmZmVyZW50:[]",77);
+        assert_eq!(old.transaction_id,changed.transaction_id);
+        capture(&pool,&changed,1,true,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.retained_conflicts").await,1);
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,0);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,0);
+        let good=signed("kchat","post","Z29vZA==:[]","Z29vZA==:[]",78);
+        capture(&pool,&good,1,true,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,1);
+        assert_eq!(count(&pool,"social_shared.retained_imports").await,1);
+        assert_eq!(count(&pool,"notification_probe").await,1);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_bootstrap_replays_accepted_history_quietly_but_future_acceptance_is_live() {
+        let pool=setup().await;old_post(&pool,79).await;
+        let accepted=signed("kchat","post","b2xk:[]","b2xk:[]",80);
+        let future=signed("kchat","post","bmV3:[]","bmV3:[]",81);
+        capture(&pool,&accepted,1,true,true).await;capture(&pool,&future,1,false,false).await;
+        sqlx::query("UPDATE protocol_indexer.canonical SET family='kachat_posts'").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM protocol_indexer.consumer_jobs").execute(&pool).await.unwrap();
+        let manifest=retained_inventory(&pool).await;crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        assert_eq!(count(&pool,"social_shared.retained_replay").await,1);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,2);
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        consume(&consumer).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,2);assert_eq!(count(&pool,"notification_probe").await,0);
+        capture(&pool,&future,2,true,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared_api.k_contents").await,3);assert_eq!(count(&pool,"notification_probe").await,1);
+    }
+
+
+    #[tokio::test]
+    async fn postgres_retained_preexisting_canonical_overlap_is_queued_and_promoted_or_quarantined() {
+        for conflict in [false,true] {
+            let pool=setup().await;let mut old=old_post(&pool,82).await;
+            let id:i64=sqlx::query_scalar("SELECT id FROM k_contents").fetch_one(&pool).await.unwrap();
+            let manifest=retained_inventory(&pool).await;
+            let actual=if conflict {signed("kchat","post","Y29uZmxpY3Q=:[]","Y29uZmxpY3Q=:[]",82)}
+                else {old.block_time=Some(1076);old.clone()};
+            capture(&pool,&actual,1,true,true).await;
+            sqlx::query("DELETE FROM protocol_indexer.consumer_jobs").execute(&pool).await.unwrap();
+            crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+            assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,1);
+            assert_eq!(count(&pool,"social_shared_api.k_contents").await,0);
+            let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();consume(&consumer).await;
+            assert_eq!(count(&pool,"social_shared_api.k_contents").await,if conflict {0} else {1});
+            assert_eq!(count(&pool,"social_shared.retained_conflicts").await,if conflict {1} else {0});
+            if !conflict {assert_eq!(sqlx::query_as::<_,(i64,i64)>("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap(),(id,1000));}
+            assert_eq!(count(&pool,"notification_probe").await,0);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_absence_fence_serializes_real_canonical_insert_in_both_orders() {
+        for writer_first in [false,true] {
+            let pool=setup().await;let old=old_post(&pool,83).await;
+            let manifest=retained_inventory(&pool).await;crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+            let id=hex::decode(&old.transaction_id).unwrap();
+            let body=serde_json::json!({"payload":format!("\\x{}",old.payload.as_ref().unwrap()),"block_time":old.block_time}).to_string();
+            if writer_first {
+                let mut writer=pool.begin().await.unwrap();
+                sqlx::query("INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction) VALUES($1,1,$2::jsonb)").bind(&id).bind(&body).execute(&mut *writer).await.unwrap();
+                let mut native=pool.begin().await.unwrap();
+                assert!(!crate::retained_history::fence(&mut native,&id,0,true).await.unwrap(),"uncommitted writer holds controlling source fence");
+                native.rollback().await.unwrap();writer.commit().await.unwrap();
+            } else {
+                let mut native=pool.begin().await.unwrap();
+                let native_pid:i32=sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *native).await.unwrap();
+                assert!(crate::retained_history::fence(&mut native,&id,0,true).await.unwrap());
+                let mut connection=pool.acquire().await.unwrap();
+                let writer_pid:i32=sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *connection).await.unwrap();
+                let id_copy=id.clone();let handle=tokio::spawn(async move {
+                    sqlx::query("INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction) VALUES($1,1,$2::jsonb)").bind(id_copy).bind(body).execute(&mut *connection).await.unwrap();
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(3),async {
+                    loop {
+                        let blocked:bool=sqlx::query_scalar("SELECT $2=ANY(pg_blocking_pids($1)) AND EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock' AND wait_event='advisory')")
+                            .bind(writer_pid).bind(native_pid).fetch_one(&pool).await.unwrap();
+                        if blocked {break}
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                }).await.expect("actual second connection must wait on source fence, not a sleep assumption");
+                assert_eq!(count(&pool,"protocol_indexer.canonical").await,0);
+                native.commit().await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(3),handle).await.unwrap().unwrap();
+            }
+            assert_eq!(count(&pool,"protocol_indexer.canonical").await,1);
+            assert_eq!(count(&pool,"social_shared_api.k_contents").await,0,"committed canonical revocation immediately supersedes retained fallback");
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_requires_actual_unconditional_source_fence_before_and_after_adoption() {
+        let pool=setup().await;old_post(&pool,84).await;let manifest=retained_inventory(&pool).await;
+        sqlx::raw_sql("CREATE OR REPLACE FUNCTION protocol_indexer.fence_source_identity() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $$ BEGIN RETURN NEW; END; $$")
+            .execute(&pool).await.unwrap();
+        assert!(crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.is_err());
+        assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('social_shared.config') IS NULL").fetch_one(&pool).await.unwrap());
+        let mut install=pool.begin().await.unwrap();sqlx::raw_sql(include_str!("source_fence.sql")).execute(&mut *install).await.unwrap();install.commit().await.unwrap();
+        crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        sqlx::query("ALTER TABLE protocol_indexer.canonical DISABLE TRIGGER protocol_source_identity_fence").execute(&pool).await.unwrap();
+        assert!(SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.is_err());
+        assert_eq!(count(&pool,"k_contents").await,1);assert_eq!(count(&pool,"social_shared.retained_imports").await,1);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_conflict_busy_rebuild_defers_and_other_ready_subject_progresses() {
+        let pool=setup().await;let old=old_post(&pool,85).await;
+        let manifest=retained_inventory(&pool).await;crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        let mut alias=old.clone();alias.transaction_id="86".repeat(32);
+        capture(&pool,&alias,1,true,false).await;consume(&consumer).await;
+        let changed=signed("kchat","post","Y2hhbmdlZA==:[]","Y2hhbmdlZA==:[]",85);
+        capture(&pool,&changed,1,true,true).await;
+        let good=signed("kchat","post","Z29vZA==:[]","Z29vZA==:[]",87);
+        capture(&pool,&good,1,true,true).await;
+        let mut held=pool.begin().await.unwrap();
+        sqlx::query("SELECT transaction_id FROM protocol_indexer.canonical WHERE transaction_id=$1 FOR UPDATE")
+            .bind(hex::decode(&alias.transaction_id).unwrap()).fetch_one(&mut *held).await.unwrap();
+        consume(&consumer).await;
+        let deferred:bool=sqlx::query_scalar("SELECT bad.last_error='retained_subject_busy' AND bad.available_at>good.available_at FROM protocol_indexer.consumer_jobs bad CROSS JOIN protocol_indexer.consumer_jobs good WHERE bad.transaction_id=$1 AND good.transaction_id=$2")
+            .bind(hex::decode(&changed.transaction_id).unwrap()).bind(hex::decode(&good.transaction_id).unwrap()).fetch_one(&pool).await.unwrap();assert!(deferred);
+        consume(&consumer).await;
+        assert!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM social_shared_api.k_contents WHERE transaction_id=$1)").bind(hex::decode(&good.transaction_id).unwrap()).fetch_one(&pool).await.unwrap());
+        assert_eq!(count(&pool,"social_shared.retained_conflicts").await,0,"busy attempt rolls back conflict and projection atomically");
+        held.rollback().await.unwrap();
     }
 
     #[tokio::test]
@@ -2481,6 +2747,40 @@ mod shared_consumer {
           "receipt":{"schema_version":1,"network":"testnet-10","transaction_id":value.transaction_id,"payload":payload,
             "archive_transaction":{"transaction_id":value.transaction_id,"payload":payload,"outputs":[{"index":0,"amount":amount,"script_public_key":script}]},
             "rpc_transaction":rpc}})
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_tip_parent_keeps_identity_and_rejects_wrong_author_or_absent_proof() {
+        let pool=setup().await;
+        let parent=parent_vector();
+        KProtocolProcessor::new(pool.clone()).process_k_transaction(&parent).await.unwrap();
+        let original:(i64,i64)=sqlx::query_as("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap();
+        let manifest=retained_inventory(&pool).await;
+        crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        assert_eq!(count(&pool,"protocol_indexer.canonical").await,0);
+        let other=Keypair::from_seckey_slice(&Secp256k1::new(),&[7;32]).unwrap().x_only_public_key().0.to_string();
+        let wrong=synthetic_tip_vector(111,&parent,10_000_000,0,Some(other));
+        capture_vector(&pool,&wrong,1,true,false,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"k_tips").await,0);
+        assert_eq!(count(&pool,"social_shared.tip_payments").await,0);
+        let good=synthetic_tip_vector(112,&parent,10_000_000,0,None);
+        let tip=capture_vector(&pool,&good,1,true,false,false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_tips").await,0);
+        assert!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1' AND transaction_id=$1 AND last_error LIKE 'verified_tip_output_pending:%')")
+            .bind(hex::decode(&tip.transaction_id).unwrap()).fetch_one(&pool).await.unwrap());
+        sqlx::query("INSERT INTO protocol_indexer.evidence VALUES($1,$2::jsonb)")
+            .bind(hex::decode(&tip.transaction_id).unwrap()).bind(good["receipt"].to_string()).execute(&pool).await.unwrap();
+        ready_all(&pool).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_tips").await,1);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT amount FROM social_shared.current_tips").fetch_one(&pool).await.unwrap(),10_000_000);
+        assert_eq!(sqlx::query_as::<_,(i64,i64)>("SELECT id,block_time FROM k_contents").fetch_one(&pool).await.unwrap(),original);
+        assert!(sqlx::query_scalar::<_,bool>("SELECT retained_native FROM social_shared.source_facts WHERE transaction_id=$1")
+            .bind(hex::decode(&parent.transaction_id).unwrap()).fetch_one(&pool).await.unwrap());
+        assert!(!sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM protocol_indexer.canonical WHERE transaction_id=$1)")
+            .bind(hex::decode(&parent.transaction_id).unwrap()).fetch_one(&pool).await.unwrap());
+        assert_eq!(count(&pool,"notification_probe").await,0);
     }
 
     #[tokio::test]

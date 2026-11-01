@@ -40,22 +40,18 @@ async fn prepare_payment(
     let post = hex::decode(&tip.tip().post_id)?;
     let mut valid = None;
     if accepted {
-        let target=sqlx::query("SELECT c.accepting_block,c.source_transaction::text AS body,COALESCE(a.original_time,(c.source_transaction->>'block_time')::bigint) AS original_time FROM protocol_indexer.canonical c LEFT JOIN social_shared.actions a USING(transaction_id) WHERE c.transaction_id=$1 FOR SHARE OF c SKIP LOCKED")
+        let target=sqlx::query("SELECT revision,verification_payload,original_time,eligible,retained_native FROM social_shared.source_facts WHERE transaction_id=$1")
             .bind(&post).fetch_optional(&mut **tx).await?;
         let Some(target) = target else {
             return Ok(TipReconcile::Pending);
         };
-        if target
-            .get::<Option<Vec<u8>>, _>("accepting_block")
-            .is_some()
-        {
-            let target_body: Value = serde_json::from_str(target.get::<&str, _>("body"))?;
+        if !crate::retained_history::fence(tx, &post, target.get("revision"), target.get("retained_native")).await? {
+            return Ok(TipReconcile::Busy);
+        }
+        if target.get::<bool, _>("eligible") {
             let transaction = Transaction {
                 transaction_id: hex::encode(&post),
-                payload: target_body["payload"]
-                    .as_str()
-                    .and_then(|v| v.strip_prefix("\\x"))
-                    .map(str::to_owned),
+                payload: target.get("verification_payload"),
                 block_time: target.get("original_time"),
             };
             if transaction.block_time.is_none()
@@ -131,22 +127,21 @@ pub(crate) async fn reconcile_tip(
     if prepared != TipReconcile::Applied {
         return Ok(prepared);
     }
-    let selected=sqlx::query("SELECT a.transaction_id,a.original_time,a.source_payload,a.notification_consumed,a.snapshot::text AS snapshot,p.amount,p.post_signature,c.revision,d.post_id,target.revision AS target_revision FROM social_shared.actions a JOIN social_shared.tip_payments p USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.tip_targets d USING(transaction_id) JOIN protocol_indexer.canonical target ON target.transaction_id=d.post_id WHERE a.subject=$1 AND p.revision=c.revision AND c.accepting_block IS NOT NULL AND target.accepting_block IS NOT NULL ORDER BY EXISTS(SELECT 1 FROM k_tips t WHERE t.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1")
+    let selected=sqlx::query("SELECT a.transaction_id,a.original_time,a.source_payload,a.notification_consumed,a.snapshot::text AS snapshot,p.amount,p.post_signature,c.revision,d.post_id,target.revision AS target_revision,target.retained_native AS target_retained FROM social_shared.actions a JOIN social_shared.tip_payments p USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) JOIN social_shared.tip_targets d USING(transaction_id) JOIN social_shared.source_facts target ON target.transaction_id=d.post_id WHERE a.subject=$1 AND p.revision=c.revision AND c.accepting_block IS NOT NULL AND target.eligible ORDER BY EXISTS(SELECT 1 FROM k_tips t WHERE t.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1")
         .bind(subject).fetch_optional(&mut **tx).await?;
     let mut evaluated = vec![current.to_vec()];
     if let Some(selected) = &selected {
-        for (id, expected) in [
+        for (id, expected, retained) in [
             (
                 selected.get::<Vec<u8>, _>("transaction_id"),
-                selected.get::<i64, _>("revision"),
+                selected.get::<i64, _>("revision"), false,
             ),
             (
                 selected.get::<Vec<u8>, _>("post_id"),
-                selected.get::<i64, _>("target_revision"),
+                selected.get::<i64, _>("target_revision"), selected.get("target_retained"),
             ),
         ] {
-            let locked:Option<i64>=sqlx::query_scalar("SELECT revision FROM protocol_indexer.canonical WHERE transaction_id=$1 FOR SHARE SKIP LOCKED").bind(&id).fetch_optional(&mut **tx).await?;
-            if locked != Some(expected) {
+            if !crate::retained_history::fence(tx, &id, expected, retained).await? {
                 return Ok(TipReconcile::Busy);
             }
         }
@@ -198,7 +193,7 @@ pub(crate) async fn content_reconciled(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     subject: &str,
 ) -> Result<()> {
-    sqlx::query("WITH removed AS (DELETE FROM k_tips t USING social_shared.actions a WHERE a.subject=$1 AND a.transaction_id=t.post_id AND (NOT EXISTS(SELECT 1 FROM k_contents p JOIN social_shared.tip_targets d ON d.post_signature=p.sender_signature WHERE d.transaction_id=t.transaction_id) OR NOT EXISTS(SELECT 1 FROM protocol_indexer.canonical c WHERE c.transaction_id=t.post_id AND c.accepting_block IS NOT NULL)) RETURNING t.transaction_id) DELETE FROM k_mentions m USING removed r WHERE m.content_id=r.transaction_id AND m.content_type='tip'")
+    sqlx::query("WITH removed AS (DELETE FROM k_tips t USING social_shared.actions a WHERE a.subject=$1 AND a.transaction_id=t.post_id AND (NOT EXISTS(SELECT 1 FROM k_contents p JOIN social_shared.tip_targets d ON d.post_signature=p.sender_signature WHERE d.transaction_id=t.transaction_id) OR NOT EXISTS(SELECT 1 FROM social_shared.source_facts c WHERE c.transaction_id=t.post_id AND c.eligible)) RETURNING t.transaction_id) DELETE FROM k_mentions m USING removed r WHERE m.content_id=r.transaction_id AND m.content_type='tip'")
         .bind(subject).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO protocol_indexer.consumer_jobs(consumer,transaction_id) SELECT 'native-social-v1',d.transaction_id FROM social_shared.tip_targets d JOIN social_shared.actions a ON a.transaction_id=d.post_id WHERE a.subject=$1 ON CONFLICT DO NOTHING")
         .bind(subject).execute(&mut **tx).await?;

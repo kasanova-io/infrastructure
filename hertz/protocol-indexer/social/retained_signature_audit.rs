@@ -140,7 +140,7 @@ fn candidate(root: &str, table: &str, row: &Value, hints: &[Value], id: &str, ti
         payload: Some(hex::encode(format!("{root}:1:{kind}:{key}:{signature}:{tail}"))) })
 }
 
-pub(crate) fn audit(processor: &KProtocolProcessor, configured_network: &str, data: &[u8]) -> Result<Report> {
+pub(crate) fn recovered_fields(processor: &KProtocolProcessor, configured_network: &str, data: &[u8]) -> Result<(Report, Vec<crate::k_protocol::VerifiedAction>)> {
     ensure!(data.len() as u64 <= MAX_INPUT_BYTES, "retained input exceeds bound");
     let snapshot: Snapshot = serde_json::from_slice(data)?;
     ensure!(snapshot.schema == "kasanova-native-social-fields-v1" && snapshot.native_schema_version == "2", "unsupported retained snapshot schema");
@@ -164,6 +164,7 @@ pub(crate) fn audit(processor: &KProtocolProcessor, configured_network: &str, da
     }
     for rows in mentions.values_mut() { rows.sort_by_key(|row| row["id"].as_i64().unwrap()); }
     let mut records = Vec::new();
+    let mut actions = Vec::new();
     let mut transactions = BTreeSet::new();
     for table in TABLES.iter().filter(|&&t| t != "public.k_mentions") {
         let mut ids = BTreeSet::new();
@@ -174,8 +175,10 @@ pub(crate) fn audit(processor: &KProtocolProcessor, configured_network: &str, da
             ensure!(id.len() == 64 && transactions.insert(id.clone()) && native_id > 0 && ids.insert(native_id) && time >= 0,
                 "invalid or duplicate retained native identity");
             let hints = mentions.get(&id).map(Vec::as_slice).unwrap_or_default();
-            let recovered = candidate(&snapshot.assumed_root, table, row, hints, &id, time)
-                .ok().and_then(|tx| processor.verify_transaction(&tx)).is_some();
+            let verified = candidate(&snapshot.assumed_root, table, row, hints, &id, time)
+                .ok().and_then(|tx| processor.verify_transaction(&tx));
+            let recovered = verified.is_some();
+            if let Some(verified) = verified { actions.push(verified); }
             records.push(Record { native_table: (*table).into(), native_id, transaction_id: id,
                 original_native_time: time, signing_fields_recoverable: recovered,
                 reason: if recovered { None } else { Some("retained fields did not reproduce an SDK-verifiable signing string; original transaction validity is undetermined") } });
@@ -183,12 +186,16 @@ pub(crate) fn audit(processor: &KProtocolProcessor, configured_network: &str, da
     }
     records.sort_by(|a,b| a.native_table.cmp(&b.native_table).then(a.native_id.cmp(&b.native_id)));
     let recoverable_records = records.iter().filter(|r| r.signing_fields_recoverable).count();
-    Ok(Report { schema: "kasanova-native-social-signature-audit-v1", network: snapshot.network,
+    Ok((Report { schema: "kasanova-native-social-signature-audit-v1", network: snapshot.network,
         assumed_root: snapshot.assumed_root, declared_snapshot_sha256: snapshot.declared_snapshot_sha256,
         caller_snapshot_provenance_verified: false, original_wire_verified: false,
         original_transaction_identity_verified: false, chain_acceptance_verified: false, complete_history_verified: false,
         unrecoverable_records: records.len() - recoverable_records, recoverable_records,
-        retained_mention_rows: snapshot.tables["public.k_mentions"].len(), records })
+        retained_mention_rows: snapshot.tables["public.k_mentions"].len(), records }, actions))
+}
+
+pub(crate) fn audit(processor: &KProtocolProcessor, configured_network: &str, data: &[u8]) -> Result<Report> {
+    recovered_fields(processor, configured_network, data).map(|(report, _)| report)
 }
 
 pub(crate) async fn run(config: &AppConfig, input: &Path, output: &Path) -> Result<()> {

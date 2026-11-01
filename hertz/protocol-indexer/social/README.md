@@ -27,7 +27,15 @@ matches the KaChat reference lock; the genuine historical K-post fixture verifie
 backward signature compatibility. Its prefixed KaChat counterpart is explicitly
 a synthetic compatibility vector, not an additional chain transaction.
 
-Build `Dockerfile` from this directory with explicit immutable `RUST_IMAGE`,
+Prepare a fresh context using the existing shared-component build convention:
+
+```sh
+python3 prepare_context.py --output "$NATIVE_BUILD_CONTEXT"
+```
+
+The preparer verifies every frozen input in `SOURCE.lock`, including the single
+journal-owned `../protocol_indexer/source_fence.sql` asset. Build `Dockerfile`
+from that prepared context with explicit immutable `RUST_IMAGE`,
 `RUNTIME_IMAGE` and `UPSTREAM_ARCHIVE_SHA256`. Dependencies are frozen in Cargo.lock;
 the `lock` target is preparation only, not the tested build. The final build runs
 the complete native unit suite. `contract` additionally packages the compiled
@@ -92,6 +100,55 @@ native IDs and timestamps were preserved, and wrong-network, overwrite and
 schema-initialization attempts were rejected. The 39 PostgreSQL contracts were
 not rerun for this isolated mode; storage, SQL and the verifier are unchanged.
 All test actors stopped. No public worker, routing or ownership was activated.
+
+## Explicit retained-history adoption
+
+`--adopt-retained-history <inventory.json> --shared-source-id <journal UUID>` is
+an operator migration mode. It exits after migration and never starts the legacy
+listener, scanner or shared worker. It conflicts with initialization, upgrade
+and the offline audit. Ordinary shared startup still refuses unowned history.
+
+Quiesce the old native writer before migration and keep it fenced after adoption.
+Table locks protect the migration transaction; they cannot prevent an old writer
+resuming afterward. The common journal installer must first install its source
+identity fence. Native migration/projection checks the actual function body and
+unconditional enabled INSERT trigger under the installer's table lease. Native
+retained-target checks take the matching nonblocking transaction lock before
+testing canonical absence. Existing canonical revisions retain their row fences.
+
+Inventory schema `kasanova-retained-native-inventory-v1` declares the configured
+network, native schema version `2`, explicit `protocol_hint`, backup digest and
+counts/row hashes for all eight native tables, plus both notification activation
+and outbox tables when present. The hashes cover PostgreSQL's ordered JSONB rows,
+including original IDs, times and notification state. The manifest is an
+operator-bound source attestation; the CLI does not authenticate a backup file
+from a digest supplied by that same caller. It checks actual target table hashes
+and SDK signing-field recovery before installing ownership, in one transaction.
+A failed inventory, source binding or signature check rolls back the migration.
+
+Retained actions carry separate provenance and quiet notification state. They
+never create a canonical journal row, RPC transaction or accepting block. The
+reader/selector can use those facts only while no canonical row or pending
+removal exists. A real canonical body immediately suppresses that fallback and
+is reconciled through the normal durable queue. Matching SDK fields promote the
+actual wire payload while preserving native IDs/times; contradictions are
+recorded and quarantined. Existing canonical overlaps are queued atomically.
+Accepted journal history at import is replayed quietly; future first acceptances
+retain normal notification eligibility. Repeating the identical import is a no-op.
+
+Tip payments still require the original canonical transaction and output proof.
+The parent may be an explicitly adopted native fact; current canonical or pending
+revocation takes precedence over it. This does not infer chain proof from a
+retained signature or permit a missing payment proof.
+
+`retained_history_candidate` records the new build separately from earlier
+accepted runtimes. It passed 55 native units and all 50 PostgreSQL contracts,
+including concurrent insert barriers, promotion/revocation/reacceptance, stable
+IDs/times, quiet replay, conflicting history, retry fairness and retained-parent
+tip authorization. The common Python suite passed all 117 cases (67 PostgreSQL
+and 50 unit/HTTP), with no skips. Genuine retained-parent tip acceptance, full
+legacy API preservation and public cutover remain pending. No public adoption
+is recorded.
 
 ## Shared canonical consumer
 
