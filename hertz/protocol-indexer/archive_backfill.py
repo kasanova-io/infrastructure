@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import urllib.error
 
 from protocol_indexer.archive import HEX64, check_network, verify_archive
 
@@ -30,15 +31,27 @@ class ArchiveHistory(history.History):
         check_network(self.network, self.network_info)
         history.atomic_json(self.root / "archive-network.json.gz", self.network_info)
 
+    def required_evidence(self, category, key, url, resource):
+        try:
+            return self.cache(category, key, url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # Missing per-record history is a durable coverage gap, not
+                # verified evidence and not a reason to abandon every other ID.
+                # Preserve operational errors (429, auth, server outage) so
+                # they pause the worker without quarantining a whole inventory.
+                raise ValueError(f"Archive {resource} evidence unavailable (404)") from exc
+            raise
+
     def verify_one(self, txid, observations=None):
-        detail = self.cache("archive", txid, self.archive + "/transactions/" + txid + "?resolve_previous_outpoints=light")
+        detail = self.required_evidence("archive", txid, self.archive + "/transactions/" + txid + "?resolve_previous_outpoints=light", "transaction")
         accepting_hash = detail.get("accepting_block_hash", "")
         hashes = detail.get("block_hash")
         if not HEX64.fullmatch(accepting_hash) or not isinstance(hashes, list) or not hashes or any(not isinstance(h, str) or not HEX64.fullmatch(h) for h in hashes):
             raise ValueError("missing valid archive acceptance/containing block")
-        accepting = self.cache("blocks", accepting_hash, self.archive + "/blocks/" + accepting_hash + "?includeTransactions=false")
+        accepting = self.required_evidence("blocks", accepting_hash, self.archive + "/blocks/" + accepting_hash + "?includeTransactions=false", "accepting block")
         containing_hash = min(hashes)
-        containing = self.cache("blocks", containing_hash + "-full", self.archive + "/blocks/" + containing_hash + "?includeTransactions=true")
+        containing = self.required_evidence("blocks", containing_hash + "-full", self.archive + "/blocks/" + containing_hash + "?includeTransactions=true", "containing block")
         receipt = verify_archive(txid, self.network, self.network_info, detail, accepting, containing)
         receipt["archive"] = self.archive
         # Discovery supplies candidate IDs, never signature/payment authority.

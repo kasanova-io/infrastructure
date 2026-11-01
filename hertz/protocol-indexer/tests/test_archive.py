@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import urllib.error
 
 from protocol_indexer.archive import check_network, verify_archive
 from protocol_indexer.routing import Family
@@ -144,6 +146,67 @@ class ArchiveTests(unittest.TestCase):
             resumed.db.close()
             with self.assertRaises(ValueError):
                 tool.ArchiveHistory(tmp, "https://source", "https://archive", "testnet-11")
+
+
+class ArchiveAvailabilityTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("archive_availability", Path(__file__).parents[1] / "archive_backfill.py")
+        self.tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.tool)
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        self.history = self.tool.ArchiveHistory(root, "https://source", "https://archive", "testnet-10")
+        self.addCleanup(self.history.db.close)
+        self.history.network_info = INFO
+        self.enterContext(patch.object(self.history, "status"))
+
+    def remember(self, *ids):
+        with self.history.db:
+            self.history.db.executemany("INSERT INTO records(txid) VALUES (?)", [(txid,) for txid in ids])
+
+    def test_missing_transaction_is_quarantined_while_next_real_record_is_verified(self):
+        missing = "0" * 64
+        self.remember(missing, TX)
+        values = evidence()
+
+        def cache(category, key, url):
+            if key == missing:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return values[0] if category == "archive" else values[1] if key == ACCEPT else values[2]
+
+        self.history.cache = cache
+        self.history.verify(0, workers=1)
+        states = dict(self.history.db.execute("SELECT txid,status FROM records"))
+        self.assertEqual(states, {missing: "quarantined", TX: "verified"})
+        error = self.history.db.execute("SELECT error FROM records WHERE txid=?", (missing,)).fetchone()[0]
+        self.assertEqual(error, "Archive transaction evidence unavailable (404)")
+        self.assertFalse((self.history.root / "verified" / (missing + ".json.gz")).exists())
+        self.assertTrue((self.history.root / "quarantine" / (missing + ".json.gz")).exists())
+        self.assertEqual(self.history.export(self.history.root / "batch.jsonl"), 1)
+
+    def test_absent_accepting_or_containing_block_never_verifies_a_transaction(self):
+        self.remember(TX)
+        values = evidence()
+        for missing_key in (ACCEPT, BLOCK + "-full"):
+            with self.subTest(missing_key=missing_key):
+                def cache(category, key, url):
+                    if key == missing_key:
+                        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+                    return values[0] if category == "archive" else values[1] if key == ACCEPT else values[2]
+                self.history.cache = cache
+                self.history.finish_verification(TX, lambda: self.history.verify_one(TX))
+                self.assertEqual(self.history.db.execute("SELECT status FROM records").fetchone()[0], "quarantined")
+                self.assertFalse((self.history.root / "verified" / (TX + ".json.gz")).exists())
+
+    def test_operational_http_errors_pause_without_quarantining_pending_history(self):
+        self.remember(TX)
+        for code in (401, 403, 429, 500, 503):
+            with self.subTest(code=code):
+                error = urllib.error.HTTPError("https://archive/transactions/" + TX, code, "unavailable", {}, None)
+                with patch.object(self.history, "cache", side_effect=error):
+                    with self.assertRaises(urllib.error.HTTPError):
+                        self.history.finish_verification(TX, lambda: self.history.verify_one(TX))
+                self.assertEqual(self.history.db.execute("SELECT status FROM records").fetchone()[0], "discovered")
+                self.assertFalse(list((self.history.root / "quarantine").glob("*.json.gz")))
 
 
 if __name__ == "__main__":

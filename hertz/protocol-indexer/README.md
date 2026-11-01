@@ -204,6 +204,11 @@ history still requires the existing address/indexer inventories to supply IDs.
 This does not claim exhaustive discovery of messages or deleted Social actions.
 Selected IDs resume quietly if already verified. Quarantines require explicit
 `--retry-quarantine`; original failure evidence remains. Export refuses overwrite.
+An HTTP404 for a transaction or required accepting/containing block records an
+unavailable-evidence quarantine and permits other IDs to continue. This is a
+coverage gap, not proof that the transaction is invalid. Missing proofs never
+produce a verified receipt. Network binding, auth errors,429, server outages and
+other operational failures still pause collection without quarantining the rest.
 
 Every verification invocation checks the archive's **current** `/info/network`
 `networkName`, distinguishing TN10 from TN11 even though their address prefixes
