@@ -199,6 +199,33 @@ discover external archives; the archival adapter below supplies those receipts
 through the same journal. Full historical coverage, remaining consumers and
 live acceptance remain required before replacing either public scanner.
 
+### Native Social consumers on the same source
+
+Add `compose.social.yaml` to the existing candidate/Chats/evidence Compose files
+and enable its `social` profile. Supply the tested immutable native processor
+and reader images as `PROTOCOL_SOCIAL_IMAGE` and `PROTOCOL_SOCIAL_WEB_IMAGE`.
+`PROTOCOL_JOURNAL_ID` must be the actual `protocol_indexer.config.journal_id`,
+with the same configured `PROTOCOL_NETWORK`. Preserve the existing native
+history and its approved read-only database role; set that role's credentials
+as `PROTOCOL_SOCIAL_API_DB_USER` / `PROTOCOL_SOCIAL_API_DB_PASSWORD`. The API does
+not create roles, install schema or repair ownership.
+
+Start the `social` consumer against the preserved native tables, then start
+`social-api` after its normal source bind has installed the native views. Run
+the existing six-family `backfill` commands once when attaching preserved
+stores: jobs acknowledged by an earlier consumer store are not automatically
+replayed on startup. Existing notification epochs and quiet replay guards stay
+in force. The shared `output-evidence` consumer supplies the normal checked
+payment/sender receipts needed by public actions and tips.
+
+The overlay starts no chain scanner and exposes no public port or Caddy route.
+Source-bound private DEV replay has drained the Chats, Social and evidence
+queues, with retained-parent detail, feed and room API reads verified. A fresh
+0.1 KAS TN10 `kchat:1:tip` was confirmed and projected as a verified payment to a
+genuine retained-only post, with its parent still absent from the raw/canonical
+journal. Public DEV cutover and provider delivery remain pending; private
+readiness does not establish either.
+
 ## External archival inventory
 
 `archive_backfill.py` reuses the existing Social history collector's file-locked

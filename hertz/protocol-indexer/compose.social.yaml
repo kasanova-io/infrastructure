@@ -1,0 +1,41 @@
+# Additive native Social consumers for the same bound journal. No chain scanner,
+# published port, provider configuration or Caddy route is introduced here.
+services:
+  social:
+    profiles: [social]
+    image: ${PROTOCOL_SOCIAL_IMAGE:?tested immutable native image required}
+    pull_policy: never
+    command: [--shared-source-id, '${PROTOCOL_JOURNAL_ID:?actual source journal UUID required}', --network, '${PROTOCOL_NETWORK:?required}', --db-host, database, --db-port, '5432', --db-name, protocol, --db-user, protocol, --db-password, '${PROTOCOL_DB_PASSWORD:?required}', --db-max-connections, '2']
+    init: true
+    read_only: true
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 45s
+    networks: [protocol]
+    mem_limit: 768m
+    cpus: 1
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+    depends_on:
+      indexer: {condition: service_healthy}
+  social-api:
+    profiles: [social]
+    image: ${PROTOCOL_SOCIAL_WEB_IMAGE:?tested immutable compatible API image required}
+    pull_policy: never
+    command: [--shared-source-id, '${PROTOCOL_JOURNAL_ID:?actual source journal UUID required}', --shared-network, '${PROTOCOL_NETWORK:?required}', --db-host, database, --db-port, '5432', --db-name, protocol, --db-user, '${PROTOCOL_SOCIAL_API_DB_USER:?existing read-only role required}', --db-password, '${PROTOCOL_SOCIAL_API_DB_PASSWORD:?existing read-only role password required}', --db-max-connections, '2', --worker-threads, '1', --bind-address, '0.0.0.0:8080', --request-timeout, '10', --rate-limit, '200']
+    init: true
+    read_only: true
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 45s
+    networks: [protocol]
+    mem_limit: 768m
+    cpus: 1
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+    depends_on:
+      social: {condition: service_started}
