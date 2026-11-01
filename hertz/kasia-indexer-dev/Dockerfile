@@ -36,6 +36,9 @@ COPY history/shared-dm.patch /tmp/shared-dm.patch
 RUN patch -p1 < /tmp/shared-dm.patch
 COPY history/inbox.rs /src/indexer/src/api/v1/inbox.rs
 COPY history/shared_mutator_tests.rs /src/indexer/src/api/v1/shared_mutator_tests.rs
+COPY history/shared_runtime.rs /src/indexer/src/shared_runtime.rs
+COPY history/shared-runtime.patch /tmp/shared-runtime.patch
+RUN patch -p1 < /tmp/shared-runtime.patch
 RUN cargo test --locked --release --workspace
 RUN cargo build --locked --release -p indexer
 

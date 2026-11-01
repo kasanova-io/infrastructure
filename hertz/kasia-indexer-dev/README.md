@@ -115,6 +115,22 @@ acceptance or authorize a wallet release.
 
 ## Shared-ingestion consumer candidate
 
+In shared mode, the Chats service retains the existing message and push-registry
+partitions and API, while skipping the standalone chain cache and its block,
+virtual-chain, pruning and ticker workers. It does not scan or delete retained
+chain history. One captured mode governs RPC connect, disconnect, stale
+notifications and shutdown, so reconnects cannot fill unused scanner queues.
+Shutdown drains the API and node tasks and persists the native keyspace.
+Standalone mode retains its existing cache, processors and shutdown behavior.
+
+The startup change passed 74 locked workspace tests, including seven storage,
+standalone-cache and lifecycle regressions. A populated private-copy check also
+preserved twelve durable acknowledgements, thirty exported records and existing
+message/payment cursors while leaving 20,001 synthetic legacy-cache entries
+unchanged. These checks do not establish migration or cutover of the current
+public DEV store; its complete history and push registrations still require
+the consistent-copy and API verification workflow above.
+
 The private `/history-import` transport now accepts a versioned shared-journal
 object as well as the established legacy array. Both paths reuse the same native
 parser, transactional Fjall insertions and existing read APIs; there is no second
