@@ -7,6 +7,31 @@ replace the full webserver with KaChat's application-specific services. The
 original ISC notice is retained in both images. Exact input/provenance/image
 hashes and the dependency lock are recorded in `SOURCE.lock`.
 
+## Verified tip metadata
+
+The `tip_counts_candidate` extends existing shared post/reply reads with optional
+`tipsCount`. One batch query per page uses the same source-bound, repeatable-read
+transaction as the posts. Native `social_shared.current_tips` owns signature
+deduplication, visible parent aliases, payment verification and current source
+eligibility. Shared reads report verified zero; legacy mode omits the field.
+Feed, detail, reply, author, following, mention, hashtag and search reads retain
+their existing fields and cursors.
+
+`GET /get-tip-details?id=<transaction ID>` reads an exact current native receipt:
+`tip.id`, `parentPostId` (the visible parent), `userPublicKey`, `authorPublicKey`
+and lossless decimal-string `amountSompi`. The existing shared router, rate
+budget, pool and ownership checks apply. Invalid IDs return 400, absent/ineligible
+tips 404 and unavailable source ownership 503. Legacy mode keeps 404. Sealed
+payment content is excluded.
+
+The frozen candidate passed nine native units and all 22 PostgreSQL/router
+contracts, retaining the previous 20 cases. Private DEV acceptance also read the
+genuine retained-parent tip `5ac436e4…5e7d91`, exact receipt and count `1`. Original
+fields/status/cursors across 17 responses match the prior reader, with 25 count
+fields checked against native facts. This comparison retains one pre-existing
+poll detail 500; poll UI/read integration remains unfinished. Public DEV routing,
+production and device acceptance are unchanged/pending.
+
 This private candidate passed bounded acceptance against the retained DEV source;
 all temporary readers are stopped. The configured origins remain
 `dev-indexer.kasanova.io` and `indexer.kasanova.io`. Public routing, Caddy,

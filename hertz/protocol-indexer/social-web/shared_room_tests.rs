@@ -274,6 +274,7 @@ async fn postgres_shared_room_snapshot_is_per_request_and_legacy_has_no_room_rou
         "/get-broadcasts",
         "/broadcast-channels",
         "/get-broadcasts?limit=not-a-number",
+        "/get-tip-details?id=not-a-tip",
     ] {
         assert_eq!(request(&app, uri).await.0, StatusCode::NOT_FOUND);
     }

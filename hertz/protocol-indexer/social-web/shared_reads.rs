@@ -49,7 +49,7 @@ impl PostgresDbManager {
             .map_err(error)?;
         // Resolve and lock every required view until this read ends. There is
         // no window in which a missing/dropped view can use a raw public table.
-        sqlx::query("SELECT 1 FROM social_shared_api.k_contents, social_shared_api.k_votes, social_shared_api.k_broadcasts, social_shared_api.k_follows, social_shared_api.k_blocks, social_shared_api.k_mentions, social_shared_api.k_hashtags, social_shared_api.k_vars LIMIT 0")
+        sqlx::query("SELECT 1 FROM social_shared_api.k_contents, social_shared_api.k_votes, social_shared_api.k_broadcasts, social_shared_api.k_follows, social_shared_api.k_blocks, social_shared_api.k_mentions, social_shared_api.k_hashtags, social_shared_api.k_vars, social_shared.current_tips LIMIT 0")
             .execute(&mut *tx).await.map_err(error)?;
         sqlx::query("SET LOCAL search_path=pg_catalog,social_shared_api,pg_temp")
             .execute(&mut *tx)

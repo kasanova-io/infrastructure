@@ -482,11 +482,18 @@ async fn postgres_shared_reads_legacy_tip_mentions_do_not_strand_pagination_or_c
 async fn postgres_shared_reads_one_snapshot_timeout_and_pool_cleanup_preserve_legacy() {
     let mut db = setup().await;
     let original_jit: String = sqlx::query_scalar("SHOW jit")
-        .fetch_one(&db.pool).await.unwrap();
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
     post(&db.pool, 1, 1000).await;
     let mut read = db.read_session().await.unwrap();
-    assert_eq!(sqlx::query_scalar::<_, String>("SHOW jit")
-        .fetch_one(&mut *read).await.unwrap(), "off");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SHOW jit")
+            .fetch_one(&mut *read)
+            .await
+            .unwrap(),
+        "off"
+    );
     let first: i64 = sqlx::query_scalar("SELECT count(*) FROM k_contents")
         .fetch_one(&mut *read)
         .await
@@ -556,7 +563,7 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
         shared: None,
     }));
     let requester = hex::encode(viewer());
-    let a: serde_json::Value = serde_json::from_str(
+    let mut a: serde_json::Value = serde_json::from_str(
         &shared
             .get_posts_watching_paginated(&requester, 2, None, None)
             .await
@@ -570,6 +577,14 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
             .unwrap(),
     )
     .unwrap();
+    // The new field is additive; assert its verified zero and preserve every
+    // original DTO field and exclusive cursor comparison against legacy.
+    for post in a["posts"].as_array_mut().unwrap() {
+        assert_eq!(
+            post.as_object_mut().unwrap().remove("tipsCount"),
+            Some(json!(0))
+        );
+    }
     assert_eq!(a, b);
     let a = shared
         .search_posts_paginated(&requester, "hi", 2, None, None)
@@ -579,10 +594,14 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
         .search_posts_paginated(&requester, "hi", 2, None, None)
         .await
         .unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&a).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&b).unwrap()
-    );
+    let mut a: serde_json::Value = serde_json::from_str(&a).unwrap();
+    for post in a["posts"].as_array_mut().unwrap() {
+        assert_eq!(
+            post.as_object_mut().unwrap().remove("tipsCount"),
+            Some(json!(0))
+        );
+    }
+    assert_eq!(a, serde_json::from_str::<serde_json::Value>(&b).unwrap());
     let page = db.get_all_posts(&requester, options(2)).await.unwrap();
     let cursor = page.pagination.next_cursor.unwrap();
     let next = db
@@ -745,4 +764,216 @@ async fn postgres_shared_reads_page_work_stays_bounded_with_unrelated_history() 
         dao_buffers < 10000,
         "actual feed query must stay page bounded"
     );
+}
+
+// Explicit already-verified native facts; SDK/chain acceptance stays separate.
+async fn tip_fixture(db: &PostgresDbManager) {
+    post(&db.pool, 1, 1000).await;
+    post(&db.pool, 2, 1001).await;
+    action(
+        &db.pool,
+        9,
+        "k_contents",
+        format!("k_contents:{}", hex::encode(sig(1))),
+        "signed",
+        1000,
+    )
+    .await;
+    action(
+        &db.pool,
+        3,
+        "k_tips",
+        format!("k_tips:{}", hex::encode(sig(3))),
+        "signed",
+        2000,
+    )
+    .await;
+    sqlx::query("INSERT INTO public.k_tips(transaction_id,block_time,sender_pubkey,sender_signature,post_id,author_pubkey,amount) VALUES($1,2000,$2,$3,$4,$5,10000000)")
+        .bind(id(3)).bind(viewer()).bind(sig(3)).bind(id(9)).bind(author()).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO social_shared.tip_targets VALUES($1,$2,$3)")
+        .bind(id(3))
+        .bind(id(9))
+        .bind(sig(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO social_shared.tip_payments VALUES($1,1,10000000,$2)")
+        .bind(id(3))
+        .bind(sig(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_tip_counts_receipts_aliases_and_snapshot_follow_native_facts() {
+    let db = setup().await;
+    tip_fixture(&db).await;
+    let mut posts = feed(&db).await;
+    assert_eq!(
+        posts
+            .iter()
+            .find(|p| p.transaction_id == hex::encode(id(1)))
+            .unwrap()
+            .tips_count,
+        Some(1)
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .find(|p| p.transaction_id == hex::encode(id(2)))
+            .unwrap()
+            .tips_count,
+        Some(0)
+    );
+    let receipt = db.tip_details(&id(3)).await.unwrap().unwrap();
+    assert_eq!(receipt.parent_post_id, hex::encode(id(1)));
+    assert_eq!(receipt.user_public_key, hex::encode(viewer()));
+    assert_eq!(receipt.author_public_key, hex::encode(author()));
+    assert_eq!(receipt.amount_sompi, "10000000");
+    assert!(db.tip_details(&id(99)).await.unwrap().is_none());
+    for n in [3, 9, 1] {
+        sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+            .bind(id(n))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert!(db.tip_details(&id(3)).await.unwrap().is_none());
+        let current = feed(&db).await;
+        if n == 1 {
+            assert!(
+                !current
+                    .iter()
+                    .any(|p| p.transaction_id == hex::encode(id(1)))
+            );
+        } else {
+            assert_eq!(
+                current
+                    .iter()
+                    .find(|p| p.transaction_id == hex::encode(id(1)))
+                    .unwrap()
+                    .tips_count,
+                Some(0)
+            );
+        }
+        sqlx::query("DELETE FROM protocol_indexer.pending")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE protocol_indexer.canonical SET revision=2 WHERE transaction_id=$1")
+        .bind(id(3))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(db.tip_details(&id(3)).await.unwrap().is_none());
+    sqlx::query("UPDATE protocol_indexer.canonical SET revision=1 WHERE transaction_id=$1")
+        .bind(id(3))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    // The helper must use the supplied read snapshot, not another checkout.
+    let mut read = db.read_session().await.unwrap();
+    let dsn = std::env::var("SOCIAL_SHARED_WEB_TEST_DATABASE_URL").unwrap();
+    let mut writer = <sqlx::PgConnection as sqlx::Connection>::connect(&dsn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE protocol_indexer.canonical SET accepting_block=NULL WHERE transaction_id=$1",
+    )
+    .bind(id(3))
+    .execute(&mut writer)
+    .await
+    .unwrap();
+    db.enrich_tip_counts(&mut read, &mut posts).await.unwrap();
+    assert_eq!(
+        posts
+            .iter()
+            .find(|p| p.transaction_id == hex::encode(id(1)))
+            .unwrap()
+            .tips_count,
+        Some(1)
+    );
+    drop(read);
+    assert_eq!(
+        feed(&db)
+            .await
+            .iter()
+            .find(|p| p.transaction_id == hex::encode(id(1)))
+            .unwrap()
+            .tips_count,
+        Some(0)
+    );
+    let legacy = PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: None,
+    };
+    assert!(feed(&legacy).await.iter().all(|p| p.tips_count.is_none()));
+    sqlx::query("DROP VIEW social_shared.current_tips")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        db.get_all_posts(&hex::encode(viewer()), options(20))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_tip_details_router_checks_receipt_source_and_query() {
+    use axum::{
+        body::{Body, to_bytes},
+        extract::ConnectInfo,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let db = setup().await;
+    tip_fixture(&db).await;
+    let pool = db.pool.clone();
+    let config = crate::config::ServerConfig {
+        bind_address: "127.0.0.1:0".into(),
+        request_timeout: 10,
+        rate_limit: 200,
+    };
+    let server = crate::web_server::WebServer::new(Arc::new(db), config).await;
+    let app = server.create_router();
+    async fn request(app: &axum::Router, uri: String) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 100000).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let uri = format!("/get-tip-details?id={}", hex::encode(id(3)));
+    let (status, body) = request(&app, uri.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"tip":{"id":hex::encode(id(3)),"parentPostId":hex::encode(id(1)),"userPublicKey":hex::encode(viewer()),"authorPublicKey":hex::encode(author()),"amountSompi":"10000000"}})
+    );
+    assert_eq!(
+        request(&app, "/get-tip-details?id=bad".into()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(&app, format!("/get-tip-details?id={}", hex::encode(id(99))))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+        .bind(id(3))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(request(&app, uri.clone()).await.0, StatusCode::NOT_FOUND);
+    sqlx::query("UPDATE social_shared.config SET source_id='new-owner'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(request(&app, uri).await.0, StatusCode::SERVICE_UNAVAILABLE);
 }
