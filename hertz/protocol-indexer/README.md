@@ -128,6 +128,36 @@ membership function reads the proof table as the caller; granting only the
 current-proof view leaves real legacy reads failing with a permission error.
 These are read grants only; the API role must retain no projection write rights.
 
+### Prepared ingress
+
+The existing DEV and PROD indexer Caddy site blocks include `/social-api/v2/*`
+for unified reads and `/social-api/*` for the compatible K-only contract. More
+specific unified paths route first. Each strips only its own prefix and reuses
+the existing maintenance matcher after stripping; Chats paths and `/healthz`
+keep their existing upstreams. These source files do not establish activation.
+
+After the corresponding network's history, source binding, read grants and
+actual API contracts pass, include `compose.social-ingress.yaml` with the normal
+candidate and Social overlays. It adds the existing proxy network to the two
+stateless readers without changing any other service or publishing ports.
+`PROTOCOL_INGRESS_NETWORK` must name the deployment's existing Caddy network.
+The explicit aliases must match that site's upstreams:
+
+| Site | `PROTOCOL_SOCIAL_LEGACY_ALIAS` | `PROTOCOL_SOCIAL_UNIFIED_ALIAS` |
+| --- | --- | --- |
+| DEV | `protocol_social_legacy_dev` | `protocol_social_unified_dev` |
+| PROD | `protocol_social_legacy_prod` | `protocol_social_unified_prod` |
+
+Activate only the ready reader services with `--no-deps`; verify unique aliases
+and source-bound reads from the proxy network before routing traffic. Then
+verify actual requests through the existing indexer origin before Public's owner
+advertises the new client key. Preserve the old client's K-only contract. DEV fixture
+acceptance and localhost routing tests do not establish MAINNET readiness.
+Public configuration, shared QA leases and coordinated release ownership remain
+with their respective owners. Rollback restores only the prior ingress routes
+and reader network attachment; it does not downgrade or delete journal/native
+data or restart source consumers.
+
 ## Protocol adapters
 
 Each family has a `ScanAdapter` and `BackfillAdapter`, using the same byte parser.
