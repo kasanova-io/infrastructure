@@ -299,7 +299,7 @@
     "cargo_lock_unchanged": true,
     "build_accepted": true,
     "postgres_contracts_accepted": true,
-    "running": true,
+    "running": false,
     "public_cutover": false,
     "previous_failed_manifest": "1e60791ab712613689992c70fe8eee9ea48fb2a6f3190e4e7bd876a57f4bcf86",
     "review_correction": "Initialize both vote-shaped HTTP ServerPost DTOs; shared root unknown, legacy field omitted.",
@@ -314,7 +314,8 @@
     "retained_parent_tip_count_preserved": 1,
     "known_preexisting_poll_detail_status": 500,
     "poll_ui_accepted": false,
-    "activation_scope": "existing private reader only; seven source/native actors unchanged; no public route"
+    "activation_scope": "existing private reader only; seven source/native actors unchanged; no public route",
+    "superseded_by": "e8e005c3e4dd067dd0e600afe7e54bdca1b921004e60b9f0723bc5e21cdde92c"
   },
   "previous_action_protocol_candidates": [
     {
@@ -463,12 +464,31 @@
     "local_postgres_contracts_passed": 29,
     "local_rust_version": "1.94.1",
     "local_postgres_version": "16.15",
-    "build_accepted": false,
-    "runtime_image": null,
-    "running": false,
-    "real_rpc_root_audit": false,
-    "real_root_recovery_accepted": false,
-    "public_cutover": false
+    "build_accepted": true,
+    "runtime_image": "sha256:523dc3d72d800d066b2c6a7cc503904a923121c4ef641b6031a0a694327c4395",
+    "running": true,
+    "real_rpc_root_audit": true,
+    "real_root_recovery_accepted": true,
+    "public_cutover": false,
+    "contract_image": "sha256:ede15ddd5cb6c2b34368b98c0425816f6df9c79934243277cb51827863c7b944",
+    "postgres_contracts_accepted": true,
+    "postgres_contracts_passed": 29,
+    "native_unit_tests_passed": 9,
+    "real_history_api_accepted": true,
+    "provider_delivery_accepted": false,
+    "physical_device_accepted": false,
+    "runtime_evidence": "social-current-runtime-20261102-v1-evidence.json",
+    "runtime_evidence_sha256": "e4d19e33e0280257adcc8ca66b12464f40dcd9ffc715138ef03fcdb89f972eff",
+    "activation_scope": "owned private DEV retained-source project only; no public route",
+    "actual_rpc_roots_verified": 4,
+    "retained_root_records_written": 1,
+    "existing_canonical_roots_preserved": 3,
+    "retained_parent_tip_count_preserved": 1,
+    "real_api_requests_passed": 36,
+    "known_poll_detail_status": 200,
+    "original_wire_verified": false,
+    "chain_acceptance_verified": false,
+    "complete_history_verified": false
   },
   "previous_retained_root_candidates": [
     {

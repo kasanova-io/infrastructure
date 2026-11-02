@@ -122,8 +122,11 @@ indexer origin. Public's owner must coordinate that key and strip both clients
 with ordinary Social availability. Tips/Predictions rollout leases stay
 independent. This source change does not activate a route or change Public.
 The existing read-only role also needs access to `social_shared_legacy_api`,
-`social_shared_api.current_polls` and `social_shared.current_retained_wire_roots`
-before activation.
+`social_shared_api.current_polls`, `social_shared.current_retained_wire_roots`
+and SELECT on `social_shared.retained_wire_roots` before activation. The legacy
+membership function reads the proof table as the caller; granting only the
+current-proof view leaves real legacy reads failing with a permission error.
+These are read grants only; the API role must retain no projection write rights.
 
 ## Protocol adapters
 
