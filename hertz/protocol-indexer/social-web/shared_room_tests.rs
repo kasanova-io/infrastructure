@@ -61,6 +61,7 @@ async fn setup() -> PostgresDbManager {
             network: "testnet-10".into(),
             source_id: SOURCE.into(),
             statement_timeout_ms: 10000,
+            read_contract: crate::shared_rooms::ReadContract::Unified,
         }),
     }
 }
@@ -297,6 +298,7 @@ fn pure_shared_cli_requires_both_binding_fields() {
     for extra in [
         vec!["--shared-source-id", SOURCE],
         vec!["--shared-network", "testnet-10"],
+        vec!["--shared-read-contract", "unified"],
     ] {
         assert!(crate::Args::try_parse_from(args.iter().copied().chain(extra)).is_err());
     }

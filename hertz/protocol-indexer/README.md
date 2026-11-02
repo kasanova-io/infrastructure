@@ -75,6 +75,26 @@ the existing live API and the restarted shared copy. Source-connected replay,
 current-source reconciliation, live notification continuity and public cutover
 remain pending; the original service and immutable backup stay untouched.
 
+## Social feed compatibility
+
+The two Social API services in `compose.social.yaml` share the same bound
+journal, native projection and read-only database role; neither scans the chain.
+`social-api --shared-read-contract legacy-k` retains the existing K-only read
+contract, including legacy import membership, without claiming a proven wire
+root. `social-api-unified --shared-read-contract unified` includes both roots,
+verified tip counts and current poll metadata. Explicit read-contract arguments
+require the existing source/network binding. Neither service publishes a port.
+
+Keep `clients.social_indexer` on the legacy contract for cached older pages.
+Root-aware Social, Explorer, Profile and native search prefer the separately
+configured `clients.social_indexer_unified`; when absent they use the existing
+client. The proposed mixed route is `/social-api/v2` on the existing configured
+indexer origin. Public's owner must coordinate that key and strip both clients
+with ordinary Social availability. Tips/Predictions rollout leases stay
+independent. This source change does not activate a route or change Public.
+The existing read-only role also needs access to `social_shared_legacy_api`
+and the new `social_shared_api.current_polls` view before activation.
+
 ## Protocol adapters
 
 Each family has a `ScanAdapter` and `BackfillAdapter`, using the same byte parser.

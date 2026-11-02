@@ -98,6 +98,7 @@ async fn setup() -> PostgresDbManager {
             network: "testnet-10".into(),
             source_id: SOURCE.into(),
             statement_timeout_ms: 10000,
+            read_contract: crate::shared_rooms::ReadContract::Unified,
         }),
     }
 }
@@ -162,6 +163,232 @@ async fn feed(db: &PostgresDbManager) -> Vec<crate::models::KPostRecord> {
         .await
         .unwrap()
         .items
+}
+
+fn k_contract(db: &PostgresDbManager) -> PostgresDbManager {
+    let mut binding = db.shared.clone().unwrap();
+    binding.read_contract = crate::shared_rooms::ReadContract::LegacyK;
+    PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: Some(binding),
+    }
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_k_contract_filters_before_limits_across_existing_routes() {
+    let db = setup().await;
+    for n in 1..=6 {
+        post(&db.pool, n, 1000 + n as i64).await;
+    }
+    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:fixture','UTF8'),'hex') WHERE transaction_id=ANY($1)")
+        .bind(vec![id(2),id(4),id(6)]).execute(&db.pool).await.unwrap();
+    for n in [5, 6] {
+        sqlx::query("UPDATE public.k_contents SET content_type='reply',referenced_content_id=$2 WHERE transaction_id=$1")
+            .bind(id(n)).bind(id(1)).execute(&db.pool).await.unwrap();
+        sqlx::query("UPDATE social_shared.content_keys SET kind='reply',reference=$2 WHERE transaction_id=$1")
+            .bind(id(n)).bind(id(1)).execute(&db.pool).await.unwrap();
+    }
+    for n in [1, 2] {
+        mention(&db.pool, n, "post", viewer(), true).await;
+        sqlx::query("INSERT INTO public.k_hashtags(content_id,block_time,sender_pubkey,hashtag) VALUES($1,1000,$2,'same')")
+            .bind(id(n)).bind(author()).execute(&db.pool).await.unwrap();
+    }
+    let legacy = k_contract(&db);
+    let requester = hex::encode(viewer());
+    let author_key = hex::encode(author());
+    let first = legacy.get_all_posts(&requester, options(1)).await.unwrap();
+    assert_eq!(first.items[0].transaction_id, hex::encode(id(3)));
+    assert!(first.items[0].protocol.is_none());
+    let next = legacy
+        .get_all_posts(
+            &requester,
+            QueryOptions {
+                before: first.pagination.next_cursor,
+                ..options(1)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.items[0].transaction_id, hex::encode(id(1)));
+    assert!(!next.pagination.has_more);
+    assert_eq!(
+        legacy
+            .get_posts_by_user(&author_key, &requester, options(1))
+            .await
+            .unwrap()
+            .items[0]
+            .transaction_id,
+        hex::encode(id(3))
+    );
+    assert!(
+        legacy
+            .get_content_by_id(&hex::encode(id(4)), &requester)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db.get_content_by_id(&hex::encode(id(4)), &requester)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let replies = legacy
+        .get_replies_by_post_id(&hex::encode(id(1)), &requester, options(1))
+        .await
+        .unwrap();
+    assert_eq!(replies.items[0].transaction_id, hex::encode(id(5)));
+    assert!(!replies.pagination.has_more);
+    assert_eq!(
+        legacy
+            .get_hashtag_content("same", &requester, options(1))
+            .await
+            .unwrap()
+            .items[0]
+            .transaction_id,
+        hex::encode(id(1))
+    );
+    assert_eq!(
+        legacy
+            .get_contents_mentioning_user(&requester, &requester, options(1))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        legacy
+            .get_notification_count(&requester, None)
+            .await
+            .unwrap(),
+        1
+    );
+    let api = ApiHandlers::new(Arc::new(k_contract(&db)));
+    let search: serde_json::Value = serde_json::from_str(
+        &api.search_posts_paginated(&requester, "hi", 1, None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(search["posts"][0]["id"], json!(hex::encode(id(3))));
+    assert!(search["posts"][0].get("protocol").is_none());
+    // Author-wide follows/blocks keep working even when sent through KaChat.
+    for (n, table, verb, column) in [
+        (10, "k_follows", "following_action", "followed_user_pubkey"),
+        (20, "k_blocks", "blocking_action", "blocked_user_pubkey"),
+    ] {
+        action(
+            &db.pool,
+            n,
+            table,
+            format!("{table}:{requester}:{author_key}"),
+            "activate",
+            2000,
+        )
+        .await;
+        sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:fixture','UTF8'),'hex') WHERE transaction_id=$1")
+            .bind(id(n)).execute(&db.pool).await.unwrap();
+        let value = if n == 10 { "follow" } else { "block" };
+        sqlx::query(&format!("INSERT INTO public.{table}(transaction_id,block_time,sender_pubkey,sender_signature,{verb},{column}) VALUES($1,2000,$2,$3,$4,$5)"))
+            .bind(id(n)).bind(viewer()).bind(sig(n)).bind(value).bind(author()).execute(&db.pool).await.unwrap();
+        if n == 10 {
+            assert_eq!(
+                legacy
+                    .get_content_following(&requester, options(1))
+                    .await
+                    .unwrap()
+                    .items[0]
+                    .transaction_id,
+                hex::encode(id(5))
+            );
+        }
+    }
+    assert!(
+        legacy
+            .get_all_posts(&requester, options(20))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        db.get_all_posts(&requester, options(20))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    db.pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_legacy_import_membership_never_claims_actual_wire_root() {
+    let db = setup().await;
+    post(&db.pool, 1, 1000).await;
+    let import = "a".repeat(64);
+    sqlx::query("INSERT INTO social_shared.retained_imports(import_id,network,source_id,protocol_hint,source_backup_sha256,inventory,native_records) VALUES($1,'testnet-10',$2,'k',$3,'{}',1)")
+        .bind(&import).bind(SOURCE).bind("b".repeat(64)).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE social_shared.actions SET provenance='retained_native',retained_import_id=$2 WHERE transaction_id=$1")
+        .bind(id(1)).bind(&import).execute(&db.pool).await.unwrap();
+    sqlx::query("DELETE FROM protocol_indexer.canonical WHERE transaction_id=$1")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let legacy = k_contract(&db);
+    let requester = hex::encode(viewer());
+    let old = legacy.get_all_posts(&requester, options(20)).await.unwrap();
+    assert_eq!(old.items.len(), 1);
+    assert!(old.items[0].protocol.is_none());
+    assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    sqlx::query(
+        "UPDATE social_shared.retained_imports SET protocol_hint='kchat' WHERE import_id=$1",
+    )
+    .bind(&import)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        legacy
+            .get_all_posts(&requester, options(20))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    sqlx::query("UPDATE social_shared.retained_imports SET protocol_hint='k' WHERE import_id=$1")
+        .bind(&import)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,1,'{}',NULL)")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        legacy
+            .get_all_posts(&requester, options(20))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        db.get_all_posts(&requester, options(20))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    sqlx::query("DROP VIEW social_shared_legacy_api.k_contents CASCADE")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(legacy.get_all_posts(&requester, options(20)).await.is_err());
+    db.pool.close().await;
 }
 
 #[tokio::test]
@@ -1063,4 +1290,114 @@ async fn postgres_shared_reads_tip_details_router_checks_receipt_source_and_quer
         .await
         .unwrap();
     assert_eq!(request(&app, uri).await.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_poll_metadata_is_visible_in_feed_detail_search_and_current_revision_only()
+ {
+    let db = setup().await;
+    post(&db.pool, 70, 1700000000000).await;
+    sqlx::query("UPDATE public.k_contents SET content_type='poll' WHERE transaction_id=$1")
+        .bind(id(70))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE social_shared.content_keys SET kind='poll' WHERE transaction_id=$1")
+        .bind(id(70))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:poll:fixture','UTF8'),'hex') WHERE transaction_id=$1")
+        .bind(id(70)).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO social_shared.extensions(transaction_id,revision,original_time,kind,sender,signature,message,mentions,options,closes_at,shape_valid) VALUES($1,1,1700000000000,'poll',$2,$3,'aGk=','[]','Tm9ydGg=,U291dGg=',1700003600000,true)")
+        .bind(id(70)).bind(author()).bind(sig(70)).execute(&db.pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO public.k_polls VALUES($1,'Tm9ydGg=,U291dGg=',1700003600000,1700000000000)",
+    )
+    .bind(id(70))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    mention(&db.pool, 70, "poll", viewer(), true).await;
+    sqlx::query("INSERT INTO public.k_hashtags(content_id,block_time,sender_pubkey,hashtag) VALUES($1,1700000000000,$2,'poll')")
+        .bind(id(70)).bind(author()).execute(&db.pool).await.unwrap();
+    let requester = hex::encode(viewer());
+    let rows = feed(&db).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].content_type.as_deref(), Some("poll"));
+    assert_eq!(rows[0].protocol.as_deref(), Some("kchat"));
+    assert_eq!(
+        rows[0].poll.as_ref().unwrap().options,
+        vec!["Tm9ydGg=", "U291dGg="]
+    );
+    let api = ApiHandlers::new(Arc::new(PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: db.shared.clone(),
+    }));
+    let detail: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(70)), &requester)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(detail["post"]["contentType"], json!("poll"));
+    assert_eq!(detail["post"]["poll"]["closesAt"], json!(1700003600000u64));
+    let search: serde_json::Value = serde_json::from_str(
+        &api.search_posts_paginated(&requester, "hi", 1, None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(search["posts"][0]["poll"], detail["post"]["poll"]);
+    let mentions = db
+        .get_contents_mentioning_user(&requester, &requester, options(1))
+        .await
+        .unwrap();
+    assert_eq!(mentions.items.len(), 1);
+    let notifications: serde_json::Value = serde_json::from_str(
+        &api.get_notifications_paginated(&requester, 1, None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        notifications["notifications"][0]["contentType"],
+        json!("poll")
+    );
+    assert_eq!(
+        notifications["notifications"][0]["protocol"],
+        json!("kchat")
+    );
+    assert_eq!(
+        notifications["notifications"][0]["poll"],
+        detail["post"]["poll"]
+    );
+
+    let hashtag = db
+        .get_hashtag_content("poll", &requester, options(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        hashtag.items[0].poll.as_ref().unwrap().closes_at,
+        1700003600000
+    );
+    assert!(feed(&k_contract(&db)).await.is_empty());
+    // Corrupt or stale options cannot become an apparently normal post.
+    sqlx::query("UPDATE public.k_polls SET options='YQ==,Yg==' WHERE post_id=$1")
+        .bind(id(70))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(db.get_all_posts(&requester, options(1)).await.is_err());
+    sqlx::query("UPDATE public.k_polls SET options='Tm9ydGg=,U291dGg=' WHERE post_id=$1")
+        .bind(id(70))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE social_shared.extensions SET shape_valid=false WHERE transaction_id=$1")
+        .bind(id(70))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(feed(&db).await.is_empty());
 }

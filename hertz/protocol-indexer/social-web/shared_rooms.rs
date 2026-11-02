@@ -20,6 +20,12 @@ pub(crate) struct Binding {
     pub network: String,
     pub source_id: String,
     pub statement_timeout_ms: u64,
+    pub read_contract: ReadContract,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadContract {
+    LegacyK,
+    Unified,
 }
 fn query_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::QueryError(error.to_string())
@@ -334,6 +340,7 @@ mod tests {
             network: "testnet-10".into(),
             source_id: "a179f285-19a7-4646-9eef-cf1bf2c20a56".into(),
             statement_timeout_ms: 10000,
+            read_contract: ReadContract::Unified,
         };
         let cursor = encode_cursor(&binding, "en", 1234, 7);
         assert_eq!(decode_cursor(&binding, "en", &cursor).unwrap(), (1234, 7));

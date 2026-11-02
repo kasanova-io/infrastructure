@@ -49,12 +49,25 @@ impl PostgresDbManager {
             .map_err(error)?;
         // Resolve and lock every required view until this read ends. There is
         // no window in which a missing/dropped view can use a raw public table.
-        sqlx::query("SELECT 1 FROM social_shared_api.k_contents, social_shared_api.k_votes, social_shared_api.k_broadcasts, social_shared_api.k_follows, social_shared_api.k_blocks, social_shared_api.k_mentions, social_shared_api.k_hashtags, social_shared_api.k_vars, social_shared.current_tips LIMIT 0")
+        let schema = match binding.read_contract {
+            crate::shared_rooms::ReadContract::LegacyK => "social_shared_legacy_api",
+            crate::shared_rooms::ReadContract::Unified => "social_shared_api",
+        };
+        // Schema names come only from the two compile-time contract variants.
+        sqlx::query(&format!("SELECT 1 FROM {schema}.k_contents, {schema}.k_votes, {schema}.k_broadcasts, {schema}.k_follows, {schema}.k_blocks, {schema}.k_mentions, {schema}.k_hashtags, {schema}.k_vars, social_shared.current_tips LIMIT 0"))
             .execute(&mut *tx).await.map_err(error)?;
-        sqlx::query("SET LOCAL search_path=pg_catalog,social_shared_api,pg_temp")
-            .execute(&mut *tx)
-            .await
-            .map_err(error)?;
+        if binding.read_contract == crate::shared_rooms::ReadContract::Unified {
+            sqlx::query("SELECT 1 FROM social_shared_api.current_polls LIMIT 0")
+                .execute(&mut *tx)
+                .await
+                .map_err(error)?;
+        }
+        sqlx::query(&format!(
+            "SET LOCAL search_path=pg_catalog,{schema},pg_temp"
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(error)?;
         Ok(ReadSession::Shared(tx))
     }
 

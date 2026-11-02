@@ -88,6 +88,17 @@ AND NOT EXISTS(
 OFFSET 0
 );
 
+-- Poll read metadata belongs to the currently selected, eligible post and
+-- the same verified extension revision. Never read unbound native options.
+CREATE OR REPLACE VIEW social_shared_api.current_polls AS
+SELECT p.post_id,p.options,p.closes_at FROM public.k_polls p
+JOIN social_shared_api.k_contents post ON post.transaction_id=p.post_id AND post.content_type='poll'
+JOIN social_shared_api.current_actions a ON a.transaction_id=p.post_id
+JOIN social_shared.extensions e ON e.transaction_id=p.post_id AND e.revision=a.revision
+WHERE e.kind='poll' AND e.shape_valid AND e.signature=post.sender_signature
+AND e.sender=post.sender_pubkey AND e.message=post.base64_encoded_message
+AND e.options=p.options AND e.closes_at=p.closes_at AND e.original_time=p.block_time;
+
 CREATE OR REPLACE VIEW social_shared_api.k_broadcasts AS
 SELECT native.* FROM public.k_broadcasts native
 WHERE EXISTS (SELECT 1 FROM LATERAL (SELECT a.* FROM social_shared_api.current_actions a
@@ -126,11 +137,11 @@ AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending pending
  AND pending.acceptance_changed AND pending.accepting_block IS NULL)
 OFFSET 0);
 
--- This shadows the LEGACY reader's mention table. Keep only kinds its DTO
--- dispatch supports before SQL pagination; tip DTO delivery belongs to #4.
+-- Only DTO-supported content enters pagination; tip delivery belongs to #4.
+-- The separate legacy contract below retains its historical set of kinds.
 CREATE OR REPLACE VIEW social_shared_api.k_mentions AS
 SELECT m.* FROM public.k_mentions m WHERE
-(m.content_type IN('post','reply','quote') AND EXISTS(
+(m.content_type IN('post','reply','quote','poll') AND EXISTS(
  SELECT 1 FROM social_shared_api.k_contents p
  JOIN social_shared_api.current_actions a ON a.transaction_id=p.transaction_id
  WHERE p.transaction_id=m.content_id AND (
@@ -146,3 +157,45 @@ CREATE OR REPLACE VIEW social_shared_api.k_hashtags AS
 SELECT h.* FROM public.k_hashtags h
 WHERE EXISTS(SELECT 1 FROM social_shared_api.k_contents content WHERE content.transaction_id=h.content_id OFFSET 0);
 CREATE OR REPLACE VIEW social_shared_api.k_vars AS SELECT * FROM public.k_vars;
+
+-- Preserve the existing K-only read contract separately from mixed reads.
+-- This is legacy dataset membership, NOT proof of a retained row's wire root.
+-- The mixed API must continue to report that root as unknown without evidence.
+CREATE SCHEMA IF NOT EXISTS social_shared_legacy_api;
+CREATE OR REPLACE FUNCTION social_shared_legacy_api.is_k_member(bytea)
+RETURNS boolean LANGUAGE sql STABLE AS $legacy_k_member$
+SELECT EXISTS (
+ SELECT 1 FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=$1 AND (
+  (a.provenance='canonical' AND lower(left(a.source_payload,8))='6b3a313a')
+  OR (a.provenance='retained_native' AND EXISTS (
+   SELECT 1 FROM social_shared.retained_imports i
+   JOIN social_shared.config s ON s.singleton AND s.network=i.network
+   WHERE i.import_id=a.retained_import_id AND i.protocol_hint='k'
+  ))
+ )
+)
+$legacy_k_member$;
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_contents AS
+SELECT p.* FROM social_shared_api.k_contents p
+WHERE p.content_type IN ('post','reply','quote')
+AND social_shared_legacy_api.is_k_member(p.transaction_id);
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_votes AS
+SELECT v.* FROM social_shared_api.k_votes v
+WHERE social_shared_legacy_api.is_k_member(v.transaction_id);
+-- Identity and privacy remain author-wide across the unified product.
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_broadcasts AS
+SELECT * FROM social_shared_api.k_broadcasts;
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_follows AS
+SELECT * FROM social_shared_api.k_follows;
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_blocks AS
+SELECT * FROM social_shared_api.k_blocks;
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_mentions AS
+SELECT m.* FROM social_shared_api.k_mentions m
+WHERE m.content_type IN ('post','reply','quote','vote')
+AND social_shared_legacy_api.is_k_member(m.content_id);
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_hashtags AS
+SELECT h.* FROM social_shared_api.k_hashtags h
+WHERE EXISTS (SELECT 1 FROM social_shared_legacy_api.k_contents p WHERE p.transaction_id=h.content_id);
+CREATE OR REPLACE VIEW social_shared_legacy_api.k_vars AS
+SELECT * FROM social_shared_api.k_vars;

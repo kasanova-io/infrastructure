@@ -237,6 +237,54 @@ async fn pure_retained_audit_does_not_infer_wire_root_or_transaction_identity_fr
 }
 
 #[tokio::test]
+async fn pure_retained_audit_binds_complete_rpc_body_and_original_signed_fields_without_acceptance() {
+    use serde_json::json;
+    let (p,pool)=processor();
+    let mut tx=signed("k","post","4oGgaGk=:[]","4oGgaGk=:[]",219);
+    let (id,rpc)=synthetic_rpc(tx.payload.as_ref().unwrap(),json!([]),219);
+    tx.transaction_id=id.clone();
+    let mut input=retained_audit_input(&p,"kchat",&[tx.clone()]);
+    input["rpc_transactions"]=json!({id.clone():rpc.clone()});
+    let report=retained_audit(&p,&input,"testnet-10").unwrap();
+    assert_eq!(report.records[0].wire_root.as_deref(),Some("k"));
+    assert_eq!(report.wire_root_verified_records,1);
+    assert!(!report.original_wire_verified && report.original_transaction_identity_verified);
+    assert!(!report.chain_acceptance_verified && !report.caller_snapshot_provenance_verified && !report.complete_history_verified);
+    assert_eq!(pool.size(),0);
+    // Root is absent from Social's signature, but is committed by the SDK ID.
+    let mut changed=input.clone();
+    let payload=String::from_utf8(hex::decode(tx.payload.as_ref().unwrap()).unwrap()).unwrap();
+    changed["rpc_transactions"][&id]["payload"]=json!(hex::encode(payload.replacen("k:1:","kchat:1:",1)));
+    changed["rpc_transactions"][&id]["verboseData"]["transactionId"]=json!(id);
+    assert!(retained_audit(&p,&changed,"testnet-10").is_err());
+    // A different valid retained signature cannot be attached to these bytes.
+    let mut other=signed("k","post","bm90IHRoZSBzYW1l:[]","bm90IHRoZSBzYW1l:[]",220);
+    other.transaction_id=tx.transaction_id.clone();
+    let mut mismatched=retained_audit_input(&p,"k",&[other]);
+    mismatched["rpc_transactions"]=input["rpc_transactions"].clone();
+    assert!(retained_audit(&p,&mismatched,"testnet-10").is_err());
+    let mut outside=input.clone();
+    outside["rpc_transactions"]["ff".repeat(32)]=rpc;
+    assert!(retained_audit(&p,&outside,"testnet-10").is_err());
+}
+
+#[tokio::test]
+async fn pure_retained_partial_wire_material_never_claims_complete_history_or_acceptance() {
+    use serde_json::json;
+    let (p,_)=processor();
+    let mut first=signed("k","post","aGk=:[]","aGk=:[]",221);
+    let second=signed("kchat","post","aGk=:[]","aGk=:[]",222);
+    let (id,rpc)=synthetic_rpc(first.payload.as_ref().unwrap(),json!([]),221);
+    first.transaction_id=id.clone();
+    let mut input=retained_audit_input(&p,"k",&[first,second]);
+    input["rpc_transactions"]=json!({id:rpc});
+    let report=retained_audit(&p,&input,"testnet-10").unwrap();
+    assert_eq!(report.recoverable_records,2);assert_eq!(report.wire_root_verified_records,1);
+    assert!(!report.original_wire_verified && !report.original_transaction_identity_verified && !report.chain_acceptance_verified && !report.complete_history_verified);
+    assert_eq!(report.records.iter().filter(|r|r.wire_root.is_some()).count(),1);
+}
+
+#[tokio::test]
 async fn pure_retained_audit_keeps_unrecoverable_fields_without_declaring_invalid_chain_facts() {
     let (p, _) = processor();let target="aa".repeat(32);let mention="bb".repeat(32);
     let vectors=vec![signed("k","post","aGk=:[]","aGk=:[]",210),
