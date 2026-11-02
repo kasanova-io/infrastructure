@@ -240,3 +240,91 @@ pub(crate) async fn run(config: &AppConfig, input: &Path, source_id: &str) -> Re
     let result=adopt(pool.clone(),&config.network,source_id,&data).await?;
     pool.close().await;println!("{}",result);Ok(())
 }
+
+/// Complete RPC material supplies a payload root, not a new chain receipt.
+/// The caller names an existing import; retained fields come from that store.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootEvidence {
+    schema: String,
+    network: String,
+    source_id: String,
+    retained_import_id: String,
+    transactions: BTreeMap<String, Value>,
+}
+
+fn root_evidence(data: &[u8], network: &str, source_id: &str) -> Result<RootEvidence> {
+    ensure!(data.len() <= 64 * 1024 * 1024, "retained root material exceeds bound");
+    let input: RootEvidence = serde_json::from_slice(data)?;
+    ensure!(input.schema == "kasanova-retained-root-evidence-v1", "unsupported retained root material");
+    ensure!(input.network == network && input.source_id == source_id, "retained root source/network mismatch");
+    ensure!(digest(&input.retained_import_id), "invalid retained import identity");
+    ensure!(!input.transactions.is_empty() && input.transactions.len() <= 256, "retained root batch must contain 1 to 256 transactions");
+    ensure!(input.transactions.keys().all(|id| digest(id)), "invalid retained transaction identity");
+    Ok(input)
+}
+
+/// Persist only SDK-verified root metadata. The transaction/subject fences are
+/// the same ones used by native replay and common canonical insertion. No row
+/// in actions, canonical, pending, jobs, native tables or notifications changes.
+pub(crate) async fn recover_roots(
+    pool: sqlx::PgPool, network: &str, source_id: &str, data: &[u8],
+) -> Result<Value> {
+    let input = root_evidence(data, network, source_id)?;
+    let processor = KProtocolProcessor::new(pool.clone());
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
+        .execute(&mut *tx).await?;
+    SharedSocial::check_source(&mut tx, network, source_id).await?;
+    require_source_fence(&mut tx).await?;
+    let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_shared.retained_imports i JOIN social_shared.config cfg ON cfg.singleton AND cfg.network=i.network AND cfg.source_id=i.source_id WHERE i.import_id=$1 AND i.network=$2 AND i.source_id=$3)")
+        .bind(&input.retained_import_id).bind(network).bind(source_id)
+        .fetch_one(&mut *tx).await?;
+    ensure!(owned, "retained import does not belong to the configured source");
+    for (id, rpc) in &input.transactions {
+        let bytes = hex::decode(id)?;
+        let subject: String = sqlx::query_scalar("SELECT subject FROM social_shared.actions WHERE transaction_id=$1 AND retained_import_id=$2 AND provenance='retained_native' AND status='verified'")
+            .bind(&bytes).bind(&input.retained_import_id).fetch_one(&mut *tx).await?;
+        let subject_locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,736124))")
+            .bind(&subject).fetch_one(&mut *tx).await?;
+        ensure!(subject_locked, "retained subject is busy; retry the same material later");
+        // The source INSERT trigger takes this same transaction-ID lock. Hold
+        // it before checking absence so concurrent canonical capture cannot be
+        // mistaken for retained-only eligibility.
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,736125))")
+            .bind(id).fetch_one(&mut *tx).await?;
+        ensure!(locked, "retained source identity is busy; retry later");
+        let row = sqlx::query("SELECT a.source_payload,a.original_time,a.revision FROM social_shared.actions a JOIN social_shared.source_facts fact USING(transaction_id) WHERE a.transaction_id=$1 AND a.retained_import_id=$2 AND a.provenance='retained_native' AND a.status='verified' AND a.snapshot IS NOT NULL AND fact.eligible AND fact.retained_native AND fact.revision=a.revision FOR SHARE OF a SKIP LOCKED")
+            .bind(&bytes).bind(&input.retained_import_id).fetch_optional(&mut *tx).await?
+            .context("retained action is busy, changed or no longer eligible")?;
+        let original = Transaction {
+            transaction_id: id.clone(), payload: Some(row.get("source_payload")),
+            block_time: Some(row.get("original_time")),
+        };
+        let retained = processor.verify_transaction(&original)
+            .context("retained signing fields no longer verify")?;
+        let root = crate::retained_signature_audit::checked_wire_root(
+            &processor, id, original.block_time.unwrap(), &retained, rpc,
+        )?;
+        let result = sqlx::query("INSERT INTO social_shared.retained_wire_roots AS proof(transaction_id,retained_import_id,action_revision,original_time,source_payload_sha256,root,rpc_body_sha256,sdk_revision) SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),$3,sha256(convert_to($4,'UTF8')),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1 AND retained_import_id=$2 ON CONFLICT(transaction_id) DO UPDATE SET retained_import_id=EXCLUDED.retained_import_id,action_revision=EXCLUDED.action_revision,original_time=EXCLUDED.original_time,source_payload_sha256=EXCLUDED.source_payload_sha256,rpc_body_sha256=EXCLUDED.rpc_body_sha256 WHERE proof.root=EXCLUDED.root")
+            .bind(&bytes).bind(&input.retained_import_id).bind(&root)
+            .bind(serde_json::to_string(rpc)?).execute(&mut *tx).await?;
+        ensure!(result.rows_affected() == 1, "conflicting retained payload-root evidence");
+    }
+    tx.commit().await?;
+    Ok(json!({"schema":"kasanova-retained-root-recovery-v1",
+        "verified_root_records":input.transactions.len(),"canonical_receipts_created":0,
+        "chain_acceptance_verified":false,"native_rows_changed":0,"notification_rows_changed":0}))
+}
+
+pub(crate) async fn run_root_recovery(config: &AppConfig, input: &Path, source_id: &str) -> Result<()> {
+    ensure!(fs::symlink_metadata(input)?.is_file(), "retained root material must be a regular file");
+    let mut data = Vec::new();
+    fs::File::open(input)?.take(64 * 1024 * 1024 + 1).read_to_end(&mut data)?;
+    root_evidence(&data, &config.network, source_id)?;
+    let pool = crate::database::create_pool(config).await?;
+    let result = recover_roots(pool.clone(), &config.network, source_id, &data).await;
+    pool.close().await;
+    println!("{}", result?);
+    Ok(())
+}

@@ -1401,3 +1401,72 @@ async fn postgres_shared_reads_poll_metadata_is_visible_in_feed_detail_search_an
         .unwrap();
     assert!(feed(&db).await.is_empty());
 }
+
+#[tokio::test]
+async fn postgres_shared_reads_verified_retained_root_overrides_hint_and_stale_evidence_fails_closed()
+ {
+    let db = setup().await;
+    post(&db.pool, 1, 1000).await;
+    let import = "ab".repeat(32);
+    sqlx::query("INSERT INTO social_shared.retained_imports(import_id,network,source_id,protocol_hint,source_backup_sha256,inventory,native_records) VALUES($1,'testnet-10',$2,'k',$3,'{}',1)")
+        .bind(&import).bind(SOURCE).bind("cd".repeat(32)).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE social_shared.actions SET provenance='retained_native',retained_import_id=$2 WHERE transaction_id=$1")
+        .bind(id(1)).bind(&import).execute(&db.pool).await.unwrap();
+    sqlx::query("DELETE FROM protocol_indexer.canonical WHERE transaction_id=$1")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    assert_eq!(feed(&k_contract(&db)).await.len(), 1);
+    // Reader materialization fixture only. The owning native tests prove that
+    // only an SDK body/ID + retained-fields match is accepted by the writer.
+    sqlx::query("INSERT INTO social_shared.retained_wire_roots SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),'kchat',decode(repeat('ab',32),'hex'),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1")
+        .bind(id(1)).execute(&db.pool).await.unwrap();
+    assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("kchat"));
+    assert!(
+        feed(&k_contract(&db)).await.is_empty(),
+        "a proven KaChat root overrides the legacy import hint before pagination"
+    );
+    sqlx::query("UPDATE social_shared.actions SET source_payload=source_payload||'00' WHERE transaction_id=$1")
+        .bind(id(1)).execute(&db.pool).await.unwrap();
+    assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    assert!(
+        feed(&k_contract(&db)).await.is_empty(),
+        "a stale proof must not silently restore a K-only classification"
+    );
+    sqlx::query(
+        "UPDATE social_shared.actions SET source_payload=left(source_payload,length(source_payload)-2) WHERE transaction_id=$1",
+    )
+    .bind(id(1))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("kchat"));
+    sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,1,'{}',NULL)")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        feed(&db).await.is_empty(),
+        "root proof never grants acceptance"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM social_shared.retained_wire_roots")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("DROP VIEW social_shared.current_retained_wire_roots CASCADE")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        db.get_network().await.is_err(),
+        "missing proof view cannot fall back to unbound tables, even with no visible posts"
+    );
+    assert!(db.get_stats().await.is_err());
+    db.pool.close().await;
+}

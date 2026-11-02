@@ -489,7 +489,7 @@
 +mod read_views;
 +mod retained_signature_audit;
 +mod retained_history;
-@@ -73,0 +85,12 @@
+@@ -73,0 +85,15 @@
 +
 +    #[arg(long, help = "Use existing common canonical journal; never starts a scanner")]
 +    shared_source_id: Option<String>,
@@ -502,7 +502,10 @@
 +
 +    #[arg(long, requires = "shared_source_id", conflicts_with_all = ["audit_retained_history", "initialize_db", "upgrade_db"], help = "Explicitly adopt an operator-bound native table inventory; no chain receipt is fabricated")]
 +    adopt_retained_history: Option<std::path::PathBuf>,
-@@ -95,0 +119,10 @@
++
++    #[arg(long, requires = "shared_source_id", conflicts_with_all = ["adopt_retained_history", "audit_retained_history", "initialize_db", "upgrade_db"], help = "Recover SDK-verified payload roots for an existing retained import; never grants chain acceptance")]
++    recover_retained_roots: Option<std::path::PathBuf>,
+@@ -95,0 +122,15 @@
 +    if let Some(input) = &args.audit_retained_history {
 +        let output = args.audit_retained_history_report.as_ref()
 +            .ok_or_else(|| anyhow::anyhow!("retained audit requires a new report path"))?;
@@ -513,7 +516,12 @@
 +            .ok_or_else(|| anyhow::anyhow!("retained import requires the configured shared source"))?;
 +        return retained_history::run(&config, input, source_id).await;
 +    }
-@@ -111,0 +145,15 @@
++    if let Some(input) = &args.recover_retained_roots {
++        let source_id = args.shared_source_id.as_deref()
++            .ok_or_else(|| anyhow::anyhow!("retained root recovery requires the configured shared source"))?;
++        return retained_history::run_root_recovery(&config, input, source_id).await;
++    }
+@@ -111,0 +153,15 @@
 +    if let Some(source_id) = &args.shared_source_id {
 +        anyhow::ensure!(!args.initialize_db && !args.upgrade_db,
 +            "shared mode requires an existing reconciled native schema; schema reset/upgrade is not permitted");

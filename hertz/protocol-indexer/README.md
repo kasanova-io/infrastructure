@@ -75,6 +75,35 @@ the existing live API and the restarted shared copy. Source-connected replay,
 current-source reconciliation, live notification continuity and public cutover
 remain pending; the original service and immutable backup stay untouched.
 
+## Retained post protocol recovery
+
+Original retained signing fields do not prove the `k` versus `kchat` prefix.
+The existing offline audit can check complete archived RPC bodies against SDK
+transaction IDs and those fields. To make that result usable by the feed,
+`--recover-retained-roots <material.json>` is an explicit mode of the same native
+processor and requires its existing `--shared-source-id` and configured network.
+It cannot run together with adoption, offline audit, initialization or upgrade.
+
+Material has schema `kasanova-retained-root-evidence-v1`, the configured
+`network` and `source_id`, an existing `retained_import_id`, and a `transactions`
+object mapping original lowercase transaction IDs to complete RPC bodies. A
+batch contains 1–256 records, capped at 64 MiB. The writer derives the root with
+the existing SDK; no caller-supplied root or acceptance claim is accepted.
+
+Recovery stores separate root metadata bound to the retained import, revision,
+original time and signing payload. Existing source/subject fences protect the
+whole atomic batch. No canonical receipt, native row, queue or notification is
+changed. Current eligibility and proof binding are checked by every read; a
+revocation, canonical arrival or changed signing payload cannot use stale root
+metadata. Harmless projection diagnostics do not erase an original payload
+proof. Verified KaChat roots leave the old K-only contract even if the import
+hint was K. An existing stale proof cannot revert to that hint. Posts without
+sufficient material remain explicit unknown on mixed reads.
+
+This source is not evidence that real archived bodies have been recovered or
+that the private/public runtime has been upgraded; those acceptance steps stay
+in the task handoff.
+
 ## Social feed compatibility
 
 The two Social API services in `compose.social.yaml` share the same bound
@@ -92,8 +121,9 @@ client. The proposed mixed route is `/social-api/v2` on the existing configured
 indexer origin. Public's owner must coordinate that key and strip both clients
 with ordinary Social availability. Tips/Predictions rollout leases stay
 independent. This source change does not activate a route or change Public.
-The existing read-only role also needs access to `social_shared_legacy_api`
-and the new `social_shared_api.current_polls` view before activation.
+The existing read-only role also needs access to `social_shared_legacy_api`,
+`social_shared_api.current_polls` and `social_shared.current_retained_wire_roots`
+before activation.
 
 ## Protocol adapters
 

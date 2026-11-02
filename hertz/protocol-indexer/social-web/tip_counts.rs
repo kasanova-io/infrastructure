@@ -105,11 +105,22 @@ fn content_id(value: &str) -> DatabaseResult<Vec<u8>> {
     Ok(id)
 }
 
-fn action_protocol(payload_hex: &str, provenance: &str) -> DatabaseResult<String> {
+fn action_protocol(
+    payload_hex: &str,
+    provenance: &str,
+    retained_root: Option<&str>,
+) -> DatabaseResult<String> {
     // Retained SDK fields were signed without the root. Their reconstructed
     // payload uses an import hint; it cannot prove the original wire namespace.
     if provenance == "retained_native" {
-        return Ok("unknown".into());
+        return match retained_root {
+            Some("k") => Ok("k".into()),
+            Some("kchat") => Ok("kchat".into()),
+            None => Ok("unknown".into()),
+            _ => Err(DatabaseError::QueryError(
+                "Invalid retained Social protocol".into(),
+            )),
+        };
     }
     let invalid = || DatabaseError::QueryError("Invalid Social protocol".into());
     let bytes = hex::decode(payload_hex).map_err(|_| invalid())?;
@@ -146,13 +157,17 @@ impl PostgresDbManager {
         }
         // Preserve the actual namespace of the visible representative. Markers
         // and author identities cannot establish a post's transaction root.
-        let rows = sqlx::query("SELECT a.transaction_id,a.source_payload,a.provenance,post.content_type,poll.options AS poll_options,poll.closes_at AS poll_closes_at,(SELECT COUNT(*)::bigint FROM social_shared.current_tips t WHERE t.content_transaction_id=a.transaction_id) AS tips_count FROM social_shared_api.current_actions a LEFT JOIN social_shared_api.k_contents post USING(transaction_id) LEFT JOIN social_shared_api.current_polls poll ON poll.post_id=a.transaction_id WHERE a.transaction_id=ANY($1)")
+        let rows = sqlx::query("SELECT a.transaction_id,a.source_payload,a.provenance,proof.root AS retained_root,post.content_type,poll.options AS poll_options,poll.closes_at AS poll_closes_at,(SELECT COUNT(*)::bigint FROM social_shared.current_tips t WHERE t.content_transaction_id=a.transaction_id) AS tips_count FROM social_shared_api.current_actions a LEFT JOIN LATERAL (SELECT proof.root FROM social_shared.current_retained_wire_roots proof WHERE proof.transaction_id=a.transaction_id OFFSET 0) proof ON true LEFT JOIN social_shared_api.k_contents post USING(transaction_id) LEFT JOIN social_shared_api.current_polls poll ON poll.post_id=a.transaction_id WHERE a.transaction_id=ANY($1)")
             .bind(&ids).fetch_all(&mut **read).await.map_err(lookup_error)?;
         let mut counts = HashMap::new();
         for row in rows {
             let count = u64::try_from(row.get::<i64, _>("tips_count"))
                 .map_err(|_| DatabaseError::QueryError("Invalid tip count".into()))?;
-            let protocol = action_protocol(row.get("source_payload"), row.get("provenance"))?;
+            let protocol = action_protocol(
+                row.get("source_payload"),
+                row.get("provenance"),
+                row.get("retained_root"),
+            )?;
             let poll = if row.get::<Option<&str>, _>("content_type") == Some("poll") {
                 let options: String = row
                     .get::<Option<String>, _>("poll_options")

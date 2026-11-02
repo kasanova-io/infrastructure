@@ -737,6 +737,31 @@ fn pure_retained_adoption_cli_requires_explicit_source_and_excludes_other_modes(
     }
 }
 
+#[test]
+fn pure_retained_root_recovery_cli_is_explicit_and_excludes_adoption_and_offline_audit() {
+    use clap::Parser;
+    for network in ["mainnet", "testnet-10"] {
+        let args=["social","--network",network,"--shared-source-id","a179f285-19a7-4646-9eef-cf1bf2c20a56","--recover-retained-roots","material.json"];
+        assert!(crate::Args::try_parse_from(args).unwrap().recover_retained_roots.is_some());
+        for extra in [vec!["--initialize-db"],vec!["--upgrade-db"],vec!["--adopt-retained-history","old.json"],vec!["--audit-retained-history","old.json","--audit-retained-history-report","new.json"]] {
+            assert!(crate::Args::try_parse_from(args.into_iter().chain(extra)).is_err());
+        }
+    }
+    assert!(crate::Args::try_parse_from(["social","--recover-retained-roots","material.json"]).is_err());
+}
+
+#[tokio::test]
+async fn pure_retained_root_recovery_rejects_invalid_context_before_database_access() {
+    use serde_json::json;
+    let (_,pool)=processor();
+    let base=json!({"schema":"kasanova-retained-root-evidence-v1","network":"mainnet","source_id":"source","retained_import_id":"ab".repeat(32),"transactions":{"aa".repeat(32):{}}});
+    for (field,value) in [("schema",json!("untrusted")),("network",json!("testnet-10")),("source_id",json!("other")),("retained_import_id",json!("invalid")),("transactions",json!({})),("grant_acceptance",json!(true))] {
+        let mut invalid=base.clone(); invalid[field]=value;
+        assert!(crate::retained_history::recover_roots(pool.clone(),"mainnet","source",&serde_json::to_vec(&invalid).unwrap()).await.is_err());
+        assert_eq!(pool.size(),0);
+    }
+}
+
 #[cfg(feature = "shared-postgres-contract")]
 async fn database() -> sqlx::PgPool {
     let dsn = std::env::var("SOCIAL_TEST_DATABASE_URL")
@@ -3257,6 +3282,117 @@ mod shared_consumer {
         assert!(SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.is_err());
         assert_eq!(count(&pool,"kachat_broadcasts").await,1);
         assert_eq!(count(&pool,"social_shared.decoder_epochs").await,2,"failed bind does not install room epoch");
+    }
+
+    async fn retained_root_vectors(pool: &sqlx::PgPool) -> (Vec<Transaction>,serde_json::Value) {
+        use serde_json::json;
+        let processor=KProtocolProcessor::new(pool.clone());
+        let mut records=Vec::new();let mut bodies=serde_json::Map::new();
+        for (root,tail,nonce) in [("k","aGk=:[]",231u8),("kchat","4oGgaGk=:[]",232u8)] {
+            let mut value=signed(root,"post",tail,tail,nonce);
+            value.block_time=Some(1000);
+            let (id,rpc)=synthetic_rpc(value.payload.as_ref().unwrap(),json!([]),nonce);
+            value.transaction_id=id.clone();
+            processor.process_k_transaction(&value).await.unwrap();
+            bodies.insert(id,rpc); records.push(value);
+        }
+        let manifest=retained_inventory(pool).await;
+        let adoption=crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&manifest).await.unwrap();
+        SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        let input=json!({"schema":"kasanova-retained-root-evidence-v1","network":"testnet-10","source_id":SOURCE,
+            "retained_import_id":adoption["import_id"],"transactions":bodies});
+        (records,input)
+    }
+
+    async fn retained_protected_state(pool: &sqlx::PgPool) -> Vec<String> {
+        let mut state=Vec::new();
+        for table in ["k_contents","k_votes","k_broadcasts","k_follows","k_blocks","k_mentions","k_hashtags","k_vars",
+            "social_shared.actions","social_shared.config","social_shared.retained_imports",
+            "protocol_indexer.canonical","protocol_indexer.pending","protocol_indexer.consumer_jobs","protocol_indexer.events","notification_probe"] {
+            state.push(sqlx::query_scalar(&format!("SELECT encode(sha256(convert_to(COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb)::text,'UTF8')),'hex') FROM {table} t"))
+                .fetch_one(pool).await.unwrap());
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_root_recovery_restores_actual_roots_without_acceptance_or_native_changes() {
+        let pool=setup().await;
+        let (records,input)=retained_root_vectors(&pool).await;
+        let before=retained_protected_state(&pool).await;
+        assert_eq!(count(&pool,"social_shared_legacy_api.k_contents").await,2);
+        let result=crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&input).unwrap()).await.unwrap();
+        assert_eq!(result["verified_root_records"],2);assert_eq!(result["chain_acceptance_verified"],false);
+        assert_eq!(retained_protected_state(&pool).await,before);
+        assert_eq!(count(&pool,"social_shared.current_retained_wire_roots").await,2);
+        for (record,root) in records.iter().zip(["k","kchat"]) {
+            let actual:String=sqlx::query_scalar("SELECT root FROM social_shared.current_retained_wire_roots WHERE transaction_id=$1")
+                .bind(hex::decode(&record.transaction_id).unwrap()).fetch_one(&pool).await.unwrap();
+            assert_eq!(actual,root);
+        }
+        assert_eq!(count(&pool,"social_shared_legacy_api.k_contents").await,1,"proven KaChat must leave old K-only contract despite import hint");
+        crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&input).unwrap()).await.unwrap();
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,2);
+        assert_eq!(retained_protected_state(&pool).await,before);
+        assert_eq!(count(&pool,"protocol_indexer.canonical").await,0);
+        assert_eq!(count(&pool,"notification_probe").await,0);
+        // A harmless projection diagnostic does not erase an original payload proof.
+        sqlx::query("UPDATE social_shared.actions SET snapshot=snapshot||'{\"diagnostic\":true}'::jsonb WHERE transaction_id=$1")
+            .bind(hex::decode(&records[0].transaction_id).unwrap()).execute(&pool).await.unwrap();
+        assert_eq!(count(&pool,"social_shared.current_retained_wire_roots").await,2);
+        // A changed retained signing payload must be rechecked before use.
+        sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to(replace(convert_from(decode(source_payload,'hex'),'UTF8'),'k:1:','kchat:1:'),'UTF8'),'hex') WHERE transaction_id=$1")
+            .bind(hex::decode(&records[0].transaction_id).unwrap()).execute(&pool).await.unwrap();
+        assert_eq!(count(&pool,"social_shared.current_retained_wire_roots").await,1);
+        assert_eq!(count(&pool,"social_shared_legacy_api.k_contents").await,0,"stale proof never falls back to an import hint");
+        crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&input).unwrap()).await.unwrap();
+        assert_eq!(count(&pool,"social_shared.current_retained_wire_roots").await,2);
+        // Existing source semantics still deny a newly observed revoked record.
+        capture(&pool,&records[0],1,false,false).await;
+        let after_capture=retained_protected_state(&pool).await;
+        assert_eq!(count(&pool,"social_shared.current_retained_wire_roots").await,1);
+        assert!(crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&input).unwrap()).await.is_err());
+        assert_eq!(retained_protected_state(&pool).await,after_capture);
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,2);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_root_recovery_rolls_back_invalid_rpc_and_refuses_foreign_or_pending_records() {
+        use serde_json::json;
+        let pool=setup().await;let (records,input)=retained_root_vectors(&pool).await;
+        let before=retained_protected_state(&pool).await;
+        let mut invalid=input.clone();
+        let last=invalid["transactions"].as_object().unwrap().keys().last().unwrap().clone();
+        invalid["transactions"][&last]["payload"]=json!("00");
+        assert!(crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&invalid).unwrap()).await.is_err());
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,0,"entire batch rolls back after earlier valid proof");
+        assert_eq!(retained_protected_state(&pool).await,before);
+        let mut foreign=input.clone();foreign["retained_import_id"]=json!("ff".repeat(32));
+        assert!(crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&foreign).unwrap()).await.is_err());
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,0);
+        sqlx::query("INSERT INTO protocol_indexer.pending(transaction_id,acceptance_changed,accepting_block) VALUES($1,true,NULL)")
+            .bind(hex::decode(&records[0].transaction_id).unwrap()).execute(&pool).await.unwrap();
+        let pending=retained_protected_state(&pool).await;
+        assert!(crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&input).unwrap()).await.is_err());
+        assert_eq!(retained_protected_state(&pool).await,pending);
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,0);
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_root_recovery_requires_source_fence_and_refuses_busy_subjects() {
+        let pool=setup().await;let (_,input)=retained_root_vectors(&pool).await;
+        let data=serde_json::to_vec(&input).unwrap();
+        let before=retained_protected_state(&pool).await;
+        let subject:String=sqlx::query_scalar("SELECT subject FROM social_shared.actions ORDER BY transaction_id LIMIT 1").fetch_one(&pool).await.unwrap();
+        let mut owner=pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,736124))").bind(subject).execute(&mut *owner).await.unwrap();
+        assert!(crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&data).await.is_err());
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,0);
+        owner.rollback().await.unwrap();
+        sqlx::query("DROP TRIGGER protocol_source_identity_fence ON protocol_indexer.canonical").execute(&pool).await.unwrap();
+        assert!(crate::retained_history::recover_roots(pool.clone(),"testnet-10",SOURCE,&data).await.is_err());
+        assert_eq!(retained_protected_state(&pool).await,before);
+        assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,0);
     }
 
 }

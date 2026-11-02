@@ -14,7 +14,7 @@ def prepare(output):
     history = json.loads((HERE / 'SOURCE.lock').read_text())
     # Keep the accepted reader's historical inputs/images intact. A new frozen
     # candidate records compatibility with the current native-owned SQL assets.
-    lock = history.get('unified_feed_candidate', history.get('action_protocol_candidate',
+    lock = history.get('retained_root_candidate') or history.get('unified_feed_candidate', history.get('action_protocol_candidate',
                        history.get('tip_counts_candidate', history.get('bounded_read_candidate', history.get('retained_schema_candidate', history)))))
     inputs = {name: HERE / name for name in [
         'Dockerfile', 'prepare_web.py', 'shared-api.patch', 'shared_rooms.rs',

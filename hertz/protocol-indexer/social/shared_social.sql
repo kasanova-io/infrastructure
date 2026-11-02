@@ -31,6 +31,18 @@ CREATE TABLE IF NOT EXISTS social_shared.actions (
 ALTER TABLE social_shared.actions ADD COLUMN IF NOT EXISTS provenance text NOT NULL DEFAULT 'canonical'
     CHECK(provenance IN ('canonical','retained_native'));
 ALTER TABLE social_shared.actions ADD COLUMN IF NOT EXISTS retained_import_id text REFERENCES social_shared.retained_imports(import_id);
+-- Payload-root evidence is separate from acceptance/provenance. A proof must
+-- bind the exact adopted action, import and original signing payload.
+CREATE TABLE IF NOT EXISTS social_shared.retained_wire_roots (
+    transaction_id bytea PRIMARY KEY REFERENCES social_shared.actions(transaction_id),
+    retained_import_id text NOT NULL REFERENCES social_shared.retained_imports(import_id),
+    action_revision bigint NOT NULL,
+    original_time bigint NOT NULL,
+    source_payload_sha256 bytea NOT NULL CHECK(octet_length(source_payload_sha256)=32),
+    root text NOT NULL CHECK(root IN ('k','kchat')),
+    rpc_body_sha256 bytea NOT NULL CHECK(octet_length(rpc_body_sha256)=32),
+    sdk_revision text NOT NULL CHECK(sdk_revision='01b532e8b553523216471682649693af92f0fd16')
+);
 CREATE TABLE IF NOT EXISTS social_shared.retained_conflicts (
     transaction_id bytea PRIMARY KEY REFERENCES social_shared.actions(transaction_id),
     canonical_revision bigint NOT NULL,
@@ -64,6 +76,17 @@ JOIN social_shared.config cfg ON cfg.singleton AND cfg.network=i.network AND cfg
 WHERE a.provenance='retained_native' AND a.status='verified'
 AND NOT EXISTS(SELECT 1 FROM protocol_indexer.canonical c WHERE c.transaction_id=a.transaction_id)
 AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p WHERE p.transaction_id=a.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL);
+
+CREATE OR REPLACE VIEW social_shared.current_retained_wire_roots AS
+SELECT proof.transaction_id,proof.root FROM social_shared.retained_wire_roots proof
+JOIN social_shared.actions a ON a.transaction_id=proof.transaction_id
+ AND a.retained_import_id=proof.retained_import_id AND a.revision=proof.action_revision
+ AND a.original_time=proof.original_time
+ AND sha256(convert_to(a.source_payload,'UTF8'))=proof.source_payload_sha256
+JOIN LATERAL (SELECT fact.* FROM social_shared.source_facts fact
+ WHERE fact.transaction_id=a.transaction_id OFFSET 0) fact ON
+ fact.revision=a.revision AND fact.eligible AND fact.retained_native
+WHERE a.provenance='retained_native' AND a.status='verified';
 
 CREATE INDEX IF NOT EXISTS social_shared_subject ON social_shared.actions(subject,original_time,transaction_id);
 CREATE INDEX IF NOT EXISTS social_shared_effective ON social_shared.actions(subject,state_action,original_time,transaction_id);

@@ -54,7 +54,7 @@ impl PostgresDbManager {
             crate::shared_rooms::ReadContract::Unified => "social_shared_api",
         };
         // Schema names come only from the two compile-time contract variants.
-        sqlx::query(&format!("SELECT 1 FROM {schema}.k_contents, {schema}.k_votes, {schema}.k_broadcasts, {schema}.k_follows, {schema}.k_blocks, {schema}.k_mentions, {schema}.k_hashtags, {schema}.k_vars, social_shared.current_tips LIMIT 0"))
+        sqlx::query(&format!("SELECT 1 FROM {schema}.k_contents, {schema}.k_votes, {schema}.k_broadcasts, {schema}.k_follows, {schema}.k_blocks, {schema}.k_mentions, {schema}.k_hashtags, {schema}.k_vars, social_shared.current_tips, social_shared.current_retained_wire_roots LIMIT 0"))
             .execute(&mut *tx).await.map_err(error)?;
         if binding.read_contract == crate::shared_rooms::ReadContract::Unified {
             sqlx::query("SELECT 1 FROM social_shared_api.current_polls LIMIT 0")

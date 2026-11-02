@@ -168,10 +168,15 @@ SELECT EXISTS (
  SELECT 1 FROM social_shared_api.current_actions a
  WHERE a.transaction_id=$1 AND (
   (a.provenance='canonical' AND lower(left(a.source_payload,8))='6b3a313a')
-  OR (a.provenance='retained_native' AND EXISTS (
-   SELECT 1 FROM social_shared.retained_imports i
-   JOIN social_shared.config s ON s.singleton AND s.network=i.network
-   WHERE i.import_id=a.retained_import_id AND i.protocol_hint='k'
+  OR (a.provenance='retained_native' AND (
+   EXISTS (SELECT 1 FROM social_shared.current_retained_wire_roots proof
+    WHERE proof.transaction_id=a.transaction_id AND proof.root='k')
+   OR (NOT EXISTS (SELECT 1 FROM social_shared.retained_wire_roots proof
+     WHERE proof.transaction_id=a.transaction_id) AND EXISTS (
+    SELECT 1 FROM social_shared.retained_imports i
+    JOIN social_shared.config s ON s.singleton AND s.network=i.network
+    WHERE i.import_id=a.retained_import_id AND i.protocol_hint='k'
+   ))
   ))
  )
 )

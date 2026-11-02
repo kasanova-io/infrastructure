@@ -407,5 +407,50 @@
       "public_cutover": false,
       "running": false
     }
-  ]
+  ],
+  "retained_root_candidate": {
+    "build_source_manifest": "6e69dc2ba5a4b3862e85bd45eb8ad349d445bab49e9ba84d3a25ff0a120b7d8b",
+    "files_sha256": {
+      "Cargo.lock": "0538b6a6c1e2b11f14dc20b74f069c6614ad3139ab7dcc200e34744bbe7fae46",
+      "Dockerfile": "db380e6650c743ff54e684ef14940f575ab602b37f8393fa681bdd97a504b55e",
+      "LICENSE.K-indexer": "9a8b1a60d485f688a44e1899fdcab02a7b9c426020611728d75aa63d2f043f39",
+      "prepare_manifests.py": "6b0033c93367e98b49ee1303ee242736cbe7fec5a77534fc75431fff8fd9ca1e",
+      "real_kpost.json": "03cf664d9fd203d38e8dc6d92658f8a19f2aa53dd33f8281ec358667118b15af",
+      "real_tip.json": "cbd47ab300e4b5f20b6280067153c243deee6eb9e01a13c20f964f5abea68d91",
+      "release_tip.json": "515e1cbed754cd92995ae33c5765ae0d68190ca8afdbd3986dafbf3714e655b1",
+      "transaction_tests.rs": "949dc71d6eff3263849b69a33d17f936924b199ba920b65416c85c3b8063b86d",
+      "transactional-protocol.patch": "cc1a4350dfc5a477426267d4ea7cd8ce065a23ecb0fe9041bac7cfc85cf4affc",
+      "shared_social.rs": "c9092fc92612db36b9a20160e35ff0313a7555528b3f6df3629660b4248d1659",
+      "shared_social.sql": "5990ca135aa61c66ce20c4aceaf4460be8e3e08f739db8d744dbad33e809c1f8",
+      "notification_capture.sql": "2265dfff653c0b9bc08e21d3958a36412ed1482882460d719b6e201ad84a20e5",
+      "notification_capture.sha256": "ee46054381dd59865f9e3de6115c38b308720b02d4b6f87f9e6764a1d444ccbc",
+      "tips.rs": "7786bfe335e2b4b653a656af3491eaa2aeb5cd68fd9e6be3214bab649180fade",
+      "tip_evidence.rs": "9abd247b1d8185314a531f0ea6a7fbabc0b1610146f15b19badd30894bfd9d24",
+      "tip_projection.rs": "88865ae2cbdc80b6233d07770c4aec7bf446de3c47e6a62dfd29054259dc6859",
+      "kaposts.rs": "5ee7cff122b3b001e1cdec6e309e4e0f3a48cc2f256b2ebe93cee5fff35c544b",
+      "kaposts_projection.rs": "3e8722d858f09bde017d26e7c30f3e5ca1b74f6ebb8ae40eebe8331bc80beffa",
+      "kaposts_projection.sql": "bfbeeafa815e05bb637dc1bac894eb3ebf5162afd1e242691617b0f89c1ca45d",
+      "transaction_evidence.rs": "880c971972ba901d11fbe345aea31502eb14f408a3cfe0a52b2757ce6aa60b01",
+      "rooms.rs": "c412630fdc3b896e622d21ebf90fe6b6821b43ab778dd107f668f545b0d3b6bd",
+      "rooms.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
+      "read_views.rs": "2deacd0b117958074c2e68091d173a7f8d79f7dee03f832615cfd4f030a24af0",
+      "read_views.sql": "09e5857ef0c47a609da2d5376a21ed8663cd9f5b227796c065cd0b5f32c1c8ff",
+      "edit_authorization.sql": "d42afbeecd7c96f716b0b38cc77b4255dd6445694f069d23147f8b64eb1edd89",
+      "unquote_order.sql": "e972503ba710a99a9114f0f6dc9c71c110b67139c1ae4484d1d7404a9afa7235",
+      "retained_signature_audit.rs": "ae038a172152cc71ad7d4efa417291560ad370d845bdcd178a609377af114e26",
+      "retained_history.rs": "e29bc68f298aff8f39301c4b0f6b512fa529aa9e24c743c336994d9a8cb24df8",
+      "source_fence.sql": "927f86e18074a6b9e9ba5f56cbe82b15e5263e103a9dd2bf464e29f14fa87065"
+    },
+    "scope": "SDK-bound retained payload-root recovery; unchanged acceptance/native/notification state",
+    "local_unit_tests_passed": 59,
+    "local_postgres_contracts_passed": 53,
+    "local_rust_version": "1.94.1",
+    "local_postgres_version": "16.15",
+    "build_accepted": false,
+    "runtime_image": null,
+    "running": false,
+    "real_rpc_root_audit": false,
+    "real_root_recovery_accepted": false,
+    "public_cutover": false
+  }
 }
