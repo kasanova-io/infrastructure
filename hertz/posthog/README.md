@@ -1,16 +1,27 @@
-# PostHog on Hertz
+# Analytics on Hertz
 
-This standalone Compose project installs the official PostHog hobby stack behind
-the existing Hertz Caddy gateway at `https://posthog.kasanova.io`. It owns its
-Postgres, ClickHouse, Kafka, Redis and object storage volumes. The owned wallet ingress preserves complete original event envelopes in a durable
-SQLite journal. Historical archives remain intact.
+The self-hosted PostHog stack is retired. Current analytics storage and replay
+run in PostHog Cloud, with separate PROD and DEV projects. New 0.9.0 clients send
+events directly to the configured Cloud ingestion host.
+
+Hertz retains only `compose.cloud.yaml`: the `kasanova_analytics` compatibility
+relay and gateway for already installed clients. They forward to Cloud and keep
+unacknowledged legacy events in the existing durable journal. They do not run
+PostHog databases, Kafka, object storage, or an Amplitude SDK/service connection.
+Keep the journal backup timer and sealed historical archives. Do not delete the
+journal or original native volumes, replay old source events, or restart the
+retired `kasanova_posthog` project as part of routine deployment.
+
+The native installation and restore procedures below are retained solely for
+archive recovery. Current compatibility deployment is documented under
+[Cloud retirement](#retire-the-native-stack-after-cloud-reconciliation).
 
 Upstream source is pinned in `prepare.py`; pristine upstream deployment inputs
 are in `upstream/`. `prepare.py` generates private, durable secrets only on a fresh
 installation and preserves them on retries. Do not regenerate the Django secret,
 database credentials or encryption salt on an existing installation.
 
-## Install
+## Retired native installation (recovery reference)
 
 Copy this directory to `/home/ren/Kasanova/tools/posthog` on `hertz`. Set
 `DEPLOYMENT_REVISION` to the exact infrastructure source commit, then run
