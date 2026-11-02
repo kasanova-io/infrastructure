@@ -8,16 +8,16 @@
 +    shared_read_contract: String,
      #[arg(short = 'H', long, help = "Database host")]
      db_host: String,
- 
+
 @@ -155,7 +157,7 @@
          };
- 
+
      if let Some(source_id) = args.shared_source_id {
 -        db_manager.shared = Some(shared_rooms::Binding { network: args.shared_network.expect("clap requires shared network"), source_id, statement_timeout_ms: config.server.request_timeout.saturating_mul(1000) });
 +        db_manager.shared = Some(shared_rooms::Binding { network: args.shared_network.expect("clap requires shared network"), source_id, statement_timeout_ms: config.server.request_timeout.saturating_mul(1000), read_contract: if args.shared_read_contract == "unified" { shared_rooms::ReadContract::Unified } else { shared_rooms::ReadContract::LegacyK } });
          db_manager.validate_shared_reads().await?;
      }
- 
+
 --- a/K-webserver/src/models.rs
 +++ b/K-webserver/src/models.rs
 @@ -71,6 +71,8 @@
@@ -29,7 +29,16 @@
      pub is_upvoted: Option<bool>,
      pub is_downvoted: Option<bool>,
      pub user_nickname: Option<String>,
-@@ -176,6 +178,13 @@
+@@ -142,6 +144,8 @@
+     pub voted_content: Option<String>,
+     pub user_nickname: Option<String>,
+     pub user_profile_image: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub protocol: Option<String>,
+ }
+
+ // Merged content record for unified content retrieval
+@@ -176,6 +180,13 @@
          skip_serializing_if = "Option::is_none"
      )]
      pub referenced_profile_image: Option<String>,
@@ -41,9 +50,9 @@
 +    pub options: Vec<String>,
 +    pub closes_at: u64,
  }
- 
+
  // API Response models
-@@ -200,6 +209,8 @@
+@@ -200,6 +211,8 @@
      pub tips_count: Option<u64>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub protocol: Option<String>,
@@ -52,7 +61,7 @@
      #[serde(rename = "repostsCount")]
      pub reposts_count: u64,
      #[serde(rename = "parentPostId")]
-@@ -443,6 +454,7 @@
+@@ -443,6 +456,7 @@
              quotes_count: record.quotes_count.unwrap_or(0),
              tips_count: record.tips_count,
              protocol: record.protocol.clone(),
@@ -60,7 +69,7 @@
              reposts_count: 0,
              parent_post_id: None,
              mentioned_pubkeys: record.mentioned_pubkeys.clone(),
-@@ -478,6 +490,10 @@
+@@ -478,6 +492,10 @@
      #[serde(skip_serializing_if = "Option::is_none")]
      pub post_id: Option<String>, // The post ID that the vote refers to
      pub voted_content: Option<String>,   // Content of the post/reply being voted on
@@ -69,9 +78,9 @@
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub poll: Option<PollData>,
  }
- 
+
  impl NotificationPost {
-@@ -487,7 +503,9 @@
+@@ -487,7 +505,9 @@
          mention_block_time: u64,
      ) -> Self {
          // Determine content type - if referenced_content_id is set, it's a quote
@@ -82,7 +91,7 @@
              "quote".to_string()
          } else {
              "post".to_string()
-@@ -507,6 +525,8 @@
+@@ -507,6 +527,8 @@
              content_id: None,
              post_id: None,
              voted_content: None,
@@ -90,8 +99,8 @@
 +            poll: record.poll.clone(),
          }
      }
- 
-@@ -529,6 +549,8 @@
+
+@@ -529,6 +551,8 @@
              content_id: None,
              post_id: None,
              voted_content: None,
@@ -99,17 +108,17 @@
 +            poll: None,
          }
      }
- 
-@@ -554,6 +576,8 @@
+
+@@ -554,6 +578,8 @@
              content_id: Some(vote_record.post_id.clone()),
              post_id: None,
              voted_content: Some(voted_content),
-+            protocol: None,
++            protocol: vote_record.protocol.clone(),
 +            poll: None,
          }
      }
  }
-@@ -595,6 +619,7 @@
+@@ -595,6 +621,7 @@
              quotes_count: record.quotes_count.unwrap_or(0),
              tips_count: record.tips_count,
              protocol: record.protocol.clone(),
@@ -182,15 +191,15 @@
                  user_nickname: Some(row.get("user_nickname")),
 @@ -1816,10 +1819,10 @@
                      mc.sender_signature, mc.base64_encoded_message, mc.referenced_content_id,
- 
+
                      -- Replies count (only applicable for posts and quotes, not replies)
 -                    CASE WHEN mc.content_type IN ('post', 'quote') THEN COALESCE(r.replies_count, 0) ELSE 0 END as replies_count,
 +                    CASE WHEN mc.content_type IN ('post', 'quote', 'poll') THEN COALESCE(r.replies_count, 0) ELSE 0 END as replies_count,
- 
+
                      -- Quotes count (only applicable for posts and quotes, not replies)
 -                    CASE WHEN mc.content_type IN ('post', 'quote') THEN COALESCE(q.quotes_count, 0) ELSE 0 END as quotes_count,
 +                    CASE WHEN mc.content_type IN ('post', 'quote', 'poll') THEN COALESCE(q.quotes_count, 0) ELSE 0 END as quotes_count,
- 
+
                      -- Vote statistics
                      COALESCE(v.up_votes_count, 0) as up_votes_count,
 @@ -1834,18 +1837,18 @@
@@ -202,7 +211,7 @@
                      GROUP BY referenced_content_id
 -                ) r ON mc.content_type IN ('post', 'quote') AND mc.transaction_id = r.referenced_content_id
 +                ) r ON mc.content_type IN ('post', 'quote', 'poll') AND mc.transaction_id = r.referenced_content_id
- 
+
                  -- Optimized quotes aggregation (only for posts and quotes)
                  LEFT JOIN (
                      SELECT referenced_content_id, COUNT(*) as quotes_count
@@ -213,12 +222,12 @@
                      GROUP BY referenced_content_id
 -                ) q ON mc.content_type IN ('post', 'quote') AND mc.transaction_id = q.referenced_content_id
 +                ) q ON mc.content_type IN ('post', 'quote', 'poll') AND mc.transaction_id = q.referenced_content_id
- 
+
                  -- Optimized vote aggregation with user vote in single query
                  LEFT JOIN (
 @@ -1965,7 +1968,7 @@
              let mentioned_pubkeys_array: Vec<String> = row.get("mentioned_pubkeys");
- 
+
              let content_record = match content_type {
 -                "post" | "quote" => {
 +                "post" | "quote" | "poll" => {
@@ -233,16 +242,37 @@
                          up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                          down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                          is_upvoted: Some(row.get("is_upvoted")),
-@@ -2199,7 +2203,7 @@
+@@ -2067,7 +2071,8 @@
+         .fetch_optional(&mut *read)
+         .await
+         .map_err(|error| DatabaseError::QueryError(error.to_string()))?;
+-        Ok(row.map(|row| KVoteRecord {
++        let mut votes = row.map(|row| KVoteRecord {
++            protocol: None,
+             id: row.get("id"),
+             transaction_id: Self::encode_bytes_to_hex(&row.get::<Vec<u8>, _>("transaction_id")),
+             block_time: row.get::<i64, _>("block_time") as u64,
+@@ -2079,7 +2084,9 @@
+             voted_content: None,
+             user_nickname: None,
+             user_profile_image: None,
+-        }))
++        }).into_iter().collect::<Vec<_>>();
++        self.enrich_tip_counts(&mut read, &mut votes).await?;
++        Ok(votes.pop())
+     }
+
+     async fn get_content_by_id(
+@@ -2199,7 +2206,7 @@
          let is_blocked: bool = row.get("is_blocked");
- 
+
          let mut content_record = match content_type {
 -            "post" | "quote" => {
 +            "post" | "quote" | "poll" => {
                  let mentioned_pubkeys_bytes: Vec<Vec<u8>> = row.get("mentioned_pubkeys");
                  let mentioned_pubkeys: Vec<String> = mentioned_pubkeys_bytes
                      .into_iter()
-@@ -2219,6 +2223,7 @@
+@@ -2219,6 +2226,7 @@
                      quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                      tips_count: None,
                      protocol: None,
@@ -250,7 +280,7 @@
                      up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                      down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                      is_upvoted: Some(row.get("is_upvoted")),
-@@ -2816,7 +2821,7 @@
+@@ -2816,7 +2824,7 @@
                         c.sender_signature, c.base64_encoded_message, c.content_type,
                         c.referenced_content_id
                  FROM k_contents c
@@ -259,7 +289,7 @@
                  {order_clause}
                  LIMIT ${limit_param}
              ),
-@@ -2881,7 +2886,7 @@
+@@ -2881,7 +2889,7 @@
                      ARRAY(
                          SELECT encode(m.mentioned_pubkey, 'hex')
                          FROM k_mentions m
@@ -268,7 +298,7 @@
                      ),
                      '{{}}'::text[]
                  ) as mentioned_pubkeys,
-@@ -2989,6 +2994,7 @@
+@@ -2989,6 +2997,7 @@
                  quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                  tips_count: None,
                  protocol: None,
@@ -276,7 +306,7 @@
                  up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                  down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                  is_upvoted: Some(row.get("is_upvoted")),
-@@ -3163,6 +3169,7 @@
+@@ -3163,6 +3172,7 @@
                          WHEN 'post' THEN c.id
                          WHEN 'reply' THEN c.id
                          WHEN 'quote' THEN c.id
@@ -284,7 +314,7 @@
                          WHEN 'vote' THEN v.id
                      END as id,
                      fn.content_id as transaction_id,
-@@ -3172,6 +3179,7 @@
+@@ -3172,6 +3182,7 @@
                          WHEN 'post' THEN c.base64_encoded_message
                          WHEN 'reply' THEN c.base64_encoded_message
                          WHEN 'quote' THEN c.base64_encoded_message
@@ -292,7 +322,7 @@
                          WHEN 'vote' THEN ''
                      END as base64_encoded_message,
                      fn.notification_id,
-@@ -3188,7 +3196,7 @@
+@@ -3188,7 +3199,7 @@
                      encode(fn.referenced_content_id, 'hex') as quoted_content_id,
                      CASE WHEN fn.notification_type = 'quote' THEN original.base64_encoded_message ELSE NULL END as quoted_content_message
                  FROM filtered_notifications fn
@@ -301,16 +331,16 @@
                  LEFT JOIN k_votes v ON fn.content_type = 'vote' AND fn.content_id = v.transaction_id
                  -- Get user profile for sender
                  LEFT JOIN LATERAL (
-@@ -3252,7 +3260,7 @@
+@@ -3252,7 +3263,7 @@
              let notification_id: i64 = row.get("notification_id");
              let block_time: i64 = row.get("block_time");
- 
+
 -            if content_type == "post" {
 +            if content_type == "post" || content_type == "poll" {
                  let post_record = KPostRecord {
                      id: row.get::<i64, _>("id"),
                      transaction_id: Self::encode_bytes_to_hex(&transaction_id),
-@@ -3270,6 +3278,7 @@
+@@ -3270,6 +3281,7 @@
                      quotes_count: None,
                      tips_count: None,
                      protocol: None,
@@ -318,7 +348,7 @@
                      user_nickname: Some(row.get("user_nickname")),
                      user_profile_image: row.get("user_profile_image"),
                      referenced_content_id: None,
-@@ -3306,6 +3315,7 @@
+@@ -3306,6 +3318,7 @@
                      quotes_count: None,
                      tips_count: None,
                      protocol: None,
@@ -326,16 +356,24 @@
                      user_nickname: Some(row.get("user_nickname")),
                      user_profile_image: row.get("user_profile_image"),
                      referenced_content_id: quoted_content_id,
-@@ -3398,6 +3408,8 @@
+@@ -3350,6 +3363,7 @@
+                 });
+             } else if content_type == "vote" {
+                 let vote_record = KVoteRecord {
++                    protocol: None,
+                     id: row.get::<i64, _>("id"),
+                     transaction_id: Self::encode_bytes_to_hex(&transaction_id),
+                     block_time: row.get::<i64, _>("block_time") as u64,
+@@ -3398,6 +3412,8 @@
              ));
          }
- 
+
 +        self.enrich_tip_counts(&mut read, &mut notifications).await?;
 +
          Ok(PaginatedResult {
              items: notifications,
              pagination,
-@@ -3517,7 +3529,7 @@
+@@ -3517,7 +3533,7 @@
                  INNER JOIN k_hashtags h ON h.content_id = c.transaction_id
                  LEFT JOIN k_blocks kb ON kb.sender_pubkey = $1 AND kb.blocked_user_pubkey = c.sender_pubkey
                  WHERE h.hashtag = $2
@@ -344,7 +382,7 @@
                    AND kb.blocked_user_pubkey IS NULL{cursor_conditions}
                  {order_clause}
                  LIMIT ${limit_param}
-@@ -3660,6 +3672,7 @@
+@@ -3660,6 +3676,7 @@
                  quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                  tips_count: None,
                  protocol: None,
@@ -359,25 +397,24 @@
                          quotes_count: 0,
                          tips_count: None,
 -                        protocol: self.db.shared_rooms_enabled().then(|| "unknown".into()),
-+                        protocol: self.db.shared_protocols_enabled().then(|| "unknown".into()),
++                        protocol: _vote_record.protocol.clone().or_else(|| self.db.shared_protocols_enabled().then(|| "unknown".into())),
 +                        poll: None,
                          up_votes_count: 0,
                          down_votes_count: 0,
                          reposts_count: 0,
 @@ -928,7 +929,7 @@
          };
- 
+
          // Convert NotificationContentRecords to NotificationPost with correct mention cursors
 -        let all_notifications: Vec<NotificationPost> = notifications_result
 +        let mut all_notifications: Vec<NotificationPost> = notifications_result
              .items
              .iter()
              .map(|notification_record| match &notification_record.content {
-@@ -959,6 +960,14 @@
-                 }
+@@ -960,6 +961,14 @@
              })
              .collect();
-+
+
 +        if self.db.shared_protocols_enabled() {
 +            for notification in &mut all_notifications {
 +                if notification.protocol.is_none() {
@@ -385,15 +422,35 @@
 +                }
 +            }
 +        }
- 
++
          let pagination = notifications_result.pagination;
- 
-@@ -1089,7 +1098,8 @@
+
+         let response = PaginatedNotificationsResponse {
+@@ -996,12 +1005,16 @@
+             ));
+         }
+         match self.db.get_vote_by_id(vote_id, requester_pubkey).await {
+-            Ok(Some(vote)) => Ok(serde_json::json!({"vote": {
++            Ok(Some(vote)) => {
++                let mut result = serde_json::json!({"vote": {
+                 "id": vote.transaction_id,
+                 "userPublicKey": vote.sender_pubkey,
+                 "parentPostId": vote.post_id,
+                 "voteType": vote.vote,
+-            }}).to_string()),
++            }});
++                if let Some(protocol) = vote.protocol { result["vote"]["protocol"] = protocol.into(); }
++                Ok(result.to_string())
++            },
+             Ok(None) => Err(self.create_error_response("Vote not found", "NOT_FOUND")),
+             Err(error) => {
+                 log_error!("Failed to read exact vote: {}", error);
+@@ -1089,7 +1102,8 @@
                              replies_count: 0,
                              quotes_count: 0,
                              tips_count: None,
 -                            protocol: self.db.shared_rooms_enabled().then(|| "unknown".into()),
-+                            protocol: self.db.shared_protocols_enabled().then(|| "unknown".into()),
++                            protocol: k_vote_record.protocol.clone().or_else(|| self.db.shared_protocols_enabled().then(|| "unknown".into())),
 +                        poll: None,
                              up_votes_count: 0,
                              down_votes_count: 0,

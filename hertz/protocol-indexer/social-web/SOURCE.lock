@@ -433,7 +433,7 @@
     }
   ],
   "retained_root_candidate": {
-    "source_manifest": "8237426656475033d4f06417f10e40d4ea7c62c97f8a0a6c7702b193ccc57b44",
+    "source_manifest": "ab8ef7577eb36dd189db1ce260fc4afdca308de96a8df112ba1d135a220d536c",
     "files_sha256": {
       "Dockerfile": "d1550f68ca55212b88a41f46b813fbb601537ac4d78d5f49951fdeec5148b5ed",
       "prepare_web.py": "0cb299e6c0571ef905c6cfabea001615ad743b67c19027837ba8a36a649dd2be",
@@ -441,13 +441,13 @@
       "shared_rooms.rs": "e380a88f46ce39890867ddec1f15190da30491439df97727221fedad69cf47ef",
       "shared_room_tests.rs": "cc9f09366663e2bbc67fecdc1feeff7ea23d7234422bc1655958630925a65c52",
       "shared_reads.rs": "d590f54e3f5fb75d27d6b255413168f49354657f684de692ed08f7603d19be2d",
-      "shared_read_tests.rs": "4523ec1ace8affa93794516bb496b064f79ae083fe65fd4fdd7336e5ef2706d8",
+      "shared_read_tests.rs": "56dbd0714aaa41f74c328061e36064282f87aa0fc910d496730f8e03cd71786d",
       "shared-read-api.patch": "2dff5310a44038777cebd3883cabc492c1803def9b749a21244b23db9d5b7b37",
       "Cargo.lock": "0e62efc0e201eeacd8acc9cfc4df671a23c26a03e6254344723c8531a45959a7",
-      "tip_counts.rs": "85a95b3a096058cd61a4560418d76d7a627aa1b1ec2a0681cd4826b326c25efc",
+      "tip_counts.rs": "b0b22587a1085f53a573b6257a28f73fd2937397c1673baafd4137c0253a5818",
       "tip-counts.patch": "f5578664db2e7b60a39a5177a22040c54bdf503335d587720bf65ba7f99a98e0",
       "protocol-metadata.patch": "4663785b70909eaa66e5dfc1c78237480d66f362335214495f41d11546d94f58",
-      "unified-feed.patch": "4332caeaa83f86059a2ba5f6686b4906f5a018c6f8f834876d28c32e08d61aa8",
+      "unified-feed.patch": "36a5aec01ba66792efd49d1a274113bd5729993dfa82500785482e25bb130430",
       "shared_room_schema.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
       "shared_read_schema.sql": "09e5857ef0c47a609da2d5376a21ed8663cd9f5b227796c065cd0b5f32c1c8ff",
       "shared_edit_authorization.sql": "d42afbeecd7c96f716b0b38cc77b4255dd6445694f069d23147f8b64eb1edd89",
@@ -458,9 +458,9 @@
       "exact-vote-details.patch": "7e80616ccdf6148f45e6a5fe8d9a9d800c22fc5d4a26ba1ada323764560e4c48",
       "content-search.patch": "6eca1c9ec4584566c40404bc02009108d060e86e994d0311dbec33bcba96794d"
     },
-    "scope": "SDK-bound retained payload-root recovery; unchanged acceptance/native/notification state",
+    "scope": "SDK retained roots and vote-origin metadata on the same read snapshot",
     "local_unit_tests_passed": 9,
-    "local_postgres_contracts_passed": 27,
+    "local_postgres_contracts_passed": 28,
     "local_rust_version": "1.94.1",
     "local_postgres_version": "16.15",
     "build_accepted": false,
@@ -469,5 +469,45 @@
     "real_rpc_root_audit": false,
     "real_root_recovery_accepted": false,
     "public_cutover": false
-  }
+  },
+  "previous_retained_root_candidates": [
+    {
+      "source_manifest": "8237426656475033d4f06417f10e40d4ea7c62c97f8a0a6c7702b193ccc57b44",
+      "files_sha256": {
+        "Dockerfile": "d1550f68ca55212b88a41f46b813fbb601537ac4d78d5f49951fdeec5148b5ed",
+        "prepare_web.py": "0cb299e6c0571ef905c6cfabea001615ad743b67c19027837ba8a36a649dd2be",
+        "shared-api.patch": "fcb4d605ee1896b99e560cb6398c694fff1a5d31620992d33ad43081f2eb9814",
+        "shared_rooms.rs": "e380a88f46ce39890867ddec1f15190da30491439df97727221fedad69cf47ef",
+        "shared_room_tests.rs": "cc9f09366663e2bbc67fecdc1feeff7ea23d7234422bc1655958630925a65c52",
+        "shared_reads.rs": "d590f54e3f5fb75d27d6b255413168f49354657f684de692ed08f7603d19be2d",
+        "shared_read_tests.rs": "4523ec1ace8affa93794516bb496b064f79ae083fe65fd4fdd7336e5ef2706d8",
+        "shared-read-api.patch": "2dff5310a44038777cebd3883cabc492c1803def9b749a21244b23db9d5b7b37",
+        "Cargo.lock": "0e62efc0e201eeacd8acc9cfc4df671a23c26a03e6254344723c8531a45959a7",
+        "tip_counts.rs": "85a95b3a096058cd61a4560418d76d7a627aa1b1ec2a0681cd4826b326c25efc",
+        "tip-counts.patch": "f5578664db2e7b60a39a5177a22040c54bdf503335d587720bf65ba7f99a98e0",
+        "protocol-metadata.patch": "4663785b70909eaa66e5dfc1c78237480d66f362335214495f41d11546d94f58",
+        "unified-feed.patch": "4332caeaa83f86059a2ba5f6686b4906f5a018c6f8f834876d28c32e08d61aa8",
+        "shared_room_schema.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
+        "shared_read_schema.sql": "09e5857ef0c47a609da2d5376a21ed8663cd9f5b227796c065cd0b5f32c1c8ff",
+        "shared_edit_authorization.sql": "d42afbeecd7c96f716b0b38cc77b4255dd6445694f069d23147f8b64eb1edd89",
+        "shared_unquote_order.sql": "e972503ba710a99a9114f0f6dc9c71c110b67139c1ae4484d1d7404a9afa7235",
+        "shared_social_schema.sql": "5990ca135aa61c66ce20c4aceaf4460be8e3e08f739db8d744dbad33e809c1f8",
+        "shared_kaposts_schema.sql": "bfbeeafa815e05bb637dc1bac894eb3ebf5162afd1e242691617b0f89c1ca45d",
+        "historical-author-keys.patch": "ef2eed4659c5a52c9674843f9123c57fb60a88dec3acbb31fe5d2a7716c1e020",
+        "exact-vote-details.patch": "7e80616ccdf6148f45e6a5fe8d9a9d800c22fc5d4a26ba1ada323764560e4c48",
+        "content-search.patch": "6eca1c9ec4584566c40404bc02009108d060e86e994d0311dbec33bcba96794d"
+      },
+      "scope": "SDK-bound retained payload-root recovery; unchanged acceptance/native/notification state",
+      "local_unit_tests_passed": 9,
+      "local_postgres_contracts_passed": 27,
+      "local_rust_version": "1.94.1",
+      "local_postgres_version": "16.15",
+      "build_accepted": false,
+      "runtime_image": null,
+      "running": false,
+      "real_rpc_root_audit": false,
+      "real_root_recovery_accepted": false,
+      "public_cutover": false
+    }
+  ]
 }

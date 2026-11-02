@@ -1470,3 +1470,146 @@ async fn postgres_shared_reads_verified_retained_root_overrides_hint_and_stale_e
     assert!(db.get_stats().await.is_err());
     db.pool.close().await;
 }
+
+#[tokio::test]
+async fn postgres_shared_reads_vote_notifications_and_exact_receipts_preserve_actual_root_and_target()
+ {
+    let db = setup().await;
+    for (n, parent, root) in [(10, 1, "k"), (11, 2, "kchat")] {
+        post(&db.pool, parent, 1000 + parent as i64).await;
+        sqlx::query("UPDATE public.k_contents SET sender_pubkey=$2 WHERE transaction_id=$1")
+            .bind(id(parent))
+            .bind(viewer())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE social_shared.content_keys SET author=$2 WHERE transaction_id=$1")
+            .bind(id(parent))
+            .bind(viewer())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        action(
+            &db.pool,
+            n,
+            "k_votes",
+            format!("k_votes:{}", hex::encode(sig(n))),
+            "signed",
+            2000,
+        )
+        .await;
+        sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to($2,'UTF8'),'hex') WHERE transaction_id=$1")
+            .bind(id(n)).bind(format!("{root}:1:vote:fixture")).execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO public.k_votes(transaction_id,block_time,sender_pubkey,sender_signature,post_id,vote) VALUES($1,2000,$2,$3,$4,'upvote')")
+            .bind(id(n)).bind(author()).bind(sig(n)).bind(id(parent)).execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO social_shared.ordinary_vote_targets VALUES($1,$2)")
+            .bind(id(n))
+            .bind(id(parent))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        mention(&db.pool, n, "vote", viewer(), false).await;
+    }
+    let api = ApiHandlers::new(Arc::new(PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: db.shared.clone(),
+    }));
+    let notify: serde_json::Value = serde_json::from_str(
+        &api.get_notifications_paginated(&hex::encode(viewer()), 20, None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(notify["notifications"].as_array().unwrap().len(), 2);
+    for (n, parent, root) in [(10, 1, "k"), (11, 2, "kchat")] {
+        let notification = notify["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == json!(hex::encode(id(n))))
+            .unwrap();
+        assert_eq!(notification["protocol"], json!(root));
+        assert_eq!(notification["contentId"], json!(hex::encode(id(parent))));
+        assert!(notification.get("poll").is_none());
+        let exact: serde_json::Value = serde_json::from_str(
+            &api.get_vote_details(&hex::encode(id(n)), &hex::encode(author()))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(exact["vote"]["protocol"], json!(root));
+        assert_eq!(
+            exact["vote"]["parentPostId"],
+            json!(hex::encode(id(parent)))
+        );
+        assert!(
+            api.get_vote_details(&hex::encode(id(n)), &hex::encode(viewer()))
+                .await
+                .is_err(),
+            "a notification recipient cannot claim the sender's exact receipt"
+        );
+    }
+    let legacy = ApiHandlers::new(Arc::new(k_contract(&db)));
+    let old: serde_json::Value = serde_json::from_str(
+        &legacy
+            .get_notifications_paginated(&hex::encode(viewer()), 20, None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(old["notifications"].as_array().unwrap().len(), 1);
+    assert!(old["notifications"][0].get("protocol").is_none());
+    let old_exact: serde_json::Value = serde_json::from_str(
+        &legacy
+            .get_vote_details(&hex::encode(id(10)), &hex::encode(author()))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        old_exact["vote"].as_object().unwrap().len(),
+        4,
+        "legacy receipt keeps its original shape"
+    );
+    let import = "dd".repeat(32);
+    sqlx::query("INSERT INTO social_shared.retained_imports(import_id,network,source_id,protocol_hint,source_backup_sha256,inventory,native_records) VALUES($1,'testnet-10',$2,'k',$3,'{}',1)")
+        .bind(&import).bind(SOURCE).bind("ee".repeat(32)).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE social_shared.actions SET provenance='retained_native',retained_import_id=$2 WHERE transaction_id=$1")
+        .bind(id(11)).bind(&import).execute(&db.pool).await.unwrap();
+    sqlx::query("DELETE FROM protocol_indexer.canonical WHERE transaction_id=$1")
+        .bind(id(11))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let unknown: serde_json::Value = serde_json::from_str(
+        &api.get_vote_details(&hex::encode(id(11)), &hex::encode(author()))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unknown["vote"]["protocol"], json!("unknown"));
+    // Explicit reader proof fixture; native writer's SDK checks are separate.
+    sqlx::query("INSERT INTO social_shared.retained_wire_roots SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),'kchat',decode(repeat('ab',32),'hex'),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1")
+        .bind(id(11)).execute(&db.pool).await.unwrap();
+    let recovered: serde_json::Value = serde_json::from_str(
+        &api.get_vote_details(&hex::encode(id(11)), &hex::encode(author()))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovered["vote"]["protocol"], json!("kchat"));
+    sqlx::query(
+        "UPDATE protocol_indexer.canonical SET accepting_block=NULL WHERE transaction_id=$1",
+    )
+    .bind(id(10))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        api.get_vote_details(&hex::encode(id(10)), &hex::encode(author()))
+            .await
+            .is_err(),
+        "root metadata never rescues a revoked vote"
+    );
+    db.pool.close().await;
+}

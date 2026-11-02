@@ -49,6 +49,16 @@ impl TipCount for KReplyRecord {
         self.tips_count = Some(count);
     }
 }
+// Votes have a protocol but do not advertise a post's tip/poll metadata.
+impl TipCount for crate::models::KVoteRecord {
+    fn tip_content_id(&self) -> Option<&str> {
+        Some(&self.transaction_id)
+    }
+    fn set_tip_count(&mut self, _count: u64) {}
+    fn set_protocol(&mut self, protocol: String) {
+        self.protocol = Some(protocol);
+    }
+}
 impl TipCount for ContentRecord {
     fn set_poll(&mut self, poll: Option<crate::models::PollData>) {
         if let Self::Post(p) = self {
@@ -59,14 +69,14 @@ impl TipCount for ContentRecord {
         match self {
             Self::Post(p) => p.set_protocol(protocol),
             Self::Reply(p) => p.set_protocol(protocol),
-            _ => {}
+            Self::Vote(p) => p.set_protocol(protocol),
         }
     }
     fn tip_content_id(&self) -> Option<&str> {
         match self {
             Self::Post(p) => p.tip_content_id(),
             Self::Reply(p) => p.tip_content_id(),
-            _ => None,
+            Self::Vote(p) => p.tip_content_id(),
         }
     }
     fn set_tip_count(&mut self, count: u64) {
