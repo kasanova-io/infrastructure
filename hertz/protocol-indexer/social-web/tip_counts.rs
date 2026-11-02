@@ -19,9 +19,25 @@ pub(crate) trait TipCount {
     fn tip_content_id(&self) -> Option<&str>;
     fn set_tip_count(&mut self, count: u64);
     fn set_protocol(&mut self, protocol: String);
+    fn reference_content_id(&self) -> Option<&str> {
+        None
+    }
+    fn set_reference_protocol(&mut self, _protocol: String) {}
     fn set_poll(&mut self, _poll: Option<crate::models::PollData>) {}
 }
 impl TipCount for KPostRecord {
+    fn reference_content_id(&self) -> Option<&str> {
+        // Enrich only references whose content/author already passed the
+        // existing read view. Hidden or absent references reveal no metadata.
+        if self.referenced_message.is_some() && self.referenced_sender_pubkey.is_some() {
+            self.referenced_content_id.as_deref()
+        } else {
+            None
+        }
+    }
+    fn set_reference_protocol(&mut self, protocol: String) {
+        self.referenced_protocol = Some(protocol);
+    }
     fn set_poll(&mut self, poll: Option<crate::models::PollData>) {
         if poll.is_some() {
             self.content_type = Some("poll".into());
@@ -60,6 +76,17 @@ impl TipCount for crate::models::KVoteRecord {
     }
 }
 impl TipCount for ContentRecord {
+    fn reference_content_id(&self) -> Option<&str> {
+        match self {
+            Self::Post(p) => p.reference_content_id(),
+            _ => None,
+        }
+    }
+    fn set_reference_protocol(&mut self, protocol: String) {
+        if let Self::Post(p) = self {
+            p.set_reference_protocol(protocol);
+        }
+    }
     fn set_poll(&mut self, poll: Option<crate::models::PollData>) {
         if let Self::Post(p) = self {
             p.set_poll(poll);
@@ -88,6 +115,12 @@ impl TipCount for ContentRecord {
     }
 }
 impl TipCount for crate::models::NotificationContentRecord {
+    fn reference_content_id(&self) -> Option<&str> {
+        self.content.reference_content_id()
+    }
+    fn set_reference_protocol(&mut self, protocol: String) {
+        self.content.set_reference_protocol(protocol);
+    }
     fn tip_content_id(&self) -> Option<&str> {
         self.content.tip_content_id()
     }
@@ -159,7 +192,11 @@ impl PostgresDbManager {
         }
         let ids = items
             .iter()
-            .filter_map(|p| p.tip_content_id())
+            .flat_map(|p| {
+                p.tip_content_id()
+                    .into_iter()
+                    .chain(p.reference_content_id())
+            })
             .map(content_id)
             .collect::<DatabaseResult<Vec<_>>>()?;
         if ids.is_empty() {
@@ -213,7 +250,25 @@ impl PostgresDbManager {
                     .as_ref()
                     .is_some_and(|b| b.read_contract == crate::shared_rooms::ReadContract::Unified)
                 {
+                    let reference_protocol = if let Some(reference) = item.reference_content_id() {
+                        Some(
+                            counts
+                                .get(&content_id(reference)?)
+                                .ok_or_else(|| {
+                                    DatabaseError::QueryError(
+                                        "Missing quoted Social protocol".into(),
+                                    )
+                                })?
+                                .1
+                                .clone(),
+                        )
+                    } else {
+                        None
+                    };
                     item.set_protocol(protocol);
+                    if let Some(reference_protocol) = reference_protocol {
+                        item.set_reference_protocol(reference_protocol);
+                    }
                     item.set_poll(poll.clone());
                 }
             }

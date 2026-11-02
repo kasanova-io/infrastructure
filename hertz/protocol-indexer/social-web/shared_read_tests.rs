@@ -1613,3 +1613,105 @@ async fn postgres_shared_reads_vote_notifications_and_exact_receipts_preserve_ac
     );
     db.pool.close().await;
 }
+
+#[tokio::test]
+async fn postgres_shared_reads_quotes_keep_reference_protocol_separate_from_quote_protocol() {
+    let db = setup().await;
+    for n in [1, 2] {
+        post(&db.pool, n, 1000 + n as i64).await;
+    }
+    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:post:fixture','UTF8'),'hex') WHERE transaction_id=$1")
+        .bind(id(2)).execute(&db.pool).await.unwrap();
+    for (n, target, root) in [(10, 1, "kchat"), (11, 2, "k"), (12, 1, "k")] {
+        post(&db.pool, n, 2000 + n as i64).await;
+        sqlx::query("UPDATE public.k_contents SET content_type='quote',referenced_content_id=$2 WHERE transaction_id=$1")
+            .bind(id(n)).bind(id(target)).execute(&db.pool).await.unwrap();
+        sqlx::query("UPDATE social_shared.content_keys SET kind='quote',reference=$2 WHERE transaction_id=$1")
+            .bind(id(n)).bind(id(target)).execute(&db.pool).await.unwrap();
+        sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to($2,'UTF8'),'hex') WHERE transaction_id=$1")
+            .bind(id(n)).bind(format!("{root}:1:quote:fixture")).execute(&db.pool).await.unwrap();
+    }
+    let api = ApiHandlers::new(Arc::new(PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: db.shared.clone(),
+    }));
+    let requester = hex::encode(viewer());
+    for (n, target, own_root, reference_root) in [(10, 1, "kchat", "k"), (11, 2, "k", "kchat")] {
+        let result: serde_json::Value = serde_json::from_str(
+            &api.get_post_details(&hex::encode(id(n)), &requester)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["post"]["protocol"], json!(own_root));
+        assert_eq!(
+            result["post"]["quote"]["referencedProtocol"],
+            json!(reference_root)
+        );
+        assert_eq!(
+            result["post"]["quote"]["referencedContentId"],
+            json!(hex::encode(id(target)))
+        );
+    }
+    let legacy = ApiHandlers::new(Arc::new(k_contract(&db)));
+    let old: serde_json::Value = serde_json::from_str(
+        &legacy
+            .get_post_details(&hex::encode(id(12)), &requester)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(old["post"].get("protocol").is_none());
+    assert!(old["post"]["quote"].get("referencedProtocol").is_none());
+    let import = "ac".repeat(32);
+    sqlx::query("INSERT INTO social_shared.retained_imports(import_id,network,source_id,protocol_hint,source_backup_sha256,inventory,native_records) VALUES($1,'testnet-10',$2,'k',$3,'{}',1)")
+        .bind(&import).bind(SOURCE).bind("bc".repeat(32)).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE social_shared.actions SET provenance='retained_native',retained_import_id=$2 WHERE transaction_id=$1")
+        .bind(id(2)).bind(&import).execute(&db.pool).await.unwrap();
+    sqlx::query("DELETE FROM protocol_indexer.canonical WHERE transaction_id=$1")
+        .bind(id(2))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let unknown: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(11)), &requester)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unknown["post"]["protocol"], json!("k"));
+    assert_eq!(
+        unknown["post"]["quote"]["referencedProtocol"],
+        json!("unknown"),
+        "the quoting post's K root must not be inferred for its reference"
+    );
+    // Explicit reader fixture, not a chain or SDK proof.
+    sqlx::query("INSERT INTO social_shared.retained_wire_roots SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),'kchat',decode(repeat('ab',32),'hex'),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1")
+        .bind(id(2)).execute(&db.pool).await.unwrap();
+    let recovered: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(11)), &requester)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered["post"]["quote"]["referencedProtocol"],
+        json!("kchat")
+    );
+    sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,1,'{}',NULL)")
+        .bind(id(2))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let hidden: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(11)), &requester)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        hidden["post"].get("quote").is_none(),
+        "a revoked reference must not reveal content, author or protocol"
+    );
+    db.pool.close().await;
+}
