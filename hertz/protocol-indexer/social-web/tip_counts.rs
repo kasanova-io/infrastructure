@@ -19,6 +19,8 @@ pub(crate) trait TipCount {
     fn tip_content_id(&self) -> Option<&str>;
     fn set_tip_count(&mut self, count: u64);
     fn set_protocol(&mut self, protocol: String);
+    fn set_legacy_k_compatible(&mut self, _compatible: bool) {}
+    fn set_reference_legacy_k_compatible(&mut self, _compatible: bool) {}
     fn reference_content_id(&self) -> Option<&str> {
         None
     }
@@ -26,6 +28,12 @@ pub(crate) trait TipCount {
     fn set_poll(&mut self, _poll: Option<crate::models::PollData>) {}
 }
 impl TipCount for KPostRecord {
+    fn set_legacy_k_compatible(&mut self, compatible: bool) {
+        self.legacy_k_compatible = Some(compatible);
+    }
+    fn set_reference_legacy_k_compatible(&mut self, compatible: bool) {
+        self.referenced_legacy_k_compatible = Some(compatible);
+    }
     fn reference_content_id(&self) -> Option<&str> {
         // Enrich only references whose content/author already passed the
         // existing read view. Hidden or absent references reveal no metadata.
@@ -55,6 +63,9 @@ impl TipCount for KPostRecord {
     }
 }
 impl TipCount for KReplyRecord {
+    fn set_legacy_k_compatible(&mut self, compatible: bool) {
+        self.legacy_k_compatible = Some(compatible);
+    }
     fn set_protocol(&mut self, protocol: String) {
         self.protocol = Some(protocol);
     }
@@ -67,6 +78,9 @@ impl TipCount for KReplyRecord {
 }
 // Votes have a protocol but do not advertise a post's tip/poll metadata.
 impl TipCount for crate::models::KVoteRecord {
+    fn set_legacy_k_compatible(&mut self, compatible: bool) {
+        self.legacy_k_compatible = Some(compatible);
+    }
     fn tip_content_id(&self) -> Option<&str> {
         Some(&self.transaction_id)
     }
@@ -76,6 +90,18 @@ impl TipCount for crate::models::KVoteRecord {
     }
 }
 impl TipCount for ContentRecord {
+    fn set_legacy_k_compatible(&mut self, compatible: bool) {
+        match self {
+            Self::Post(p) => p.set_legacy_k_compatible(compatible),
+            Self::Reply(p) => p.set_legacy_k_compatible(compatible),
+            Self::Vote(p) => p.set_legacy_k_compatible(compatible),
+        }
+    }
+    fn set_reference_legacy_k_compatible(&mut self, compatible: bool) {
+        if let Self::Post(p) = self {
+            p.set_reference_legacy_k_compatible(compatible);
+        }
+    }
     fn reference_content_id(&self) -> Option<&str> {
         match self {
             Self::Post(p) => p.reference_content_id(),
@@ -115,6 +141,12 @@ impl TipCount for ContentRecord {
     }
 }
 impl TipCount for crate::models::NotificationContentRecord {
+    fn set_legacy_k_compatible(&mut self, compatible: bool) {
+        self.content.set_legacy_k_compatible(compatible);
+    }
+    fn set_reference_legacy_k_compatible(&mut self, compatible: bool) {
+        self.content.set_reference_legacy_k_compatible(compatible);
+    }
     fn reference_content_id(&self) -> Option<&str> {
         self.content.reference_content_id()
     }
@@ -204,7 +236,7 @@ impl PostgresDbManager {
         }
         // Preserve the actual namespace of the visible representative. Markers
         // and author identities cannot establish a post's transaction root.
-        let rows = sqlx::query("SELECT a.transaction_id,a.source_payload,a.provenance,proof.root AS retained_root,post.content_type,poll.options AS poll_options,poll.closes_at AS poll_closes_at,(SELECT COUNT(*)::bigint FROM social_shared.current_tips t WHERE t.content_transaction_id=a.transaction_id) AS tips_count FROM social_shared_api.current_actions a LEFT JOIN LATERAL (SELECT proof.root FROM social_shared.current_retained_wire_roots proof WHERE proof.transaction_id=a.transaction_id OFFSET 0) proof ON true LEFT JOIN social_shared_api.k_contents post USING(transaction_id) LEFT JOIN social_shared_api.current_polls poll ON poll.post_id=a.transaction_id WHERE a.transaction_id=ANY($1)")
+        let rows = sqlx::query("SELECT a.transaction_id,a.source_payload,a.provenance,proof.root AS retained_root,CASE WHEN a.provenance='retained_native' AND proof.root IS NULL THEN social_shared_legacy_api.is_k_member(a.transaction_id) ELSE false END AS legacy_k_member,post.content_type,poll.options AS poll_options,poll.closes_at AS poll_closes_at,(SELECT COUNT(*)::bigint FROM social_shared.current_tips t WHERE t.content_transaction_id=a.transaction_id) AS tips_count FROM social_shared_api.current_actions a LEFT JOIN LATERAL (SELECT proof.root FROM social_shared.current_retained_wire_roots proof WHERE proof.transaction_id=a.transaction_id OFFSET 0) proof ON true LEFT JOIN social_shared_api.k_contents post USING(transaction_id) LEFT JOIN social_shared_api.current_polls poll ON poll.post_id=a.transaction_id WHERE a.transaction_id=ANY($1)")
             .bind(&ids).fetch_all(&mut **read).await.map_err(lookup_error)?;
         let mut counts = HashMap::new();
         for row in rows {
@@ -215,6 +247,10 @@ impl PostgresDbManager {
                 row.get("provenance"),
                 row.get("retained_root"),
             )?;
+            // Membership preserves the pre-existing K action contract only; it
+            // never supplies missing original-wire evidence. Known roots win.
+            let legacy_k_compatible =
+                protocol == "unknown" && row.get::<bool, _>("legacy_k_member");
             let poll = if row.get::<Option<&str>, _>("content_type") == Some("poll") {
                 let options: String = row
                     .get::<Option<String>, _>("poll_options")
@@ -234,12 +270,12 @@ impl PostgresDbManager {
             };
             counts.insert(
                 row.get::<Vec<u8>, _>("transaction_id"),
-                (count, protocol, poll),
+                (count, protocol, poll, legacy_k_compatible),
             );
         }
         for item in items {
             if let Some(id) = item.tip_content_id() {
-                let (count, protocol, poll) = counts
+                let (count, protocol, poll, legacy_k_compatible) = counts
                     .get(&content_id(id)?)
                     .ok_or_else(|| DatabaseError::QueryError("Missing Social protocol".into()))?;
                 let count = *count;
@@ -250,6 +286,7 @@ impl PostgresDbManager {
                     .as_ref()
                     .is_some_and(|b| b.read_contract == crate::shared_rooms::ReadContract::Unified)
                 {
+                    item.set_legacy_k_compatible(*legacy_k_compatible);
                     let reference_protocol = if let Some(reference) = item.reference_content_id() {
                         Some(
                             counts
@@ -259,15 +296,15 @@ impl PostgresDbManager {
                                         "Missing quoted Social protocol".into(),
                                     )
                                 })?
-                                .1
                                 .clone(),
                         )
                     } else {
                         None
                     };
                     item.set_protocol(protocol);
-                    if let Some(reference_protocol) = reference_protocol {
+                    if let Some((_, reference_protocol, _, compatible)) = reference_protocol {
                         item.set_reference_protocol(reference_protocol);
+                        item.set_reference_legacy_k_compatible(compatible);
                     }
                     item.set_poll(poll.clone());
                 }

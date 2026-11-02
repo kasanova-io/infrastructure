@@ -179,3 +179,6 @@ Retained SDK snapshots reconstructed from an import hint report `unknown` until
 their actual payload is recovered. Counts and read-only history remain available.
 Legacy readers omit the additive field. This metadata alone is not write or
 public-cutover acceptance; the current candidate's verdict is in `SOURCE.lock`.
+
+
+Unified reads expose `legacyKCompatible` separately from `protocol`: an unknown-wire retained item may keep the established K-only action contract only while `social_shared_legacy_api.is_k_member` permits it. This is dataset compatibility, never original-wire proof. Known roots always win. Visible quote references carry their own `referencedLegacyKCompatible`; hidden references reveal neither field. Both are evaluated on the same bounded repeatable-read snapshot, with current source/pending/revocation/stale-proof fences. Legacy API DTOs omit these additive fields.

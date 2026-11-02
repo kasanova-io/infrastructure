@@ -20,39 +20,56 @@
 
 --- a/K-webserver/src/models.rs
 +++ b/K-webserver/src/models.rs
-@@ -71,6 +71,8 @@
+@@ -71,6 +71,10 @@
      pub tips_count: Option<u64>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub protocol: Option<String>,
++    #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub legacy_k_compatible: Option<bool>,
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub poll: Option<PollData>,
      pub is_upvoted: Option<bool>,
      pub is_downvoted: Option<bool>,
      pub user_nickname: Option<String>,
-@@ -81,6 +83,8 @@
+@@ -81,6 +85,10 @@
      pub referenced_sender_pubkey: Option<String>,
      pub referenced_nickname: Option<String>,
      pub referenced_profile_image: Option<String>,
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub referenced_protocol: Option<String>,
++    #[serde(rename = "referencedLegacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub referenced_legacy_k_compatible: Option<bool>,
  }
 
  #[derive(Debug, Serialize, Deserialize, Clone)]
-@@ -142,6 +146,8 @@
+@@ -113,6 +121,8 @@
+     pub tips_count: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub protocol: Option<String>,
++    #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub legacy_k_compatible: Option<bool>,
+     pub is_upvoted: Option<bool>,
+     pub is_downvoted: Option<bool>,
+     pub user_nickname: Option<String>,
+@@ -142,6 +152,10 @@
      pub voted_content: Option<String>,
      pub user_nickname: Option<String>,
      pub user_profile_image: Option<String>,
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub protocol: Option<String>,
++    #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub legacy_k_compatible: Option<bool>,
  }
 
  // Merged content record for unified content retrieval
-@@ -176,6 +182,15 @@
+@@ -176,6 +190,17 @@
          skip_serializing_if = "Option::is_none"
      )]
      pub referenced_profile_image: Option<String>,
 +    #[serde(rename = "referencedProtocol", default, skip_serializing_if = "Option::is_none")]
 +    pub referenced_protocol: Option<String>,
++    #[serde(rename = "referencedLegacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub referenced_legacy_k_compatible: Option<bool>,
 +}
 +
 +#[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,43 +80,49 @@
  }
 
  // API Response models
-@@ -200,6 +215,8 @@
+@@ -200,6 +225,10 @@
      pub tips_count: Option<u64>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub protocol: Option<String>,
++    #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub legacy_k_compatible: Option<bool>,
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub poll: Option<PollData>,
      #[serde(rename = "repostsCount")]
      pub reposts_count: u64,
      #[serde(rename = "parentPostId")]
-@@ -419,6 +436,7 @@
+@@ -419,6 +448,8 @@
              record.referenced_sender_pubkey.as_ref(),
          ) {
              Some(QuoteData {
 +                referenced_protocol: record.referenced_protocol.clone(),
++                referenced_legacy_k_compatible: record.referenced_legacy_k_compatible,
                  referenced_content_id: ref_id.clone(),
                  referenced_message: ref_msg.clone(),
                  referenced_sender_pubkey: ref_pubkey.clone(),
-@@ -443,6 +461,7 @@
+@@ -443,6 +474,8 @@
              quotes_count: record.quotes_count.unwrap_or(0),
              tips_count: record.tips_count,
              protocol: record.protocol.clone(),
++            legacy_k_compatible: record.legacy_k_compatible,
 +            poll: if is_blocked { None } else { record.poll.clone() },
              reposts_count: 0,
              parent_post_id: None,
              mentioned_pubkeys: record.mentioned_pubkeys.clone(),
-@@ -478,6 +497,10 @@
+@@ -478,6 +511,12 @@
      #[serde(skip_serializing_if = "Option::is_none")]
      pub post_id: Option<String>, // The post ID that the vote refers to
      pub voted_content: Option<String>,   // Content of the post/reply being voted on
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub protocol: Option<String>,
++    #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
++    pub legacy_k_compatible: Option<bool>,
 +    #[serde(default, skip_serializing_if = "Option::is_none")]
 +    pub poll: Option<PollData>,
  }
 
  impl NotificationPost {
-@@ -487,7 +510,9 @@
+@@ -487,7 +526,9 @@
          mention_block_time: u64,
      ) -> Self {
          // Determine content type - if referenced_content_id is set, it's a quote
@@ -110,37 +133,41 @@
              "quote".to_string()
          } else {
              "post".to_string()
-@@ -507,6 +532,8 @@
+@@ -507,6 +548,9 @@
              content_id: None,
              post_id: None,
              voted_content: None,
 +            protocol: record.protocol.clone(),
++            legacy_k_compatible: record.legacy_k_compatible,
 +            poll: record.poll.clone(),
          }
      }
 
-@@ -529,6 +556,8 @@
+@@ -529,6 +573,9 @@
              content_id: None,
              post_id: None,
              voted_content: None,
 +            protocol: record.protocol.clone(),
++            legacy_k_compatible: record.legacy_k_compatible,
 +            poll: None,
          }
      }
 
-@@ -554,6 +583,8 @@
+@@ -554,6 +601,9 @@
              content_id: Some(vote_record.post_id.clone()),
              post_id: None,
              voted_content: Some(voted_content),
 +            protocol: vote_record.protocol.clone(),
++            legacy_k_compatible: vote_record.legacy_k_compatible,
 +            poll: None,
          }
      }
  }
-@@ -595,6 +626,7 @@
+@@ -595,6 +645,8 @@
              quotes_count: record.quotes_count.unwrap_or(0),
              tips_count: record.tips_count,
              protocol: record.protocol.clone(),
++            legacy_k_compatible: record.legacy_k_compatible,
 +            poll: None,
              reposts_count: 0,
              parent_post_id: Some(record.post_id.clone()),
@@ -183,23 +210,25 @@
                     ps.replies_count, ps.quotes_count, ps.up_votes_count, ps.down_votes_count,
                     ps.is_upvoted, ps.is_downvoted,
                     COALESCE(b.base64_encoded_nickname, '') as user_nickname,
-@@ -1450,6 +1451,7 @@
+@@ -1450,6 +1451,8 @@
              let mentioned_pubkeys_array: Vec<String> = row.get("mentioned_pubkeys");
 
              let post_record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                  id: row.get::<i64, _>("id"),
                  transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                  block_time: row.get::<i64, _>("block_time") as u64,
-@@ -1462,6 +1464,7 @@
+@@ -1462,6 +1465,8 @@
                  quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                  tips_count: None,
                  protocol: None,
++                legacy_k_compatible: None,
 +                    poll: None,
                  up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                  down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                  is_upvoted: Some(row.get("is_upvoted")),
-@@ -1547,7 +1550,7 @@
+@@ -1547,7 +1552,7 @@
                  INNER JOIN k_follows kf ON kf.followed_user_pubkey = c.sender_pubkey
                  LEFT JOIN k_blocks kb ON kb.sender_pubkey = $1 AND kb.blocked_user_pubkey = c.sender_pubkey
                  WHERE kf.sender_pubkey = $1
@@ -208,23 +237,25 @@
                    AND kb.blocked_user_pubkey IS NULL{cursor_conditions}
                  {order_clause}
                  LIMIT ${limit_param}
-@@ -1674,6 +1677,7 @@
+@@ -1674,6 +1679,8 @@
                  row.try_get("referenced_profile_image").ok();
 
              let record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                  id: row.get::<i64, _>("id"),
                  transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                  block_time: row.get::<i64, _>("block_time") as u64,
-@@ -1688,6 +1692,7 @@
+@@ -1688,6 +1695,8 @@
                  quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                  tips_count: None,
                  protocol: None,
++                legacy_k_compatible: None,
 +                    poll: None,
                  is_upvoted: Some(row.get("is_upvoted")),
                  is_downvoted: Some(row.get("is_downvoted")),
                  user_nickname: Some(row.get("user_nickname")),
-@@ -1816,10 +1821,10 @@
+@@ -1816,10 +1825,10 @@
                      mc.sender_signature, mc.base64_encoded_message, mc.referenced_content_id,
 
                      -- Replies count (only applicable for posts and quotes, not replies)
@@ -237,7 +268,7 @@
 
                      -- Vote statistics
                      COALESCE(v.up_votes_count, 0) as up_votes_count,
-@@ -1834,18 +1839,18 @@
+@@ -1834,18 +1843,18 @@
                      SELECT referenced_content_id, COUNT(*) as replies_count
                      FROM k_contents r
                      WHERE r.content_type = 'reply'
@@ -260,7 +291,7 @@
 
                  -- Optimized vote aggregation with user vote in single query
                  LEFT JOIN (
-@@ -1965,8 +1970,9 @@
+@@ -1965,8 +1974,10 @@
              let mentioned_pubkeys_array: Vec<String> = row.get("mentioned_pubkeys");
 
              let content_record = match content_type {
@@ -268,28 +299,39 @@
 +                "post" | "quote" | "poll" => {
                      let post_record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                          id: row.get::<i64, _>("id"),
                          transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                          block_time: row.get::<i64, _>("block_time") as u64,
-@@ -1979,6 +1985,7 @@
+@@ -1979,6 +1990,8 @@
                          quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                          tips_count: None,
                          protocol: None,
++                        legacy_k_compatible: None,
 +                    poll: None,
                          up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                          down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                          is_upvoted: Some(row.get("is_upvoted")),
-@@ -2067,7 +2074,8 @@
+@@ -2018,6 +2031,7 @@
+                         quotes_count: None,
+                         tips_count: None,
+                         protocol: None,
++                        legacy_k_compatible: None,
+                         up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                         down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                         is_upvoted: Some(row.get("is_upvoted")),
+@@ -2067,7 +2081,9 @@
          .fetch_optional(&mut *read)
          .await
          .map_err(|error| DatabaseError::QueryError(error.to_string()))?;
 -        Ok(row.map(|row| KVoteRecord {
 +        let mut votes = row.map(|row| KVoteRecord {
 +            protocol: None,
++            legacy_k_compatible: None,
              id: row.get("id"),
              transaction_id: Self::encode_bytes_to_hex(&row.get::<Vec<u8>, _>("transaction_id")),
              block_time: row.get::<i64, _>("block_time") as u64,
-@@ -2079,7 +2087,9 @@
+@@ -2079,7 +2095,9 @@
              voted_content: None,
              user_nickname: None,
              user_profile_image: None,
@@ -300,7 +342,7 @@
      }
 
      async fn get_content_by_id(
-@@ -2199,7 +2209,7 @@
+@@ -2199,7 +2217,7 @@
          let is_blocked: bool = row.get("is_blocked");
 
          let mut content_record = match content_type {
@@ -309,23 +351,49 @@
                  let mentioned_pubkeys_bytes: Vec<Vec<u8>> = row.get("mentioned_pubkeys");
                  let mentioned_pubkeys: Vec<String> = mentioned_pubkeys_bytes
                      .into_iter()
-@@ -2207,6 +2217,7 @@
+@@ -2207,6 +2225,8 @@
                      .collect();
 
                  let post_record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                      id: row.get("id"),
                      transaction_id: hex::encode(row.get::<Vec<u8>, _>("transaction_id")),
                      block_time: row.get::<i64, _>("block_time") as u64,
-@@ -2219,6 +2230,7 @@
+@@ -2219,6 +2239,8 @@
                      quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                      tips_count: None,
                      protocol: None,
++                    legacy_k_compatible: None,
 +                    poll: None,
                      up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                      down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                      is_upvoted: Some(row.get("is_upvoted")),
-@@ -2816,7 +2828,7 @@
+@@ -2265,6 +2287,7 @@
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                     tips_count: None,
+                     protocol: None,
++                    legacy_k_compatible: None,
+                     up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                     down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                     is_upvoted: Some(row.get("is_upvoted")),
+@@ -2501,6 +2524,7 @@
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
+                 protocol: None,
++                legacy_k_compatible: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2736,6 +2760,7 @@
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
+                 protocol: None,
++                legacy_k_compatible: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2816,7 +2841,7 @@
                         c.sender_signature, c.base64_encoded_message, c.content_type,
                         c.referenced_content_id
                  FROM k_contents c
@@ -334,7 +402,7 @@
                  {order_clause}
                  LIMIT ${limit_param}
              ),
-@@ -2881,7 +2893,7 @@
+@@ -2881,7 +2906,7 @@
                      ARRAY(
                          SELECT encode(m.mentioned_pubkey, 'hex')
                          FROM k_mentions m
@@ -343,23 +411,25 @@
                      ),
                      '{{}}'::text[]
                  ) as mentioned_pubkeys,
-@@ -2977,6 +2989,7 @@
+@@ -2977,6 +3002,8 @@
              let mentioned_pubkeys_array: Vec<String> = row.get("mentioned_pubkeys");
 
              let post_record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                  id: row.get::<i64, _>("id"),
                  transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                  block_time: row.get::<i64, _>("block_time") as u64,
-@@ -2989,6 +3002,7 @@
+@@ -2989,6 +3016,8 @@
                  quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                  tips_count: None,
                  protocol: None,
++                legacy_k_compatible: None,
 +                    poll: None,
                  up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
                  down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
                  is_upvoted: Some(row.get("is_upvoted")),
-@@ -3163,6 +3177,7 @@
+@@ -3163,6 +3192,7 @@
                          WHEN 'post' THEN c.id
                          WHEN 'reply' THEN c.id
                          WHEN 'quote' THEN c.id
@@ -367,7 +437,7 @@
                          WHEN 'vote' THEN v.id
                      END as id,
                      fn.content_id as transaction_id,
-@@ -3172,6 +3187,7 @@
+@@ -3172,6 +3202,7 @@
                          WHEN 'post' THEN c.base64_encoded_message
                          WHEN 'reply' THEN c.base64_encoded_message
                          WHEN 'quote' THEN c.base64_encoded_message
@@ -375,7 +445,7 @@
                          WHEN 'vote' THEN ''
                      END as base64_encoded_message,
                      fn.notification_id,
-@@ -3188,7 +3204,7 @@
+@@ -3188,7 +3219,7 @@
                      encode(fn.referenced_content_id, 'hex') as quoted_content_id,
                      CASE WHEN fn.notification_type = 'quote' THEN original.base64_encoded_message ELSE NULL END as quoted_content_message
                  FROM filtered_notifications fn
@@ -384,7 +454,7 @@
                  LEFT JOIN k_votes v ON fn.content_type = 'vote' AND fn.content_id = v.transaction_id
                  -- Get user profile for sender
                  LEFT JOIN LATERAL (
-@@ -3252,8 +3268,9 @@
+@@ -3252,8 +3283,10 @@
              let notification_id: i64 = row.get("notification_id");
              let block_time: i64 = row.get("block_time");
 
@@ -392,42 +462,55 @@
 +            if content_type == "post" || content_type == "poll" {
                  let post_record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                      id: row.get::<i64, _>("id"),
                      transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                      block_time: row.get::<i64, _>("block_time") as u64,
-@@ -3270,6 +3287,7 @@
+@@ -3270,6 +3303,8 @@
                      quotes_count: None,
                      tips_count: None,
                      protocol: None,
++                    legacy_k_compatible: None,
 +                    poll: None,
                      user_nickname: Some(row.get("user_nickname")),
                      user_profile_image: row.get("user_profile_image"),
                      referenced_content_id: None,
-@@ -3290,6 +3308,7 @@
+@@ -3290,6 +3325,8 @@
                  let quoted_content_message: Option<String> = row.get("quoted_content_message");
 
                  let post_record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                      id: row.get::<i64, _>("id"),
                      transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                      block_time: row.get::<i64, _>("block_time") as u64,
-@@ -3306,6 +3325,7 @@
+@@ -3306,6 +3343,8 @@
                      quotes_count: None,
                      tips_count: None,
                      protocol: None,
++                    legacy_k_compatible: None,
 +                    poll: None,
                      user_nickname: Some(row.get("user_nickname")),
                      user_profile_image: row.get("user_profile_image"),
                      referenced_content_id: quoted_content_id,
-@@ -3350,6 +3370,7 @@
+@@ -3335,6 +3374,7 @@
+                     quotes_count: None,
+                     tips_count: None,
+                     protocol: None,
++                    legacy_k_compatible: None,
+                     up_votes_count: None,
+                     down_votes_count: None,
+                     is_upvoted: None,
+@@ -3350,6 +3390,8 @@
                  });
              } else if content_type == "vote" {
                  let vote_record = KVoteRecord {
 +                    protocol: None,
++                    legacy_k_compatible: None,
                      id: row.get::<i64, _>("id"),
                      transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                      block_time: row.get::<i64, _>("block_time") as u64,
-@@ -3398,6 +3419,8 @@
+@@ -3398,6 +3440,8 @@
              ));
          }
 
@@ -436,7 +519,7 @@
          Ok(PaginatedResult {
              items: notifications,
              pagination,
-@@ -3517,7 +3540,7 @@
+@@ -3517,7 +3561,7 @@
                  INNER JOIN k_hashtags h ON h.content_id = c.transaction_id
                  LEFT JOIN k_blocks kb ON kb.sender_pubkey = $1 AND kb.blocked_user_pubkey = c.sender_pubkey
                  WHERE h.hashtag = $2
@@ -445,35 +528,38 @@
                    AND kb.blocked_user_pubkey IS NULL{cursor_conditions}
                  {order_clause}
                  LIMIT ${limit_param}
-@@ -3646,6 +3669,7 @@
+@@ -3646,6 +3690,8 @@
                  row.try_get("referenced_profile_image").ok();
 
              let record = KPostRecord {
 +                    referenced_protocol: None,
++                    referenced_legacy_k_compatible: None,
                  id: row.get::<i64, _>("id"),
                  transaction_id: Self::encode_bytes_to_hex(&transaction_id),
                  block_time: row.get::<i64, _>("block_time") as u64,
-@@ -3660,6 +3684,7 @@
+@@ -3660,6 +3706,8 @@
                  quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
                  tips_count: None,
                  protocol: None,
++                legacy_k_compatible: None,
 +                    poll: None,
                  is_upvoted: Some(row.get("is_upvoted")),
                  is_downvoted: Some(row.get("is_downvoted")),
                  user_nickname: Some(row.get("user_nickname")),
 --- a/K-webserver/src/api_handlers.rs
 +++ b/K-webserver/src/api_handlers.rs
-@@ -834,7 +834,8 @@
+@@ -834,7 +834,9 @@
                          replies_count: 0,
                          quotes_count: 0,
                          tips_count: None,
 -                        protocol: self.db.shared_rooms_enabled().then(|| "unknown".into()),
 +                        protocol: _vote_record.protocol.clone().or_else(|| self.db.shared_protocols_enabled().then(|| "unknown".into())),
++                        legacy_k_compatible: _vote_record.legacy_k_compatible,
 +                        poll: None,
                          up_votes_count: 0,
                          down_votes_count: 0,
                          reposts_count: 0,
-@@ -928,7 +929,7 @@
+@@ -928,7 +930,7 @@
          };
 
          // Convert NotificationContentRecords to NotificationPost with correct mention cursors
@@ -482,7 +568,7 @@
              .items
              .iter()
              .map(|notification_record| match &notification_record.content {
-@@ -960,6 +961,14 @@
+@@ -960,6 +962,14 @@
              })
              .collect();
 
@@ -497,7 +583,7 @@
          let pagination = notifications_result.pagination;
 
          let response = PaginatedNotificationsResponse {
-@@ -996,12 +1005,16 @@
+@@ -996,12 +1006,17 @@
              ));
          }
          match self.db.get_vote_by_id(vote_id, requester_pubkey).await {
@@ -511,17 +597,19 @@
 -            }}).to_string()),
 +            }});
 +                if let Some(protocol) = vote.protocol { result["vote"]["protocol"] = protocol.into(); }
++                if let Some(compatible) = vote.legacy_k_compatible { result["vote"]["legacyKCompatible"] = compatible.into(); }
 +                Ok(result.to_string())
 +            },
              Ok(None) => Err(self.create_error_response("Vote not found", "NOT_FOUND")),
              Err(error) => {
                  log_error!("Failed to read exact vote: {}", error);
-@@ -1089,7 +1102,8 @@
+@@ -1089,7 +1104,9 @@
                              replies_count: 0,
                              quotes_count: 0,
                              tips_count: None,
 -                            protocol: self.db.shared_rooms_enabled().then(|| "unknown".into()),
 +                            protocol: k_vote_record.protocol.clone().or_else(|| self.db.shared_protocols_enabled().then(|| "unknown".into())),
++                            legacy_k_compatible: k_vote_record.legacy_k_compatible,
 +                        poll: None,
                              up_votes_count: 0,
                              down_votes_count: 0,

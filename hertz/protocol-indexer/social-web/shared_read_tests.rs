@@ -341,6 +341,21 @@ async fn postgres_shared_reads_legacy_import_membership_never_claims_actual_wire
     let old = legacy.get_all_posts(&requester, options(20)).await.unwrap();
     assert_eq!(old.items.len(), 1);
     assert!(old.items[0].protocol.is_none());
+    assert!(old.items[0].legacy_k_compatible.is_none());
+    let mixed = feed(&db).await;
+    assert_eq!(mixed[0].legacy_k_compatible, Some(true));
+    let api = ApiHandlers::new(Arc::new(PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: db.shared.clone(),
+    }));
+    let dto: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(1)), &requester)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dto["post"]["protocol"], json!("unknown"));
+    assert_eq!(dto["post"]["legacyKCompatible"], json!(true));
     assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
     sqlx::query(
         "UPDATE social_shared.retained_imports SET protocol_hint='kchat' WHERE import_id=$1",
@@ -358,11 +373,25 @@ async fn postgres_shared_reads_legacy_import_membership_never_claims_actual_wire
             .is_empty()
     );
     assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(false));
     sqlx::query("UPDATE social_shared.retained_imports SET protocol_hint='k' WHERE import_id=$1")
         .bind(&import)
         .execute(&db.pool)
         .await
         .unwrap();
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(true));
+    sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(feed(&db).await.is_empty());
+    sqlx::query("DELETE FROM protocol_indexer.pending WHERE transaction_id=$1")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(true));
     sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,1,'{}',NULL)")
         .bind(id(1))
         .execute(&db.pool)
@@ -388,6 +417,7 @@ async fn postgres_shared_reads_legacy_import_membership_never_claims_actual_wire
         .await
         .unwrap();
     assert!(legacy.get_all_posts(&requester, options(20)).await.is_err());
+    assert!(db.get_all_posts(&requester, options(20)).await.is_err());
     db.pool.close().await;
 }
 
@@ -808,6 +838,10 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
     // original DTO field and exclusive cursor comparison against legacy.
     for post in a["posts"].as_array_mut().unwrap() {
         assert_eq!(
+            post.as_object_mut().unwrap().remove("legacyKCompatible"),
+            Some(json!(false))
+        );
+        assert_eq!(
             post.as_object_mut().unwrap().remove("protocol"),
             Some(json!("k"))
         );
@@ -827,6 +861,10 @@ async fn postgres_shared_reads_feed_and_search_keep_existing_json_and_tied_curso
         .unwrap();
     let mut a: serde_json::Value = serde_json::from_str(&a).unwrap();
     for post in a["posts"].as_array_mut().unwrap() {
+        assert_eq!(
+            post.as_object_mut().unwrap().remove("legacyKCompatible"),
+            Some(json!(false))
+        );
         assert_eq!(
             post.as_object_mut().unwrap().remove("protocol"),
             Some(json!("k"))
@@ -1418,12 +1456,14 @@ async fn postgres_shared_reads_verified_retained_root_overrides_hint_and_stale_e
         .await
         .unwrap();
     assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(true));
     assert_eq!(feed(&k_contract(&db)).await.len(), 1);
     // Reader materialization fixture only. The owning native tests prove that
     // only an SDK body/ID + retained-fields match is accepted by the writer.
     sqlx::query("INSERT INTO social_shared.retained_wire_roots SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),'kchat',decode(repeat('ab',32),'hex'),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1")
         .bind(id(1)).execute(&db.pool).await.unwrap();
     assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("kchat"));
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(false));
     assert!(
         feed(&k_contract(&db)).await.is_empty(),
         "a proven KaChat root overrides the legacy import hint before pagination"
@@ -1431,6 +1471,7 @@ async fn postgres_shared_reads_verified_retained_root_overrides_hint_and_stale_e
     sqlx::query("UPDATE social_shared.actions SET source_payload=source_payload||'00' WHERE transaction_id=$1")
         .bind(id(1)).execute(&db.pool).await.unwrap();
     assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("unknown"));
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(false));
     assert!(
         feed(&k_contract(&db)).await.is_empty(),
         "a stale proof must not silently restore a K-only classification"
@@ -1443,6 +1484,7 @@ async fn postgres_shared_reads_verified_retained_root_overrides_hint_and_stale_e
     .await
     .unwrap();
     assert_eq!(feed(&db).await[0].protocol.as_deref(), Some("kchat"));
+    assert_eq!(feed(&db).await[0].legacy_k_compatible, Some(false));
     sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,1,'{}',NULL)")
         .bind(id(1))
         .execute(&db.pool)
@@ -1588,6 +1630,21 @@ async fn postgres_shared_reads_vote_notifications_and_exact_receipts_preserve_ac
     )
     .unwrap();
     assert_eq!(unknown["vote"]["protocol"], json!("unknown"));
+    assert_eq!(unknown["vote"]["legacyKCompatible"], json!(true));
+    let notices: serde_json::Value = serde_json::from_str(
+        &api.get_notifications_paginated(&hex::encode(viewer()), 20, None, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let notice = notices["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(hex::encode(id(11))))
+        .unwrap();
+    assert_eq!(notice["protocol"], json!("unknown"));
+    assert_eq!(notice["legacyKCompatible"], json!(true));
     // Explicit reader proof fixture; native writer's SDK checks are separate.
     sqlx::query("INSERT INTO social_shared.retained_wire_roots SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),'kchat',decode(repeat('ab',32),'hex'),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1")
         .bind(id(11)).execute(&db.pool).await.unwrap();
@@ -1598,6 +1655,7 @@ async fn postgres_shared_reads_vote_notifications_and_exact_receipts_preserve_ac
     )
     .unwrap();
     assert_eq!(recovered["vote"]["protocol"], json!("kchat"));
+    assert_eq!(recovered["vote"]["legacyKCompatible"], json!(false));
     sqlx::query(
         "UPDATE protocol_indexer.canonical SET accepting_block=NULL WHERE transaction_id=$1",
     )
@@ -1685,6 +1743,10 @@ async fn postgres_shared_reads_quotes_keep_reference_protocol_separate_from_quot
         json!("unknown"),
         "the quoting post's K root must not be inferred for its reference"
     );
+    assert_eq!(
+        unknown["post"]["quote"]["referencedLegacyKCompatible"],
+        json!(true)
+    );
     // Explicit reader fixture, not a chain or SDK proof.
     sqlx::query("INSERT INTO social_shared.retained_wire_roots SELECT transaction_id,retained_import_id,revision,original_time,sha256(convert_to(source_payload,'UTF8')),'kchat',decode(repeat('ab',32),'hex'),'01b532e8b553523216471682649693af92f0fd16' FROM social_shared.actions WHERE transaction_id=$1")
         .bind(id(2)).execute(&db.pool).await.unwrap();
@@ -1697,6 +1759,10 @@ async fn postgres_shared_reads_quotes_keep_reference_protocol_separate_from_quot
     assert_eq!(
         recovered["post"]["quote"]["referencedProtocol"],
         json!("kchat")
+    );
+    assert_eq!(
+        recovered["post"]["quote"]["referencedLegacyKCompatible"],
+        json!(false)
     );
     sqlx::query("INSERT INTO protocol_indexer.canonical VALUES($1,1,'{}',NULL)")
         .bind(id(2))
