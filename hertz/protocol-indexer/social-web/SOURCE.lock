@@ -598,13 +598,22 @@
     "local_rust_version": "1.94.1",
     "local_postgres_version": "16.15",
     "local_postgres_contracts_passed": 29,
-    "build_accepted": false,
-    "running": false,
+    "build_accepted": true,
+    "running": true,
     "public_cutover": false,
-    "real_history_api_accepted": false,
+    "real_history_api_accepted": true,
     "provider_delivery_accepted": false,
     "physical_device_accepted": false,
     "complete_history_verified": false,
-    "local_unit_tests_passed": 9
+    "local_unit_tests_passed": 9,
+    "activation_scope": "owned private DEV unified reader only; legacy API/native/13 actors unchanged; no public route",
+    "runtime_image": "sha256:1280cb1bfd79769d105a85c073eab1d84ae4700c53cf4029c1e1ebad16fd6215",
+    "contract_image": "sha256:0414da518c84869d25aa43fc638c496c9d365daa6ef5b87cea3490cb3a519c25",
+    "postgres_contracts_accepted": true,
+    "postgres_contracts_passed": 29,
+    "real_api_requests_passed": 38,
+    "retained_parent_tip_count_preserved": 2,
+    "runtime_evidence": "legacy-action-compatibility-runtime-v1-evidence.json",
+    "runtime_evidence_sha256": "ec1caa2ba0d8657fa952e8bf0018709a87aa9eec970ab6998fb899291c09d075"
   }
 }
