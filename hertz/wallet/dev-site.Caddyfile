@@ -1,0 +1,113 @@
+{
+    admin off
+    auto_https off
+}
+
+# DEV browser testing uses its existing read-only credential. This is an
+# explicit public-data allowlist, never a general authenticated API proxy.
+(wallet-browser-read-proxy) {
+    reverse_proxy {$PUBLIC_UPSTREAM} {
+        header_up -*
+        header_up Host {$PUBLIC_API_HOST}
+        header_up User-Agent KasanovaBrowserWallet/0.9.0
+        header_up Accept application/json
+        header_up X-Platform web
+        header_up X-App-Version {$PLATFORM_APP_VERSION}
+        header_up X-API-Key {$PUBLIC_CONFIG_API_KEY}
+    }
+}
+
+:8080 {
+    root * /srv
+    encode gzip zstd
+    header Cache-Control "no-cache"
+
+    # Configuration stays anonymous: no user/QA override headers or query.
+    @configuration {
+        method GET
+        path /backend/api/v1/environment /backend/api/v1/features /backend/api/v1/about-kaspa-links /backend/api/v1/news/sources
+    }
+    handle @configuration {
+        route {
+            uri strip_prefix /backend
+            rewrite * {path}?
+            import wallet-browser-read-proxy
+        }
+    }
+
+    @tokenRails {
+        method GET
+        path_regexp rails ^/backend/api/v1/tokens/krc20(/(trending|must-have|mintable|search))?$
+        expression `{http.request.uri.query}.matches('^((cursor|limit|sort|rail_filter|q)=[^&]*&?)*$')`
+    }
+    handle @tokenRails {
+        uri strip_prefix /backend
+        import wallet-browser-read-proxy
+    }
+
+    @assetDetails {
+        method GET
+        path_regexp details ^/backend/api/v1/(tokens/(native/kas|krc20/[A-Za-z0-9_-]{1,128})/(info|price)|nft/collections/[A-Za-z0-9_-]{1,128}|nft/tokens/[A-Za-z0-9_-]{1,128}/[A-Za-z0-9_-]{1,128}/details)$
+    }
+    handle @assetDetails {
+        route {
+            uri strip_prefix /backend
+            rewrite * {path}?
+            import wallet-browser-read-proxy
+        }
+    }
+
+    @charts {
+        method GET
+        path_regexp charts ^/backend/api/v1/tokens/(native/kas|krc20/[A-Za-z0-9_-]{1,128})/chart$
+        expression `{http.request.uri.query}.matches('^((tf|currency)=[^&]*&?)*$')`
+    }
+    handle @charts {
+        uri strip_prefix /backend
+        import wallet-browser-read-proxy
+    }
+
+    @stats {
+        method GET
+        path_regexp stats ^/backend/api/v1/tokens/(native/kas|krc20/[A-Za-z0-9_-]{1,128})/stats$
+        expression `{http.request.uri.query}.matches('^(interval=[^&]*&?)*$')`
+    }
+    handle @stats {
+        uri strip_prefix /backend
+        import wallet-browser-read-proxy
+    }
+
+    @collections {
+        method GET
+        path /backend/api/v1/nft/collections
+        expression `{http.request.uri.query}.matches('^((cursor|limit|query|sort)=[^&]*&?)*$')`
+    }
+    handle @collections {
+        uri strip_prefix /backend
+        import wallet-browser-read-proxy
+    }
+
+    @news {
+        method GET
+        path /backend/api/v1/news/articles
+        expression `{http.request.uri.query}.matches('^((limit|source)=[^&]*&?)*$')`
+    }
+    handle @news {
+        uri strip_prefix /backend
+        import wallet-browser-read-proxy
+    }
+
+    @otherBackend path /backend /backend/*
+    handle @otherBackend {
+        respond "Not found" 404
+    }
+
+    @asset path_regexp asset \.(js|wasm|json|png|jpg|jpeg|gif|webp|ico|svg|ttf|otf|woff|woff2|css|map)$
+    handle @asset {
+        file_server
+    }
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}
