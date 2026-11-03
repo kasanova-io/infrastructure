@@ -20,6 +20,8 @@ pub(crate) struct Inventory {
     protocol_hint: String,
     source_backup_sha256: String,
     tables: BTreeMap<String, Digest>,
+    #[serde(default)]
+    signing_recovery: BTreeMap<String, crate::retained_signature_audit::SigningRecovery>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,7 +31,7 @@ fn digest(value: &str) -> bool {
     value.len()==64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn inventory(data: &[u8], network: &str) -> Result<Inventory> {
-    ensure!(data.len()<=1024*1024, "retained manifest exceeds bound");
+    ensure!(data.len()<=64*1024*1024, "retained manifest exceeds bound");
     let value: Inventory=serde_json::from_slice(data)?;
     ensure!(value.schema=="kasanova-retained-native-inventory-v1" && value.native_schema_version=="2", "unsupported retained inventory");
     ensure!(value.network==network && matches!(value.protocol_hint.as_str(),"k"|"kchat"), "retained network/root hint mismatch");
@@ -180,7 +182,8 @@ pub(crate) async fn adopt(pool: sqlx::PgPool, network: &str, source_id: &str, da
     let tables:BTreeMap<_,_>=NATIVE.into_iter().filter(|t|!matches!(*t,"public.k_vars"|"public.k_hashtags")).map(|t|(t,rows[t].clone())).collect();
     let snapshot=json!({"schema":"kasanova-native-social-fields-v1","network":network,"native_schema_version":"2",
         "assumed_root":manifest.protocol_hint,"declared_snapshot_sha256":manifest.source_backup_sha256,
-        "table_counts":tables.iter().map(|(k,v)|(*k,v.len())).collect::<BTreeMap<_,_>>(),"tables":tables});
+        "table_counts":tables.iter().map(|(k,v)|(*k,v.len())).collect::<BTreeMap<_,_>>(),"tables":tables,
+        "signing_recovery":manifest.signing_recovery});
     let processor=KProtocolProcessor::new(pool.clone());
     let (report,actions)=crate::retained_signature_audit::recovered_fields(&processor,network,&serde_json::to_vec(&snapshot)? )?;
     ensure!(report.unrecoverable_records==0,"retained signing fields require explicit recovery before adoption");
@@ -234,7 +237,7 @@ pub(crate) async fn adopt(pool: sqlx::PgPool, network: &str, source_id: &str, da
 
 pub(crate) async fn run(config: &AppConfig, input: &Path, source_id: &str) -> Result<()> {
     ensure!(fs::symlink_metadata(input)?.is_file(),"retained manifest must be a regular file");
-    let mut data=Vec::new();fs::File::open(input)?.take(1024*1024+1).read_to_end(&mut data)?;
+    let mut data=Vec::new();fs::File::open(input)?.take(64*1024*1024+1).read_to_end(&mut data)?;
     inventory(&data,&config.network)?;
     let pool=crate::database::create_pool(config).await?;
     let result=adopt(pool.clone(),&config.network,source_id,&data).await?;
