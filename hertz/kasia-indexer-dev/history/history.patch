@@ -1,14 +1,15 @@
 --- a/indexer/src/api/v1.rs
 +++ b/indexer/src/api/v1.rs
-@@ -35,6 +35,7 @@
+@@ -35,6 +35,8 @@
  
  pub mod contextual_messages;
  pub mod export;
 +pub mod history;
++pub mod shared_ingestion;
  pub mod group_control;
  pub mod group_messages;
  pub mod handshakes;
-@@ -242,6 +243,7 @@
+@@ -242,6 +244,7 @@
                  "/metrics/prometheus",
                  get(get_prometheus_metrics).with_state(self.metrics.clone()),
              )

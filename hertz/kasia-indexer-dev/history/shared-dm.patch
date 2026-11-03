@@ -1,0 +1,198 @@
+--- a/protocol/src/operation.rs
++++ b/protocol/src/operation.rs
+@@ -62,0 +63,6 @@
++    /// No-handshake messaging (KaChat 5.2): the recipient-derived inbox tag carried only by a
++    /// `dm` message's **first** envelope, as 32 lowercase hex bytes. `None` for a classic `comm`
++    /// message. A `dm` is stored exactly like a `comm` (by sender + alias, by tx id) and, when this
++    /// is `Some`, additionally indexed by the tag so the recipient can discover it without a
++    /// handshake. See NO_HANDSHAKE_MESSAGING.md §1-2.
++    pub inbox_tag: Option<&'a [u8]>,
+@@ -206,0 +213 @@
++                    inbox_tag: None,
+@@ -222,0 +230 @@
++                    inbox_tag: None,
+--- a/protocol/src/operation/deserializer.rs
++++ b/protocol/src/operation/deserializer.rs
+@@ -15,0 +16,9 @@
++    parse_operation(payload_bytes, false)
++}
++
++/// Shared import uses the upstream DM form; standalone scanners keep their existing grammar.
++pub fn parse_shared_operation(payload_bytes: &[u8]) -> Option<SealedOperation<'_>> {
++    parse_operation(payload_bytes, true)
++}
++
++fn parse_operation(payload_bytes: &[u8], allow_dm: bool) -> Option<SealedOperation<'_>> {
+@@ -104,0 +114,23 @@
++                    inbox_tag: None,
++                },
++            ))
++        }
++        // No-handshake messaging (KaChat 5.2): `dm:<tag>:<alias>:<sealed>` is a `comm` message plus
++        // a recipient-derived inbox tag. The tag must be exactly 32 lowercase hex characters;
++        // anything else rejects the whole operation (NO_HANDSHAKE_MESSAGING.md §5.1). Downstream it
++        // is the same ContextualMessageV1 as `comm`, just with `inbox_tag: Some(tag)`.
++        Some([b'd', b'm', b':', remaining @ ..]) if allow_dm && is_kchat => {
++            let tag_end = remaining.iter().position(|b| b == &b':')?;
++            let inbox_tag = &remaining[..tag_end];
++            if !is_lowercase_hex(inbox_tag, 16) {
++                return None;
++            }
++            let rest = &remaining[tag_end + 1..];
++            let alias_end = rest.iter().position(|b| b == &b':')?;
++            let alias = &rest[..alias_end];
++            let contextual_message_hex = &rest[alias_end + 1..];
++            Some(SealedOperation::ContextualMessageV1(
++                SealedContextualMessageV1 {
++                    alias,
++                    sealed_hex: contextual_message_hex,
++                    inbox_tag: Some(inbox_tag),
+@@ -259,0 +292,37 @@
++
++/// Like `is_fixed_hex` but rejects uppercase — the inbox tag is specified as *lowercase* hex
++/// (NO_HANDSHAKE_MESSAGING.md §1), and the recipient matches it byte-for-byte, so `AB` ≠ `ab`.
++fn is_lowercase_hex(value: &[u8], byte_len: usize) -> bool {
++    value.len() == byte_len * 2
++        && value
++            .iter()
++            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
++}
++
++
++#[cfg(test)]
++mod shared_dm_tests {
++    use super::*;
++    #[test]
++    fn canonical_dm_preserves_binary_and_legacy_parser_mode() {
++        let tag="ab".repeat(16);
++        let mut payload=format!("kchat:1:dm:{tag}:alias:").into_bytes();
++        payload.extend_from_slice(&[0xff,0,b':',0x80]);
++        let Some(SealedOperation::ContextualMessageV1(value))=parse_shared_operation(&payload) else {panic!("native shared DM")};
++        assert_eq!(value.inbox_tag,Some(tag.as_bytes()));
++        assert_eq!(value.alias,b"alias");
++        assert_eq!(value.sealed_hex,&[0xff,0,b':',0x80]);
++        assert!(parse_sealed_operation(&payload).is_none());
++        for root in ["ciph_msg:1:dm:","kchat:2:dm:","k:1:dm:"] {
++            let bad=format!("{root}{tag}:alias:sealed");
++            // Unknown version's legacy fallback remains outside shared journal admission.
++            if root!="kchat:2:dm:" {assert!(parse_shared_operation(bad.as_bytes()).is_none());}
++        }
++        for tag in ["ab".repeat(15),"ab".repeat(17),"AB".repeat(16),"zz".repeat(16)] {
++            assert!(parse_shared_operation(format!("kchat:1:dm:{tag}:alias:sealed").as_bytes()).is_none());
++        }
++        for wire in [b"kchat:1:comm:alias:sealed".as_slice(),b"ciph_msg:1:comm:alias:sealed",b"kchat:1:handshake:\xff\x00:binary"] {
++            assert_eq!(parse_shared_operation(wire),parse_sealed_operation(wire));
++        }
++    }
++}
+--- a/indexer-db/src/messages/contextual_message.rs
++++ b/indexer-db/src/messages/contextual_message.rs
+@@ -6 +6,4 @@
+-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
++use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned};
++
++/// Inbox tag wire format is32 lowercase hex characters, decoded to16 bytes.
++pub const INBOX_TAG_LEN: usize = 16;
+@@ -106,0 +110,79 @@
++/// No-handshake messaging (KaChat 5.2): a `dm` message filed by its recipient-derived inbox tag.
++/// Key: tag (16 bytes) | block_time (u64 BE) | tx_id (32 bytes). Value: resolved sender address
++/// (zeros until resolved, then filled in like `HandshakeByReceiverPartition`). The recipient asks
++/// for its own tag and learns who wrote; from there everything is fetched by sender + alias from
++/// the by-sender partition. See NO_HANDSHAKE_MESSAGING.md §5.2.
++#[repr(C)]
++#[derive(
++    Clone, Copy, Debug, PartialEq, Eq, IntoBytes, FromBytes, Immutable, Unaligned, KnownLayout,
++)]
++pub struct ContextualMessageByInboxKey {
++    pub inbox_tag: [u8; INBOX_TAG_LEN],
++    pub block_time: U64, // u64 BE for chronological ordering within a tag
++    pub tx_id: [u8; 32],
++}
++
++#[derive(Clone)]
++pub struct ContextualMessageByInboxPartition(fjall::TxPartition);
++
++impl ContextualMessageByInboxPartition {
++    pub fn new(keyspace: &fjall::TxKeyspace) -> Result<Self> {
++        Ok(Self(keyspace.open_partition(
++            "contextual_message_by_inbox",
++            PartitionCreateOptions::default(),
++        )?))
++    }
++
++    pub fn approximate_len(&self) -> usize {
++        self.0.approximate_len()
++    }
++
++    /// Insert (or fill the sender of) one tag entry. Mirrors `HandshakeByReceiverPartition`: the key
++    /// is written as soon as the message is seen; the sender value is written now if resolved, and
++    /// otherwise stays zeros until deferred resolution supplies it. Once a non-zero sender is
++    /// stored it is never overwritten (first resolution wins).
++    pub fn insert_wtx(
++        &self,
++        wtx: &mut WriteTransaction,
++        key: &ContextualMessageByInboxKey,
++        sender: Option<AddressPayload>,
++    ) -> Result<()> {
++        let sender = sender.unwrap_or_default();
++        wtx.update_fetch(&self.0, key.as_bytes(), |old| match old {
++            None => Some(sender.as_bytes().into()),
++            Some(old) => {
++                let old_sender = AddressPayload::try_ref_from_bytes(old.as_bytes()).unwrap();
++                if old_sender != &AddressPayload::default() {
++                    Some(old.clone())
++                } else {
++                    Some(sender.as_bytes().into())
++                }
++            }
++        })?;
++        Ok(())
++    }
++
++    /// Ascending by block time within a tag, starting at `from_block_time`. Yields (key, sender).
++    pub fn iter_by_tag_from_block_time(
++        &self,
++        rtx: &ReadTransaction,
++        inbox_tag: &[u8; INBOX_TAG_LEN],
++        from_block_time: u64,
++    ) -> impl DoubleEndedIterator<
++        Item = Result<(
++            SharedImmutable<ContextualMessageByInboxKey>,
++            SharedImmutable<AddressPayload>,
++        )>,
++    > + '_ {
++        let mut from = [0u8; INBOX_TAG_LEN + 8];
++        from[..INBOX_TAG_LEN].copy_from_slice(inbox_tag);
++        from[INBOX_TAG_LEN..].copy_from_slice(&from_block_time.to_be_bytes());
++        let mut to = [0xFFu8; INBOX_TAG_LEN + 8];
++        to[..INBOX_TAG_LEN].copy_from_slice(inbox_tag);
++        rtx.range(&self.0, from..=to).map(|item| {
++            let (k, v) = item?;
++            Ok((SharedImmutable::new(k), SharedImmutable::new(v)))
++        })
++    }
++}
++
+--- a/indexer/src/api/v1/contextual_messages.rs
++++ b/indexer/src/api/v1/contextual_messages.rs
+@@ -0,0 +1,2 @@
++#[path = "inbox.rs"]
++mod inbox;
+@@ -58 +60,2 @@
+-            .route("/import", post(import_contextual_messages))
++            .route("/by-inbox", get(inbox::get_contextual_messages_by_inbox).layer::<_, std::convert::Infallible>(axum::middleware::from_fn(super::shared_ingestion::require_shared_inbox)))
++            .route("/import", post(import_contextual_messages).layer::<_, std::convert::Infallible>(axum::middleware::from_fn(super::shared_ingestion::reject_alternate_writer)))
+--- a/indexer/src/api/v1/export.rs
++++ b/indexer/src/api/v1/export.rs
+@@ -20,0 +21 @@
++    "contextual_message_by_inbox",
+--- a/indexer/src/api/v1.rs
++++ b/indexer/src/api/v1.rs
+@@ -258,0 +259 @@
++                    .layer::<_, std::convert::Infallible>(axum::middleware::from_fn(shared_ingestion::reject_alternate_writer))
+@@ -265 +266 @@
+-                post(export::purge_all).with_state(self.export_api.clone()),
++                post(export::purge_all).layer::<_, std::convert::Infallible>(axum::middleware::from_fn(shared_ingestion::reject_alternate_writer)).with_state(self.export_api.clone()),
+@@ -271 +272 @@
+-                post(export::gc_self_stash_orphans).with_state(self.export_api.clone()),
++                post(export::gc_self_stash_orphans).layer::<_, std::convert::Infallible>(axum::middleware::from_fn(shared_ingestion::reject_alternate_writer)).with_state(self.export_api.clone()),
