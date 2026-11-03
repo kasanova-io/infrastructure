@@ -1,0 +1,5 @@
+**
+!Dockerfile
+!requirements.txt
+!protocol_indexer/
+!protocol_indexer/**

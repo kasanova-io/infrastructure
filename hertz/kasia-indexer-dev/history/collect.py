@@ -20,43 +20,58 @@ PREFIXES = (b"ciph_msg:", b"kchat:")
 LOCK = threading.Lock()
 
 
-def rate_slot(url, cooldown=0):
+class RatePending(OSError):
+    """Caller elected to defer instead of waiting through a shared cooldown."""
+
+
+def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False):
     # Separate API buckets share a cross-process lock, so collection and
     # confirmation lookups cannot each consume the full allowance.
-    if not url.startswith("https://api.kaspa.org/"):
+    if not all_hosts and not url.startswith("https://api.kaspa.org/"):
         return
     bucket = "addresses" if "/addresses/" in url else "details"
     interval = 2.1 if bucket == "addresses" else 0.4
     filename = Path(os.environ.get("CHATS_RATE_DIR", ".")) / ("rate-" + bucket + ".txt")
     with filename.open("a+") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        fcntl.flock(stream, fcntl.LOCK_EX | (fcntl.LOCK_NB if max_wait is not None else 0))
         stream.seek(0)
         next_at = float(stream.read() or 0)
         now = time.time()
         if cooldown:
             next_at = max(next_at, now + cooldown)
         else:
-            time.sleep(max(0, next_at - now))
+            delay = max(0, next_at - now)
+            if max_wait is not None and delay > max_wait:
+                raise RatePending('shared archive cooldown')
+            time.sleep(delay)
             next_at = time.time() + interval
         stream.seek(0); stream.truncate(); stream.write(str(next_at)); stream.flush()
 
 
-def request(url):
-    for attempt in range(12):
+def request(url, *, attempts=12, timeout=60, max_wait=None, rate_all_hosts=False, max_bytes=None):
+    if not 1 <= attempts <= 12 or not 0 < timeout <= 60:
+        raise ValueError('invalid bounded request policy')
+    for attempt in range(attempts):
         try:
-            rate_slot(url)
+            rate_slot(url, max_wait=max_wait, all_hosts=rate_all_hosts)
             req = urllib.request.Request(url, headers={"User-Agent": "Kasanova-History-Migration/1"})
-            with urllib.request.urlopen(req, timeout=60) as response:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                if max_bytes is not None:
+                    data = response.read(max_bytes + 1)
+                    if len(data) > max_bytes:
+                        raise ValueError('archive response exceeds configured bound')
+                    return json.loads(data), dict(response.headers)
                 return json.load(response), dict(response.headers)
         except urllib.error.HTTPError as error:
             if error.code not in (429, 500, 502, 503, 504):
                 raise
             delay = min(300, float(error.headers.get("Retry-After", max(60, 2 ** attempt) if error.code == 429 else 2 ** attempt)))
             if error.code == 429:
-                rate_slot(url, cooldown=delay)
+                rate_slot(url, cooldown=delay, max_wait=max_wait, all_hosts=rate_all_hosts)
+            error.close()
         except (TimeoutError, OSError):
             delay = min(30, 2 ** attempt)
-        if attempt == 11:
+        if attempt == attempts - 1:
             raise RuntimeError("request retries exhausted")
         time.sleep(delay)
 

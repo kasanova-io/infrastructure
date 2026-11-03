@@ -1,0 +1,27 @@
+# Build the pinned upstream scanner with one opt-in owned SQL handoff hook.
+ARG RUST_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${RUST_IMAGE} AS build
+RUN apk add --no-cache musl-dev protobuf-dev g++ clang18-dev linux-headers openssl-dev postgresql-dev curl patch git
+ARG UPSTREAM_REVISION=7b01229d8960f8f53f909ee0e69fb628053ac8ae
+ARG UPSTREAM_ARCHIVE_SHA256
+ADD https://github.com/supertypo/simply-kaspa-indexer/archive/${UPSTREAM_REVISION}.tar.gz /tmp/upstream.tar.gz
+RUN test -n "$UPSTREAM_ARCHIVE_SHA256" && echo "$UPSTREAM_ARCHIVE_SHA256  /tmp/upstream.tar.gz" | sha256sum -c -
+WORKDIR /src
+RUN tar -xzf /tmp/upstream.tar.gz --strip-components=1
+COPY simply-journal.patch /tmp/simply-journal.patch
+RUN patch -p1 < /tmp/simply-journal.patch
+ENV CARGO_BUILD_JOBS=3 RUSTFLAGS="-C target-feature=-crt-static -C link-args=-s"
+ENV VERGEN_GIT_SHA=${UPSTREAM_REVISION} VERGEN_GIT_DESCRIBE=v2.3.0-shared-journal
+RUN cargo test --locked --release --workspace
+RUN cargo build --locked --release -p simply-kaspa-indexer
+
+FROM ${RUNTIME_IMAGE}
+RUN apk add --no-cache libstdc++ postgresql-client ca-certificates
+COPY --from=build /src/target/release/simply-kaspa-indexer /usr/local/bin/
+USER 13337:13337
+ARG UPSTREAM_REVISION=7b01229d8960f8f53f909ee0e69fb628053ac8ae
+ARG JOURNAL_PATCH_SHA256
+LABEL io.kasanova.simply-upstream-revision=${UPSTREAM_REVISION} io.kasanova.simply-journal-patch=${JOURNAL_PATCH_SHA256}
+ENTRYPOINT ["simply-kaspa-indexer"]
+CMD ["--help"]
