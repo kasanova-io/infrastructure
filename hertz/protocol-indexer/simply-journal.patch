@@ -1,0 +1,40 @@
+--- a/database/src/query/delete.rs
++++ b/database/src/query/delete.rs
+@@ -3,6 +3,16 @@
+ use sqlx::{Error, Pool, Postgres};
+ 
+ pub async fn delete_transaction_acceptances(block_hashes: &[Hash], pool: &Pool<Postgres>) -> Result<u64, Error> {
++    // Opt-in shared ingestion: retain removals even before historical bodies
++    // arrive, and serialize them against the backfill's acceptance sentinel.
++    // Default upstream deployments retain their original SQL unchanged.
++    if std::env::var("KASANOVA_ACCEPTED_CHAIN_JOURNAL").as_deref() == Ok("true") {
++        return sqlx::query_scalar::<_, i64>("SELECT protocol_indexer.remove_source_acceptances($1)")
++            .bind(block_hashes)
++            .fetch_one(pool)
++            .await
++            .map(|count| count as u64);
++    }
+     Ok(sqlx::query("DELETE FROM transactions_acceptances WHERE block_hash = ANY($1)")
+         .bind(block_hashes)
+         .execute(pool)
+--- a/database/src/query/insert.rs
++++ b/database/src/query/insert.rs
+@@ -120,6 +120,18 @@
+ }
+ 
+ pub async fn insert_transaction_acceptances(tx_acceptances: &[TransactionAcceptance], pool: &Pool<Postgres>) -> Result<u64, Error> {
++    // Only archival sentinel conflicts yield; normal live rows retain upstream
++    // DO NOTHING behavior. The tuple flag is visible after a concurrent wait.
++    if std::env::var("KASANOVA_ACCEPTED_CHAIN_JOURNAL").as_deref() == Ok("true") {
++        let transactions: Vec<_> = tx_acceptances.iter().map(|ta| ta.transaction_id.clone()).collect();
++        let blocks: Vec<_> = tx_acceptances.iter().map(|ta| ta.block_hash.clone()).collect();
++        return sqlx::query_scalar::<_, i64>("SELECT protocol_indexer.insert_source_acceptances($1,$2)")
++            .bind(&transactions)
++            .bind(&blocks)
++            .fetch_one(pool)
++            .await
++            .map(|count| count as u64);
++    }
+     const COLS: usize = 2;
+     let sql = format!(
+         "INSERT INTO transactions_acceptances (transaction_id, block_hash) VALUES {} ON CONFLICT DO NOTHING",
