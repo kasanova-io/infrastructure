@@ -25,6 +25,11 @@ COUNTERS = (
     "payments_by_sender", "uniq_payments_by_receiver", "contextual_messages",
     "group_messages", "group_controls", "push_registered_devices",
 )
+# Fjall approximate_len() estimates can decrease across an unchanged restart.
+# Keep collecting them as diagnostics, never as preservation/cardinality proof.
+# contextual_messages uses the native exact len(); full store/registration
+# preservation is established separately by the cold inventory and copy audit.
+EXACT_COUNT_FLOORS = ("contextual_messages",)
 MAX_BYTES = 32 * 1024**3
 MAX_FILES = 32768
 
@@ -233,7 +238,7 @@ def recover(expected, baseline, previous_start, timeout, readonly_helper=None, *
             elif healthy(source) and source["State"]["StartedAt"] != previous_start:
                 after = metrics(expected["id"])
                 current = (source["State"]["StartedAt"], after["blocks_processed"])
-                if all(after[name] >= baseline[name] for name in COUNTERS):
+                if all(after[name] >= baseline[name] for name in EXACT_COUNT_FLOORS):
                     # blocks_processed is initialized from the retained/pruned
                     # header partition at startup. It is not a durable lifetime
                     # counter. Require advancement within THIS unchanged new
