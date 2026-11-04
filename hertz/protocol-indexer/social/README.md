@@ -287,6 +287,13 @@ The same current-ID check strengthens tip output evidence. Only three already
 transitive SDK packages become direct dependencies, with versions/sources and
 checksums unchanged in the locked graph.
 
+Legacy archive RPC bodies may encode zero gas, lock time and input sequence as
+JSON null. Normalize those values to zero only before recomputing the mandatory
+canonical SDK ID; omitted nonzero commitments still fail. A null compute budget
+is normalized only for transaction version0. Version1+ must supply it because
+the SDK excludes compute budget from transaction IDs. Version, output amounts
+and outpoint indexes retain their strict validation.
+
 Missing room proof rolls back projection and durably admits the existing bounded
 proof worker as `parsed_room_sender_pending:<revision>`. An SDK-rejected stored
 proof additionally carries its exact PostgreSQL receipt fingerprint, for both

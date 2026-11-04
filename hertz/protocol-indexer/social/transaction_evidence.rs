@@ -28,6 +28,17 @@ fn normalized_rpc(raw: &Value) -> Result<Value> {
     if value["payload"].is_null() {
         value["payload"] = Value::String(String::new());
     }
+    // Older archive RPC bodies encode omitted zero scalars as JSON null.
+    // Supply only those legacy defaults; the recomputed SDK transaction ID
+    // below must still match the canonical ID. Keep version, amounts and
+    // outpoint indexes strict. computeBudget is excluded from the SDK ID, so
+    // its legacy zero default is restricted to transaction version zero.
+    let legacy_v0 = unsigned(&value["version"])? == 0;
+    for key in ["lockTime", "gas"] {
+        if value[key].is_null() {
+            value[key] = 0u64.into();
+        }
+    }
     for key in ["version", "lockTime", "gas", "mass", "storageMass"] {
         if !value[key].is_null() {
             value[key] = unsigned(&value[key])?.into();
@@ -42,6 +53,13 @@ fn normalized_rpc(raw: &Value) -> Result<Value> {
             "invalid RPC input/outpoint shape"
         );
         input["verboseData"] = Value::Null;
+        if input["sequence"].is_null() {
+            input["sequence"] = 0u64.into();
+        }
+        if input["computeBudget"].is_null() {
+            ensure!(legacy_v0, "nonlegacy RPC compute budget missing");
+            input["computeBudget"] = 0u64.into();
+        }
         for key in ["sequence", "sigOpCount", "computeBudget"] {
             if !input[key].is_null() {
                 input[key] = unsigned(&input[key])?.into();
