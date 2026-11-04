@@ -287,6 +287,19 @@ python -m protocol_indexer.cli --network "$PROTOCOL_NETWORK" backfill --family k
 python -m protocol_indexer.cli --network "$PROTOCOL_NETWORK" prune --retention-hours 24
 ```
 
+Schedule that same pruner with `compose.retention.yaml` and its `retention`
+profile after real native Activity consumption is active. It reuses the tested
+adapter image, private source configuration and read-only binding. The reviewed
+`retention_loop.py` is mounted read-only; no image rebuild, Docker socket, host
+timer or additional scanner is required. `PROTOCOL_RAW_RETENTION_HOURS` defaults
+to 24 hours. The loop drains up to twelve batches, then waits five minutes, with SQL
+deadlines and cleanup of its own child on shutdown. It never enables Simply
+pruning or acknowledges a consumer. Pending capture, unhandled Activity and
+canonical acceptance/evidence remain governed by the existing pruner's guards.
+Bind actual retained deployments to their existing database/account/network,
+start only this service, and verify its first real pruning receipt plus health
+and native counts. A source mismatch defers maintenance; it never resets data.
+
 `backfill --after` resumes the raw inventory by transaction ID. Late commits
 below that cursor are handled by live delivery. This inventory replay does not
 discover external archives; the archival adapter below supplies those receipts
