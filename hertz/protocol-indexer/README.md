@@ -518,6 +518,29 @@ registration continuity and the shared connector's live catch-up before changing
 the existing public upstream. Retain the original store and deployment for
 rollback. Only one scanner may own the network after handoff.
 
+Before the first legacy-to-shared Chats activation in either environment, run
+`../kasia-indexer-dev/history/first_shared_activation.sql` against the bound
+source with the expected network, journal, existing chat epoch and hash of the
+current-store proof. Fence the old writer cleanly first. Confirm its image and
+shared-mode-disabled configuration are unchanged, its original volume has no
+remaining read/write owner, and a read-only directory audit of that current
+store exactly matches its preserved baseline without either native shared
+ledger/binding partition. Do not open the original Fjall store for that audit.
+Zero SQL delivery receipts alone is insufficient: dispatch may precede commit.
+
+The one-time migration advances the schema-install chat cutoff to the actual
+handoff and records it atomically. It refuses a changed source/epoch, prior
+native address activation, existing chat deliveries or an existing handoff.
+Queued jobs and events are preserved; older imports remain quiet through the
+existing eligibility guards. Never rerun this migration on deployment/restart,
+remove its receipt, or move the boundary after native activation. Preserve that
+receipt and cutoff in the Notifications handoff. After the cutoff commits, keep
+the legacy scanner/providers fenced even if native startup fails: resuming it
+would produce legacy alerts after the new boundary and duplicate them on replay.
+Fix forward. An ambiguous commit requires synchronizing the migration advisory
+lock and freshly reading the audit row/epoch, never a blind retry or legacy
+restart. Keep legacy fenced while the commit outcome remains unknown.
+
 ## Private KaPosts projection
 
 The native Social consumer handles `kchat:1:` edits, deletes, unquotes, polls
