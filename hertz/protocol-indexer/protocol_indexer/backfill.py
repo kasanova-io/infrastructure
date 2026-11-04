@@ -66,9 +66,10 @@ def seed(conn, txid, statement, params):
 
 
 def check_context(conn, network):
-    config = conn.execute('SELECT network,source_revision FROM protocol_indexer.config').fetchone()
+    config = conn.execute('SELECT network,source_revision,activated_at_ms FROM protocol_indexer.config').fetchone()
     require(config is not None and config['network'] == network and config['source_revision'] == SIMPLY_REVISION,
             'journal network/source mismatch')
+    return config
 
 
 def import_receipt(conn, receipt, network, observe):
@@ -78,7 +79,7 @@ def import_receipt(conn, receipt, network, observe):
     txid = bytes.fromhex(receipt['transaction_id'])
     hint = observe().checked(receipt, network)
     with conn.transaction():
-        check_context(conn, network)
+        config = check_context(conn, network)
         removed = False
         if hint is not None:
             conn.execute('INSERT INTO protocol_indexer.acceptance_blocks(block_hash) VALUES (%s) ON CONFLICT DO NOTHING', (hint,))
@@ -101,6 +102,26 @@ def import_receipt(conn, receipt, network, observe):
         if old or source:
             require((old['source_transaction']['payload'] if old else '\\x' + source['payload'].hex()) == body['payload'],
                     'archive payload conflicts with live journal')
+            timestamp = old['source_transaction'].get('block_time') if old else None
+            if (created and old and not old['ever_accepted'] and old['accepting_block'] is None
+                    and not pending['acceptance_changed'] and type(timestamp) is int
+                    and 0 <= timestamp < config['activated_at_ms']
+                    and receipt['block_time'] < config['activated_at_ms']):
+                # Initial raw inventory can predate the live VCP window. Repair
+                # only that historical first-acceptance gap, never a revoked or
+                # post-activation record. The same block/pending guards and a
+                # second fresh observation fence concurrent live changes.
+                require(not source or '\\x' + source['payload'].hex() == body['payload'],
+                        'archive payload conflicts with live source')
+                if observe().checked(receipt, network) != hint:
+                    raise EvidencePending('archive_acceptance_changed_during_import')
+                write_revision(conn, txid, old['source_transaction'], hint, old,
+                               quiet=True, historically_accepted=True)
+                conn.execute('''INSERT INTO protocol_indexer.evidence(transaction_id,receipt)
+                    VALUES (%s,%s) ON CONFLICT DO NOTHING''', (txid, Jsonb(receipt)))
+                # Keep the raw-body wakeup: capture_one owns any newer source
+                # fields and subsequent real VCP events, including revocations.
+                return 'imported'
             unseed()
             # Preserve the live wakeup; capture_one owns every existing source
             # body/canonical revision and any acceptance event arriving later.
