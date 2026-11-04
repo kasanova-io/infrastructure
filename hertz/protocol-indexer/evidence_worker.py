@@ -7,11 +7,13 @@ import json
 import os
 from pathlib import Path
 import signal
+import threading
 import time
 import urllib.parse
 
 from import_archive import ImportResolver
 from protocol_indexer.cli import check_source
+from protocol_indexer.chats import EvidencePending
 from protocol_indexer.evidence import CONSUMER, EvidenceConsumer
 from protocol_indexer.journal import connect
 
@@ -32,10 +34,12 @@ def main():
     os.umask(0o077)
     resolver = None
     running = True
+    stopped = threading.Event()
 
     def stop(*_):
         nonlocal running
         running = False
+        stopped.set()
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -52,22 +56,31 @@ def main():
         with (args.cache / 'output-evidence.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with connect(os.environ['PROTOCOL_DATABASE_URL']) as conn:
-                check_source(conn, args.metrics_url, args.network, args.source_binding)
-                resolver.refresh_network()
                 consumer = EvidenceConsumer(args.network, source_id, resolver.resolve_outputs, resolver.resolve_sender)
-                checked = time.monotonic()
+                checked = None
                 while running:
-                    if time.monotonic() - checked >= 60:
+                    if checked is None or time.monotonic() - checked >= 60:
                         check_source(conn, args.metrics_url, args.network, args.source_binding)
-                        resolver.refresh_network()
+                        try:
+                            resolver.refresh_network()
+                        except EvidencePending:
+                            # No jobs, acknowledgements or cached-network
+                            # fallback until a fresh network check succeeds.
+                            print(json.dumps({'consumer': CONSUMER, 'status': 'archive_network_pending'}), flush=True)
+                            if args.once:
+                                raise SystemExit(2)
+                            stopped.wait(5)
+                            continue
                         checked = time.monotonic()
+                    if not running:
+                        break
                     result = consumer.run_one(conn)
                     if result:
                         print(json.dumps({'consumer': CONSUMER, 'status': result}), flush=True)
                     if args.once:
                         break
-                    if result is None:
-                        time.sleep(0.25)
+                    if result is None and running:
+                        stopped.wait(0.25)
     finally:
         if resolver is not None:
             resolver.db.close()

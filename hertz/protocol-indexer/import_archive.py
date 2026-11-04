@@ -35,6 +35,14 @@ class ImportResolver(Resolver):
     request_options = {'attempts': 1, 'timeout': 10, 'max_wait': 2, 'rate_all_hosts': True, 'max_bytes': 8 * 1024**2}
     request_deadline_seconds = 12
 
+    def refresh_network(self):
+        try:
+            return super().refresh_network()
+        except (worker.history._chats.RatePending, BlockingIOError, TimeoutError) as exc:
+            # A shared cooldown/busy rate bucket is outstanding work. Do not
+            # confuse it with a network mismatch or a cache/storage failure.
+            raise EvidencePending('archive_network_deferred') from exc
+
     def request(self, url):
         # Socket timeouts do not bound a slow stream or a redirect chain. This
         # standalone POSIX worker owns its alarm; expiry unwinds the whole read.
