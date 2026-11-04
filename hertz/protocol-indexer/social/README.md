@@ -332,3 +332,21 @@ and three current verified tip facts totaling 1.2 KAS remain visible. This bind 
 not reverify those historical payments; their prior SDK acceptance is retained.
 All temporary services stopped. No public route, genuine new DM/room/extension,
 recipient tip notification or displayed counter acceptance is implied.
+
+## Recover retained mention order and hex spelling
+
+MAINNET native mention sequence IDs can differ from the signed mention order,
+and PostgreSQL bytea loses hexadecimal letter case. An explicit inventory or
+offline audit input may supply `signing_recovery`, keyed by original transaction
+ID. Each entry contains `mentioned_pubkeys` in signed order and optionally the
+original hex spelling of `referenced_content_id` for a reply. The supplied
+mention byte multiset, including duplicate multiplicity, must equal the native
+rows. Reference bytes must also match. Material for unknown IDs, non-post/reply
+actions or a post reference is rejected. All other original fields stay fixed.
+
+The existing SDK still verifies the complete reconstructed signing string;
+material alone grants no authority. Adoption remains all-or-nothing, preserves
+native rows and quiet notification state, and never fabricates canonical
+receipts. The bounded inventory can now include up to64MiB of explicit recovery
+material. Original wire root, transaction identity and acceptance are not
+inferred from this field recovery; full RPC evidence remains separate.

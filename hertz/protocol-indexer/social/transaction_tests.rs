@@ -201,6 +201,57 @@ fn retained_audit(processor: &KProtocolProcessor, input: &serde_json::Value, net
 }
 
 #[tokio::test]
+async fn pure_retained_recovery_restores_only_signed_mention_order_and_hex_spelling() {
+    use serde_json::json;
+    let (p,pool)=processor();
+    let mentions=vec!["BB".repeat(32),"aa".repeat(32)];
+    let parent="CC".repeat(32);
+    for kind in ["post","reply"] {
+        let body=format!("aGk=:{}",serde_json::to_string(&mentions).unwrap());
+        let tail=if kind=="reply" {format!("{parent}:{body}")} else {body};
+        let tx=signed("kchat",kind,&tail,&tail,231);
+        let mut input=retained_audit_input(&p,"k",&[tx.clone()]);
+        // Native mention sequence IDs and bytea spelling are lossy.
+        input["tables"]["public.k_mentions"][0]["id"]=json!(2);
+        input["tables"]["public.k_mentions"][1]["id"]=json!(1);
+        assert_eq!(retained_audit(&p,&input,"testnet-10").unwrap().unrecoverable_records,1);
+        input["signing_recovery"]=json!({tx.transaction_id.clone():{
+            "mentioned_pubkeys":mentions,
+            "referenced_content_id":if kind=="reply" {Some(parent.clone())} else {None}
+        }});
+        let report=retained_audit(&p,&input,"testnet-10").unwrap();
+        assert_eq!(report.recoverable_records,1);assert_eq!(report.unrecoverable_records,0);
+        assert!(!report.original_wire_verified && !report.original_transaction_identity_verified
+            && !report.chain_acceptance_verified && !report.complete_history_verified);
+        assert!(report.records[0].wire_root.is_none());
+        // The right multiset in the wrong order still has to pass the SDK.
+        input["signing_recovery"][&tx.transaction_id]["mentioned_pubkeys"]=json!([mentions[1],mentions[0]]);
+        assert_eq!(retained_audit(&p,&input,"testnet-10").unwrap().unrecoverable_records,1);
+    }
+    assert_eq!(pool.size(),0);
+}
+
+#[tokio::test]
+async fn pure_retained_recovery_rejects_changed_mentions_duplicates_reference_and_unknown_records() {
+    use serde_json::json;
+    let (p,_)=processor();let parent="aa".repeat(32);let keys=vec!["bb".repeat(32),"cc".repeat(32)];
+    let tail=format!("{parent}:aGk=:{}",serde_json::to_string(&keys).unwrap());
+    let tx=signed("k","reply",&tail,&tail,232);
+    let mut input=retained_audit_input(&p,"k",&[tx.clone()]);
+    input["signing_recovery"]=json!({tx.transaction_id.clone():{"mentioned_pubkeys":keys,"referenced_content_id":parent}});
+    for replacement in [json!([keys[0],keys[0]]),json!([keys[0],"dd".repeat(32)]),json!([keys[0]]),json!(["not-hex",keys[1]])] {
+        let mut changed=input.clone();changed["signing_recovery"][&tx.transaction_id]["mentioned_pubkeys"]=replacement;
+        assert!(retained_audit(&p,&changed,"testnet-10").is_err());
+    }
+    let mut changed=input.clone();changed["signing_recovery"][&tx.transaction_id]["referenced_content_id"]=json!("ee".repeat(32));
+    assert!(retained_audit(&p,&changed,"testnet-10").is_err());
+    let mut changed=input.clone();changed["signing_recovery"]["ff".repeat(32)]=json!({"mentioned_pubkeys":[]});
+    assert!(retained_audit(&p,&changed,"testnet-10").is_err());
+    let mut changed=input;changed["tables"]["public.k_contents"][0]["base64_encoded_message"]=json!("dGFtcGVyZWQ=");
+    assert_eq!(retained_audit(&p,&changed,"testnet-10").unwrap().unrecoverable_records,1);
+}
+
+#[tokio::test]
 async fn pure_retained_sdk_audit_recovers_all_original_native_action_shapes() {
     let (p, _) = processor();
     let parent="aa".repeat(32);let mentioned="bb".repeat(32);
@@ -942,6 +993,34 @@ mod shared_consumer {
         let mut value=signed("k","post",&tail,&tail,id);value.block_time=Some(1000);
         KProtocolProcessor::new(pool.clone()).process_k_transaction(&value).await.unwrap();
         value
+    }
+
+    #[tokio::test]
+    async fn postgres_retained_recovery_preserves_original_rows_quietness_and_idempotence() {
+        use serde_json::json;
+        let pool=setup().await;let keys=vec!["BB".repeat(32),"aa".repeat(32)];
+        let tail=format!("aGk=:{}",serde_json::to_string(&keys).unwrap());
+        let tx=signed("k","post",&tail,&tail,233);
+        KProtocolProcessor::new(pool.clone()).process_k_transaction(&tx).await.unwrap();
+        // Reproduce a native snapshot whose sequence IDs no longer carry
+        // signed order, while keeping the original mention multiset.
+        sqlx::query("UPDATE k_mentions SET id=1000-id").execute(&pool).await.unwrap();
+        let contents:String=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(t) ORDER BY id)::text FROM k_contents t").fetch_one(&pool).await.unwrap();
+        let mentions:String=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(t) ORDER BY id)::text FROM k_mentions t").fetch_one(&pool).await.unwrap();
+        let mut manifest:serde_json::Value=serde_json::from_slice(&retained_inventory(&pool).await).unwrap();
+        assert!(crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&serde_json::to_vec(&manifest).unwrap()).await.is_err());
+        assert!(!sqlx::query_scalar::<_,bool>("SELECT to_regnamespace('social_shared') IS NOT NULL").fetch_one(&pool).await.unwrap());
+        manifest["signing_recovery"]=json!({tx.transaction_id.clone():{"mentioned_pubkeys":keys}});
+        let data=serde_json::to_vec(&manifest).unwrap();
+        let result=crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&data).await.unwrap();
+        assert_eq!(result["retained_native_records"],1);assert_eq!(result["notification_replays"],0);
+        assert_eq!(count(&pool,"protocol_indexer.canonical").await,0);
+        assert_eq!(count(&pool,"notification_probe").await,0);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT format_type(atttypid,atttypmod)||':'||attnotnull::text||':'||atthasdef::text FROM pg_attribute WHERE attrelid='k_contents'::regclass AND attname='edited_at' AND NOT attisdropped").fetch_one(&pool).await.unwrap(),"bigint:false:false");
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM k_contents WHERE edited_at IS NOT NULL").fetch_one(&pool).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT jsonb_agg(to_jsonb(t)-'edited_at' ORDER BY id)::text FROM k_contents t").fetch_one(&pool).await.unwrap(),contents);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT jsonb_agg(to_jsonb(t) ORDER BY id)::text FROM k_mentions t").fetch_one(&pool).await.unwrap(),mentions);
+        assert_eq!(crate::retained_history::adopt(pool.clone(),"testnet-10",SOURCE,&data).await.unwrap()["already_imported"],true);
     }
 
     #[tokio::test]
