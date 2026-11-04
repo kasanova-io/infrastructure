@@ -1,6 +1,7 @@
 # Insert inside miniapps.kasanova.io, before file_server; validate before reload.
+# Apply only after the shared legacy reader is healthy; preserve cached clients.
 # BEGIN KSNV-411 Social PROD API
 handle_path /social-api/* {
-    reverse_proxy social_indexer_prod_web:3001
+    reverse_proxy protocol_social_legacy_prod:8080
 }
 # END KSNV-411 Social PROD API

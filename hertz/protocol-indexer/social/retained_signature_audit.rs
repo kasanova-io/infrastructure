@@ -19,6 +19,17 @@ use std::{
 
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 100_000;
+
+/// PostgreSQL bytea loses hex spelling, and native mention IDs do not prove
+/// signed mention order. Recovery supplies only those lossy fields. It grants
+/// no wire-root, transaction-identity or acceptance authority.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SigningRecovery {
+    pub mentioned_pubkeys: Vec<String>,
+    #[serde(default)]
+    pub referenced_content_id: Option<String>,
+}
 const TABLES: [&str; 6] = [
     "public.k_contents",
     "public.k_votes",
@@ -40,6 +51,8 @@ struct Snapshot {
     tables: BTreeMap<String, Vec<Value>>,
     #[serde(default)]
     rpc_transactions: BTreeMap<String, Value>,
+    #[serde(default)]
+    signing_recovery: BTreeMap<String, SigningRecovery>,
 }
 
 #[derive(Serialize, Debug)]
@@ -150,6 +163,7 @@ fn candidate(
     hints: &[Value],
     id: &str,
     time: i64,
+    recovery: Option<&SigningRecovery>,
 ) -> Result<Transaction> {
     let key = bytes(row, "sender_pubkey")?;
     let signature = bytes(row, "sender_signature")?;
@@ -166,15 +180,29 @@ fn candidate(
                         );
                         mentions.push(bytes(hint, "mentioned_pubkey")?);
                     }
+                    if let Some(recovery) = recovery {
+                        let mut native = mentions.iter().map(hex::decode).collect::<Result<Vec<_>, _>>()?;
+                        let mut supplied = recovery.mentioned_pubkeys.iter().map(hex::decode).collect::<Result<Vec<_>, _>>()?;
+                        native.sort(); supplied.sort();
+                        ensure!(native == supplied, "recovered mentions differ from retained multiset");
+                        mentions = recovery.mentioned_pubkeys.clone();
+                    }
                     let mentions = serde_json::to_string(&mentions)?;
                     if kind == "post" {
                         ensure!(
                             row["referenced_content_id"].is_null(),
                             "retained post has a reference"
                         );
+                        ensure!(recovery.and_then(|r| r.referenced_content_id.as_ref()).is_none(),
+                            "recovered post cannot add a reference");
                         ("post", format!("{message}:{mentions}"))
                     } else {
-                        let parent = bytes(row, "referenced_content_id")?;
+                        let mut parent = bytes(row, "referenced_content_id")?;
+                        if let Some(reference) = recovery.and_then(|r| r.referenced_content_id.as_ref()) {
+                            ensure!(hex::decode(reference)? == hex::decode(&parent)?,
+                                "recovered reference differs from retained target");
+                            parent = reference.clone();
+                        }
                         ("reply", format!("{parent}:{message}:{mentions}"))
                     }
                 }
@@ -303,6 +331,7 @@ pub(crate) fn recovered_fields(
     let mut records = Vec::new();
     let mut actions = Vec::new();
     let mut transactions = BTreeSet::new();
+    let mut used_recovery = BTreeSet::new();
     for table in TABLES.iter().filter(|&&t| t != "public.k_mentions") {
         let mut ids = BTreeSet::new();
         for row in &snapshot.tables[*table] {
@@ -318,9 +347,18 @@ pub(crate) fn recovered_fields(
                 "invalid or duplicate retained native identity"
             );
             let hints = mentions.get(&id).map(Vec::as_slice).unwrap_or_default();
-            let verified = candidate(&snapshot.assumed_root, table, row, hints, &id, time)
-                .ok()
-                .and_then(|tx| processor.verify_transaction(&tx));
+            let recovery = snapshot.signing_recovery.get(&id);
+            let input = if recovery.is_some() {
+                ensure!(*table == "public.k_contents" && matches!(row["content_type"].as_str(), Some("post" | "reply")),
+                    "signing recovery supports only retained posts and replies");
+                used_recovery.insert(id.clone());
+                // Explicit material must be bound even if default reconstruction
+                // verifies; never silently ignore a supplied field.
+                Some(candidate(&snapshot.assumed_root, table, row, hints, &id, time, recovery)?)
+            } else {
+                candidate(&snapshot.assumed_root, table, row, hints, &id, time, None).ok()
+            };
+            let verified = input.and_then(|tx| processor.verify_transaction(&tx));
             let recovered = verified.is_some();
             let wire_root = if let Some(rpc) = snapshot.rpc_transactions.get(&id) {
                 Some(checked_wire_root(
@@ -344,6 +382,8 @@ pub(crate) fn recovered_fields(
                 reason: if recovered { None } else { Some("retained fields did not reproduce an SDK-verifiable signing string; original transaction validity is undetermined") } });
         }
     }
+    ensure!(snapshot.signing_recovery.keys().cloned().collect::<BTreeSet<_>>() == used_recovery,
+        "signing recovery names unknown retained records");
     records.sort_by(|a, b| {
         a.native_table
             .cmp(&b.native_table)
