@@ -8,7 +8,7 @@ from protocol_indexer.backfill import AcceptanceObservation, import_receipt
 from protocol_indexer.chats import EvidencePending
 from protocol_indexer.journal import capture_one, connect
 from protocol_indexer.routing import Family
-from test_archive import evidence, INFO, TX, ACCEPT
+from test_archive import evidence, INFO, TX, ACCEPT, PREVIOUS
 from test_postgres import PostgresHarness, DSN
 
 
@@ -21,16 +21,123 @@ def observed(value, block=ACCEPT):
 
 
 class BackfillTests(PostgresHarness):
-    def initial_gap(self, value, timestamp=None):
+    def initial_gap(self, value, timestamp=None, missing=()):
         self.db.execute('UPDATE protocol_indexer.config SET activated_at_ms=20000')
         self.body(bytes.fromhex(value['transaction_id']), bytes.fromhex(value['payload']),
                   timestamp=value['block_time'] if timestamp is None else timestamp)
+        for field in missing:
+            assert field in ('inputs', 'outputs')
+            self.db.execute('UPDATE transactions SET ' + field + '=NULL WHERE transaction_id=%s',
+                            (bytes.fromhex(value['transaction_id']),))
         self.assertTrue(capture_one(self.db))
         row = self.db.execute('SELECT * FROM protocol_indexer.canonical WHERE transaction_id=%s',
                               (bytes.fromhex(value['transaction_id']),)).fetchone()
         self.assertFalse(row['ever_accepted'])
         self.assertIsNone(row['accepting_block'])
         return row
+
+    def accepted_partial_after_retention(self, value):
+        self.initial_gap(value, missing=('inputs', 'outputs'))
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'imported')
+        self.assertTrue(capture_one(self.db))
+        # A present raw body remains owned by the source, even when incomplete.
+        self.assertIsNone(self.scalar("SELECT source_transaction->'inputs' FROM protocol_indexer.canonical"))
+        self.db.execute('DELETE FROM transactions WHERE transaction_id=%s', (bytes.fromhex(TX),))
+
+    def assert_archive_vectors(self):
+        row = self.scalar('SELECT source_transaction FROM protocol_indexer.canonical')
+        self.assertEqual(row['inputs'][0]['previous_outpoint_hash'], '\\x' + PREVIOUS)
+        self.assertEqual(row['inputs'][0]['previous_outpoint_index'], 2)
+        self.assertEqual(row['inputs'][0]['signature_script'], '\\xaabb')
+        self.assertEqual(row['outputs'][0]['amount'], 10000000)
+        self.assertEqual(row['outputs'][0]['script_public_key'], '\\x2021ac')
+        self.assertEqual(row['outputs'][0]['script_public_key_address'], 'author')
+
+    def test_pruned_initial_partial_body_recovers_vectors_and_preserves_metadata(self):
+        value = receipt(); old = self.initial_gap(value, missing=('inputs', 'outputs'))
+        self.db.execute('DELETE FROM transactions WHERE transaction_id=%s', (bytes.fromhex(TX),))
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'imported')
+        self.assert_archive_vectors()
+        after = self.scalar('SELECT source_transaction FROM protocol_indexer.canonical')
+        self.assertEqual({k:v for k,v in after.items() if k not in ('inputs', 'outputs')},
+                         {k:v for k,v in old['source_transaction'].items() if k not in ('inputs', 'outputs')})
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(self.scalar('SELECT revision FROM protocol_indexer.canonical'), 2)
+        self.assertEqual(self.scalar('SELECT count(*) FROM protocol_indexer.events WHERE notify_allowed'), 0)
+
+    def test_pruned_body_recovery_never_replaces_known_vectors(self):
+        value = receipt(); old = self.initial_gap(value, missing=('outputs',))
+        self.db.execute('DELETE FROM transactions WHERE transaction_id=%s', (bytes.fromhex(TX),))
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'imported')
+        after = self.scalar('SELECT source_transaction FROM protocol_indexer.canonical')
+        self.assertEqual(after['inputs'], old['source_transaction']['inputs'])
+        self.assertEqual(after['outputs'][0]['script_public_key'], '\\x2021ac')
+
+    def test_current_accepted_partial_is_rehydrated_once_after_retention(self):
+        value = receipt(); self.accepted_partial_after_retention(value)
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'imported')
+        self.assert_archive_vectors()
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(self.scalar('SELECT revision FROM protocol_indexer.canonical'), 3)
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'existing')
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(self.scalar('SELECT revision FROM protocol_indexer.canonical'), 3)
+        self.assertEqual(self.scalar('SELECT accepting_block FROM protocol_indexer.canonical'), bytes.fromhex(ACCEPT))
+        self.assertEqual(self.scalar('SELECT count(*) FROM protocol_indexer.events WHERE notify_allowed'), 0)
+
+    def test_body_rehydration_does_not_resurrect_revoked_partial(self):
+        value = receipt(); self.accepted_partial_after_retention(value)
+        self.db.execute('SELECT protocol_indexer.remove_source_acceptances(%s)', ([bytes.fromhex(ACCEPT)],))
+        self.assertTrue(capture_one(self.db))
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'existing')
+        self.assertIsNone(self.scalar('SELECT accepting_block FROM protocol_indexer.canonical'))
+        self.assertIsNone(self.scalar("SELECT source_transaction->'inputs' FROM protocol_indexer.canonical"))
+
+    def test_body_rehydration_requires_matching_current_block_and_second_observation(self):
+        value = receipt(); self.accepted_partial_after_retention(value)
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value, 'e'*64)), 'existing')
+        self.assertIsNone(self.scalar("SELECT source_transaction->'inputs' FROM protocol_indexer.canonical"))
+        answers = iter([observed(value), observed(value, None)])
+        with self.assertRaises(EvidencePending):
+            import_receipt(self.db, value, 'testnet-10', lambda: next(answers))
+        self.assertIsNone(self.scalar("SELECT source_transaction->'inputs' FROM protocol_indexer.canonical"))
+        self.assertEqual(self.scalar('SELECT revision FROM protocol_indexer.canonical'), 2)
+
+    def test_live_removal_after_body_rehydration_still_revokes(self):
+        value = receipt(); self.accepted_partial_after_retention(value); calls = 0; future = None
+        ready = threading.Event(); writer_pid = []
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            def observe():
+                nonlocal calls, future
+                calls += 1
+                if calls == 2:
+                    def remove():
+                        with connect(DSN) as writer:
+                            writer_pid.append(writer.info.backend_pid); ready.set()
+                            return writer.execute('SELECT protocol_indexer.remove_source_acceptances(%s) AS count',
+                                                  ([bytes.fromhex(ACCEPT)],)).fetchone()['count']
+                    future = pool.submit(remove)
+                    self.assertTrue(ready.wait(2))
+                    self.assert_writer_blocked(writer_pid[0], future)
+                return observed(value)
+            self.assertEqual(import_receipt(self.db, value, 'testnet-10', observe), 'imported')
+            self.assertEqual(future.result(timeout=3), 1)
+        self.assertTrue(capture_one(self.db))
+        self.assert_archive_vectors()
+        self.assertIsNone(self.scalar('SELECT accepting_block FROM protocol_indexer.canonical'))
+        self.assertEqual(self.scalar('SELECT count(*) FROM protocol_indexer.events WHERE notify_allowed'), 0)
+
+    def test_readded_live_block_authority_can_rehydrate_pruned_body(self):
+        value = receipt(); self.accepted_partial_after_retention(value)
+        self.db.execute('SELECT protocol_indexer.remove_source_acceptances(%s)', ([bytes.fromhex(ACCEPT)],))
+        self.assertTrue(capture_one(self.db))
+        self.db.execute('SELECT protocol_indexer.insert_source_acceptances(%s,%s)',
+                        ([bytes.fromhex(TX)], [bytes.fromhex(ACCEPT)]))
+        self.assertTrue(capture_one(self.db))
+        self.assertFalse(self.scalar('SELECT is_archive_seed FROM transactions_acceptances'))
+        self.assertEqual(import_receipt(self.db, value, 'testnet-10', lambda: observed(value)), 'imported')
+        self.assert_archive_vectors()
+        self.assertEqual(self.scalar('SELECT accepting_block FROM protocol_indexer.canonical'), bytes.fromhex(ACCEPT))
 
     def assert_writer_blocked(self, pid, future):
         deadline = time.monotonic() + 2

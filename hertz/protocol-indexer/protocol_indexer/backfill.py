@@ -103,19 +103,32 @@ def import_receipt(conn, receipt, network, observe):
             require((old['source_transaction']['payload'] if old else '\\x' + source['payload'].hex()) == body['payload'],
                     'archive payload conflicts with live journal')
             timestamp = old['source_transaction'].get('block_time') if old else None
-            if (created and old and not old['ever_accepted'] and old['accepting_block'] is None
-                    and not pending['acceptance_changed'] and type(timestamp) is int
+            historical_body = dict(old['source_transaction']) if old else None
+            if old and source is None:
+                # Once raw history has expired, restore only omitted wire
+                # vectors. Known source fields remain authoritative; native
+                # still verifies the complete transaction against its ID.
+                for field in ('inputs', 'outputs'):
+                    if historical_body.get(field) is None or historical_body[field] == []:
+                        historical_body[field] = body[field]
+            initial_gap = bool(created and old and not old['ever_accepted'] and old['accepting_block'] is None)
+            body_gap = bool(not created and old and source is None
+                            and historical_body != old['source_transaction'] and old['ever_accepted']
+                            and hint is not None and old['accepting_block'] == hint
+                            and acceptance and acceptance['block_hash'] == hint)
+            if ((initial_gap or body_gap) and not pending['acceptance_changed'] and type(timestamp) is int
                     and 0 <= timestamp < config['activated_at_ms']
                     and receipt['block_time'] < config['activated_at_ms']):
                 # Initial raw inventory can predate the live VCP window. Repair
-                # only that historical first-acceptance gap, never a revoked or
-                # post-activation record. The same block/pending guards and a
+                # its first acceptance or a pruned incomplete body, never a
+                # revoked or post-activation record. Existing live acceptance
+                # must agree for body-only repair. The block/pending locks and
                 # second fresh observation fence concurrent live changes.
                 require(not source or '\\x' + source['payload'].hex() == body['payload'],
                         'archive payload conflicts with live source')
                 if observe().checked(receipt, network) != hint:
                     raise EvidencePending('archive_acceptance_changed_during_import')
-                write_revision(conn, txid, old['source_transaction'], hint, old,
+                write_revision(conn, txid, historical_body, hint, old,
                                quiet=True, historically_accepted=True)
                 conn.execute('''INSERT INTO protocol_indexer.evidence(transaction_id,receipt)
                     VALUES (%s,%s) ON CONFLICT DO NOTHING''', (txid, Jsonb(receipt)))
