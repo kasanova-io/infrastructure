@@ -62,5 +62,15 @@
     "collector_healthy": true,
     "source_binding_sha256": "495862f4f73c4f5b4517cbc28ac85cf4e8a5299df78eb8fc93c1520089a65134",
     "adapter_activation_receipt_sha256": "06c5ab14b6952c250d1dade5b7ce083762b54d512b296b6be1732eb66ec698de"
+  },
+  "archive_network_retry": {
+    "source_manifest": "df6b99de19b9dc6f1894850c71a8aac8be20427e920ddcb52871141f4fb4d725",
+    "connector_image": "sha256:598a9d4008965ac8ed3dca5a0937b2b03ada39f51919cf44bac596a4e0831eab",
+    "python_image": "python@sha256:6dd8b6dab6b3adc7812bab69eca5dbdc1a5cc690ad28306d234ffb4ef8ac9753",
+    "local_archive_and_network_tests": 20,
+    "isolated_postgres_and_network_tests": 107,
+    "independent_retry_tests": 6,
+    "scope": "output-evidence startup and expired archive network checks defer without admission; wrong network and storage failures stay fatal",
+    "activation": "image built and tested; runtime deployment tracked in task evidence"
   }
 }

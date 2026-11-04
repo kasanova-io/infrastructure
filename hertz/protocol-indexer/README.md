@@ -681,3 +681,11 @@ These checks use disposable sources. Real chat/funds notification continuity,
 native process restart with live notifications, live catch-up, full current-source
 deltas and the DEV existing-host cutover remain
 pending. PROD and public route ownership are unchanged.
+
+
+The output-evidence worker defers transient archive network checks in the same
+process, with an interruptible five-second wait. It rechecks source identity and
+the configured archive network before consuming any work, including after the
+periodic check expires. It does not authorize work using cached network metadata.
+`--once` exits with status2 when that check is pending; network mismatches and
+storage failures remain operational errors. Queue/notification epochs are unchanged.
