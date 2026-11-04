@@ -102,6 +102,12 @@ def inspect(identity):
 def configuration(container):
     value = {key: container[key] for key in
              ("Id", "Name", "Image", "Config", "HostConfig", "Mounts")}
+    # Docker changes the default OOM setting from false to null on first start.
+    # Both leave the OOM killer enabled; an explicit true must remain distinct.
+    host = dict(value["HostConfig"])
+    if "OomKillDisable" in host and host["OomKillDisable"] is None:
+        host["OomKillDisable"] = False
+    value["HostConfig"] = host
     # Docker may enumerate equivalent runtime mounts in a different order after
     # a restart. Retain every field and duplicate, but normalize that inventory.
     value["Mounts"] = sorted(value["Mounts"], key=canonical)
