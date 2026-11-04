@@ -131,6 +131,35 @@ class RecoveryTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 cold.recover({"id": "original", "volume": "source"}, baseline, "old", 10)
 
+    def test_approximate_partition_estimates_may_decrease_after_restart(self):
+        new = {"State": {"Running": True, "StartedAt": "new", "Health": {"Status": "healthy"}}}
+        baseline = {key: 126 for key in cold.COUNTERS}
+        first = {key: 124 for key in cold.COUNTERS}
+        first.update(contextual_messages=126, blocks_processed=1)
+        second = dict(first, blocks_processed=2)
+        with patch.object(cold, "bind"), patch.object(cold, "inspect", return_value=new), \
+                patch.object(cold, "writers", return_value=["original"]), \
+                patch.object(cold, "metrics", side_effect=[first, second]), \
+                patch.object(cold.time, "sleep"), patch.object(cold, "command") as command:
+            self.assertEqual(cold.recover({"id": "original", "volume": "source"}, baseline,
+                                         "old", 10, start_if_stopped=False), second)
+        command.assert_not_called()
+
+    def test_exact_content_count_loss_still_rejects_recovery(self):
+        new = {"State": {"Running": True, "StartedAt": "new", "Health": {"Status": "healthy"}}}
+        baseline = {key: 126 for key in cold.COUNTERS}
+        first = dict(baseline, contextual_messages=125, blocks_processed=1)
+        second = dict(first, blocks_processed=2)
+        with patch.object(cold, "bind"), patch.object(cold, "inspect", return_value=new), \
+                patch.object(cold, "writers", return_value=["original"]), \
+                patch.object(cold, "metrics", side_effect=[first, second]), \
+                patch.object(cold.time, "monotonic", side_effect=[0, 0, 1, 11]), \
+                patch.object(cold.time, "sleep"), patch.object(cold, "command") as command:
+            with self.assertRaises(TimeoutError):
+                cold.recover({"id": "original", "volume": "source"}, baseline,
+                             "old", 10, start_if_stopped=False)
+        command.assert_not_called()
+
     def test_a_second_restart_resets_the_progress_observation(self):
         new = {"State": {"Running": True, "StartedAt": "new", "Health": {"Status": "healthy"}}}
         again = copy.deepcopy(new); again["State"]["StartedAt"] = "again"
