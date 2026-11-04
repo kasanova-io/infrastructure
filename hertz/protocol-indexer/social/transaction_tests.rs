@@ -37,6 +37,38 @@ fn synthetic_rpc(
     (id, rpc)
 }
 
+#[test]
+fn pure_archive_nullable_zero_scalars_still_require_exact_sdk_identity() {
+    use serde_json::{Value,json};
+    let (_,mut rpc)=synthetic_rpc("",json!([{"amount":1,"scriptPublicKey":{"version":0,"scriptPublicKey":"51"}}]),0);
+    rpc["gas"]=json!(0);
+    rpc["inputs"][0]["sequence"]=json!(0);
+    rpc["inputs"][0]["computeBudget"]=json!(0);
+    let id=crate::transaction_evidence::fixture_transaction_id(&rpc).unwrap();
+    let mut legacy=rpc.clone();
+    for key in ["gas","lockTime"] {legacy[key]=Value::Null;}
+    for key in ["sequence","computeBudget"] {legacy["inputs"][0][key]=Value::Null;}
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&legacy,&id).is_ok());
+    let mut nonzero=rpc.clone();nonzero["lockTime"]=json!(42);
+    let nonzero_id=crate::transaction_evidence::fixture_transaction_id(&nonzero).unwrap();
+    nonzero["lockTime"]=Value::Null;
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&nonzero,&nonzero_id).is_err());
+    let mut nonzero=rpc.clone();nonzero["inputs"][0]["sequence"]=json!(42);
+    let nonzero_id=crate::transaction_evidence::fixture_transaction_id(&nonzero).unwrap();
+    nonzero["inputs"][0]["sequence"]=Value::Null;
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&nonzero,&nonzero_id).is_err());
+    let mut bad=legacy.clone();bad["version"]=Value::Null;
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&bad,&id).is_err());
+    let mut bad=legacy;bad["inputs"][0]["previousOutpoint"]["index"]=Value::Null;
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&bad,&id).is_err());
+    let mut v1=rpc;v1["version"]=json!(1);v1["inputs"][0]["sigOpCount"]=json!(0);v1["inputs"][0]["computeBudget"]=json!(42);
+    let v1_id=crate::transaction_evidence::fixture_transaction_id(&v1).unwrap();
+    v1["inputs"][0]["computeBudget"]=Value::Null;
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&v1,&v1_id).is_err());
+    v1["inputs"][0].as_object_mut().unwrap().remove("computeBudget");
+    assert!(crate::transaction_evidence::CheckedTransaction::checked(&v1,&v1_id).is_err());
+}
+
 
 // SDK-coherent isolated transaction bodies, not signatures/UTXO/chain proof.
 fn room_vector(root: &str, channel: &str, content: &str, nonce: u8, forged: bool) -> serde_json::Value {
