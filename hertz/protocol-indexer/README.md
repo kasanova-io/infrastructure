@@ -115,6 +115,13 @@ verified tip counts and current poll metadata. Explicit read-contract arguments
 require the existing source/network binding. Neither service publishes a port.
 
 Keep `clients.social_indexer` on the legacy contract for cached older pages.
+Cached clients can also retain the original miniapps `/social-api` URL. At
+cutover, its existing Social Caddy snippet must target the same shared legacy
+reader as the indexer host. Start and verify that reader before applying either
+route, and switch the cached miniapps route before a shared native writer can
+insert KaChat rows into the common native tables. The old unfiltered webserver
+is not a safe fallback after mixed-root projection has started; retain a working
+shared legacy reader during recovery instead.
 Root-aware Social, Explorer, Profile and native search prefer the separately
 configured `clients.social_indexer_unified`; when absent they use the existing
 client. The proposed mixed route is `/social-api/v2` on the existing configured
@@ -154,9 +161,13 @@ verify actual requests through the existing indexer origin before Public's owner
 advertises the new client key. Preserve the old client's K-only contract. DEV fixture
 acceptance and localhost routing tests do not establish MAINNET readiness.
 Public configuration, shared QA leases and coordinated release ownership remain
-with their respective owners. Rollback restores only the prior ingress routes
-and reader network attachment; it does not downgrade or delete journal/native
-data or restart source consumers.
+with their respective owners. After mixed-root projection starts, rollback must
+retain a working shared K-only reader and its cached miniapps route. Stop the
+affected writer and recover that reader/route before resuming it. Do not restore
+the old unfiltered webserver unless its database is proven unmixed or isolated.
+Before any mixed-root writes, rollback may restore prior routes and reader
+network attachment. Neither path deletes journal/native history or automatically
+restarts source consumers.
 
 ## Protocol adapters
 

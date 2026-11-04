@@ -1,7 +1,8 @@
 # Insert this block inside the existing DEV miniapps site, before file_server.
 # Validate the complete candidate Caddyfile before reload.
+# Apply only after the shared legacy reader is healthy; preserve cached clients.
 # BEGIN KSNV-411 Social DEV API
 handle_path /social-api/* {
-    reverse_proxy social_indexer_dev_web:3001
+    reverse_proxy protocol_social_legacy_dev:8080
 }
 # END KSNV-411 Social DEV API
