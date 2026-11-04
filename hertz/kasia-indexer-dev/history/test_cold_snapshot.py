@@ -83,6 +83,18 @@ class CopyTest(unittest.TestCase):
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_first_start_oom_default_drift_preserves_helper_binding(self):
+        reader, identity = helper_fixture()
+        reader["HostConfig"]["OomKillDisable"] = False
+        identity["configuration_sha256"] = cold.configuration(reader)
+        reader["HostConfig"]["OomKillDisable"] = None
+        cold.bind_helper(reader, identity)
+        self.assertIsNone(reader["HostConfig"]["OomKillDisable"])
+
+        reader["HostConfig"]["OomKillDisable"] = True
+        with self.assertRaises(ValueError):
+            cold.bind_helper(reader, identity)
+
     def test_equivalent_mount_order_does_not_change_configuration_binding(self):
         value = {"Id": "original", "Name": "/original", "Image": "sha256:original",
                  "Config": {}, "HostConfig": {}, "Mounts": [
