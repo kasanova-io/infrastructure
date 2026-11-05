@@ -68,6 +68,7 @@ class History:
           CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, route TEXT, params TEXT, envelope TEXT, cursor TEXT, pages INTEGER DEFAULT 0, done INTEGER DEFAULT 0);
           CREATE TABLE IF NOT EXISTS observations (txid TEXT, job TEXT, data TEXT, PRIMARY KEY(txid,job));
           CREATE TABLE IF NOT EXISTS records (txid TEXT PRIMARY KEY, status TEXT DEFAULT 'discovered', kind TEXT, error TEXT);
+          CREATE TABLE IF NOT EXISTS job_cursors (job TEXT, cursor TEXT, PRIMARY KEY(job,cursor));
           CREATE INDEX IF NOT EXISTS records_status ON records(status,txid);
         """
         )
@@ -92,6 +93,9 @@ class History:
             (self.root / directory).mkdir(exist_ok=True)
 
     def request(self, url):
+        return self.request_with_headers(url)[0]
+
+    def request_with_headers(self, url):
         # Share pacing across content/relationship collectors. The conservative
         # archive default supplements Chats' 0.4s bucket and shared 429 cooldown.
         source_request = url.startswith(self.source + "/")
@@ -117,7 +121,7 @@ class History:
             stream.truncate()
             stream.write(str(time.time() + interval))
             stream.flush()
-        return _chats.request(url, **getattr(self, 'request_options', {}))[0]
+        return _chats.request(url, **getattr(self, 'request_options', {}))
 
     def guard_capacity(self):
         if shutil.disk_usage(self.root).free < 2 * 1024**3:
@@ -169,17 +173,13 @@ class History:
 
         for _ in range(budget or 10**9):
             job = self.db.execute(
-                f"""SELECT id,route,params,envelope,cursor,pages FROM jobs WHERE {condition} ORDER BY CASE route WHEN "/get-posts-watching" THEN 0 WHEN "/get-users" THEN 1 ELSE CASE WHEN json_extract(params,'$.user') IS NOT NULL THEN 2 ELSE 3 END END,id LIMIT 1""",
+                f"""SELECT id,route,params,envelope,cursor,pages FROM jobs WHERE {condition} ORDER BY {self.job_order()} LIMIT 1""",
                 selected_jobs,
             ).fetchone()
             if not job:
                 break
             jid, route, params, envelope, cursor, pages = job
-            query = {**json.loads(params), "limit": 100}
-            if cursor:
-                query["before"] = cursor
-            url = self.source + route + "?" + urllib.parse.urlencode(query)
-            page = self.cache("pages", jid + "-" + str(pages), url)
+            page, url = self.discovery_page(jid, route, json.loads(params), cursor, pages)
             rows, pagination = page.get(envelope), page.get("pagination")
             if (
                 not isinstance(rows, list)
@@ -189,17 +189,14 @@ class History:
                 raise ValueError("Invalid page contract " + url)
             next_cursor = pagination.get("nextCursor")
             if pagination["hasMore"] and (
-                not rows or not next_cursor or next_cursor == cursor
+                (not rows and not self.empty_page_advances(route))
+                or not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor
             ):
                 raise ValueError("Pagination failed to advance " + url)
             if pagination["hasMore"]:
-                parts = next_cursor.split("_")
-                if len(parts) != 2 or not all(p.isdigit() for p in parts):
-                    raise ValueError("Invalid source cursor")
-                if cursor and tuple(map(int, parts)) >= tuple(
-                    map(int, cursor.split("_"))
-                ):
-                    raise ValueError("Source cursor moved forward")
+                self.validate_cursor(route, cursor, next_cursor)
+                if self.db.execute("SELECT 1 FROM job_cursors WHERE job=? AND cursor=?", (jid, next_cursor)).fetchone():
+                    raise ValueError("Source cursor cycle")
             with self.db:
                 for row in rows:
                     txid = row.get("id", "")
@@ -231,11 +228,33 @@ class History:
                         (txid, jid, json.dumps(row)),
                     )
                     self.queue_related(row, route)
+                if pagination["hasMore"]:
+                    self.db.execute("INSERT INTO job_cursors VALUES (?,?)", (jid, next_cursor))
                 self.db.execute(
                     "UPDATE jobs SET cursor=?,pages=pages+1,done=? WHERE id=?",
                     (next_cursor, int(not pagination["hasMore"]), jid),
                 )
             self.status()
+
+    def job_order(self):
+        return 'CASE route WHEN "/get-posts-watching" THEN 0 WHEN "/get-users" THEN 1 ELSE CASE WHEN json_extract(params,\'$.user\') IS NOT NULL THEN 2 ELSE 3 END END,id'
+
+    def empty_page_advances(self, route):
+        return False
+
+    def discovery_page(self, jid, route, params, cursor, pages):
+        query = {**params, "limit": 100}
+        if cursor:
+            query["before"] = cursor
+        url = self.source + route + "?" + urllib.parse.urlencode(query)
+        return self.cache("pages", jid + "-" + str(pages), url), url
+
+    def validate_cursor(self, route, cursor, next_cursor):
+        parts = next_cursor.split("_")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            raise ValueError("Invalid source cursor")
+        if cursor and tuple(map(int, parts)) >= tuple(map(int, cursor.split("_"))):
+            raise ValueError("Source cursor moved forward")
 
     def is_content(self, row, route):
         return route != "/get-users"
