@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import tempfile
 import time
@@ -85,35 +86,78 @@ def atomic_json(path, value):
     os.replace(tmp, path)
 
 
-def collect_explorer(address, root=None):
+def collect_explorer(address, root=None, *, archive="https://api.kaspa.org",
+                     request_fn=None, accept_payload=None, checkpoint_scope=None,
+                     page_budget=0, limit=500):
+    """Reuse the address scanner with separately bound multi-protocol checkpoints.
+
+    Legacy callers retain their exact filter/checkpoint/result contract. New
+    callers must name their network and filter; a completed chat-only scan must
+    never stand in for a six-family scan or a scan of another archive.
+    """
+    archive = archive.rstrip("/")
+    if type(page_budget) is not int or page_budget < 0 or type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("invalid address page bounds")
+    binding = None
+    if checkpoint_scope is not None:
+        if (root is None or not isinstance(checkpoint_scope, dict)
+                or checkpoint_scope.get("archive") != archive
+                or not re.fullmatch(r"mainnet|testnet-[0-9]+", str(checkpoint_scope.get("network", "")))
+                or not isinstance(checkpoint_scope.get("filter"), str)
+                or not checkpoint_scope["filter"]):
+            raise ValueError("address checkpoint requires archive/network/filter binding")
+        binding = {**checkpoint_scope, "address": address, "limit": limit}
+    elif archive != "https://api.kaspa.org" or accept_payload is not None or page_budget or limit != 500:
+        raise ValueError("custom address scan requires scoped checkpoints")
+    fetch = request_fn or request
+    accepts = accept_payload or (lambda payload: payload.startswith(PREFIXES))
     rows = {}
     pages = scanned = 0
     before = 0
     checkpoint = None
+
+    def result(done):
+        value = {"rows": list(rows.values()), "pages": pages, "scanned": scanned}
+        if binding is not None:
+            value.update(done=done, before=before)
+        return value
+
+    def save(done):
+        if checkpoint is not None:
+            value = {**result(done), "before": before, "done": done}
+            if binding is not None:
+                value["binding"] = binding
+            atomic_json(checkpoint, value)
+
     if root is not None:
-        directory = root / "checkpoints"
-        directory.mkdir(exist_ok=True)
+        directory = Path(root) / "checkpoints"
+        if binding is not None:
+            directory /= hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+        directory.mkdir(parents=True, exist_ok=True)
         checkpoint = directory / (hashlib.sha256(address.encode()).hexdigest() + ".json.gz")
         if checkpoint.exists():
             with gzip.open(checkpoint, "rt") as stream:
                 saved = json.load(stream)
+            if binding is not None and saved.get("binding") != binding:
+                raise ValueError("address checkpoint binding mismatch")
             rows = {row["transaction_id"]: row for row in saved["rows"]}
             pages, scanned, before = saved["pages"], saved["scanned"], saved["before"]
             if saved["done"]:
-                return {"rows": list(rows.values()), "pages": pages, "scanned": scanned}
+                return result(True)
+    started_pages = pages
     while True:
-        query = {"limit": 500, "resolve_previous_outpoints": "light", "acceptance": "accepted"}
+        query = {"limit": limit, "resolve_previous_outpoints": "light", "acceptance": "accepted"}
         if before:
             query["before"] = before
-        url = "https://api.kaspa.org/addresses/" + address + "/full-transactions-page?" + urllib.parse.urlencode(query)
-        page, headers = request(url)
+        url = archive + "/addresses/" + urllib.parse.quote(address, safe=":") + "/full-transactions-page?" + urllib.parse.urlencode(query)
+        page, headers = fetch(url)
         if not isinstance(page, list):
             raise ValueError("explorer returned a non-list")
         pages += 1
         scanned += len(page)
         for row in page:
             payload = bytes.fromhex(row.get("payload") or "")
-            if payload.startswith(PREFIXES):
+            if accepts(payload):
                 txid = row["transaction_id"]
                 old = rows.get(txid)
                 if old and old["payload"] != row["payload"]:
@@ -121,16 +165,15 @@ def collect_explorer(address, root=None):
                 rows[txid] = row
         header = next((v for k, v in headers.items() if k.lower() == "x-next-page-before"), None)
         if header is None:
-            if checkpoint is not None:
-                atomic_json(checkpoint, {"rows":list(rows.values()),"pages":pages,"scanned":scanned,"before":before,"done":True})
-            break
+            save(True)
+            return result(True)
         next_before = int(header)
         if next_before <= 0 or (before and next_before >= before):
             raise ValueError("explorer pagination did not advance")
         before = next_before
-        if checkpoint is not None:
-            atomic_json(checkpoint, {"rows":list(rows.values()),"pages":pages,"scanned":scanned,"before":before,"done":False})
-    return {"rows": list(rows.values()), "pages": pages, "scanned": scanned}
+        save(False)
+        if page_budget and pages - started_pages >= page_budget:
+            return result(False)
 
 
 def collect_indexer(source, address, endpoint, extra=None):
