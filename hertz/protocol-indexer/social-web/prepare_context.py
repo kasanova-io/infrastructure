@@ -14,12 +14,12 @@ def prepare(output):
     history = json.loads((HERE / 'SOURCE.lock').read_text())
     # Keep the accepted reader's historical inputs/images intact. A new frozen
     # candidate records compatibility with the current native-owned SQL assets.
-    lock = history.get('legacy_action_candidate') or history.get('retained_root_candidate') or history.get('unified_feed_candidate', history.get('action_protocol_candidate',
+    lock = history.get('edited_metadata_candidate') or history.get('legacy_action_candidate') or history.get('retained_root_candidate') or history.get('unified_feed_candidate', history.get('action_protocol_candidate',
                        history.get('tip_counts_candidate', history.get('bounded_read_candidate', history.get('retained_schema_candidate', history)))))
     inputs = {name: HERE / name for name in [
         'Dockerfile', 'prepare_web.py', 'shared-api.patch', 'shared_rooms.rs',
         'shared_room_tests.rs', 'shared_reads.rs', 'shared_read_tests.rs', 'shared-read-api.patch', 'Cargo.lock',
-        'tip_counts.rs', 'tip-counts.patch', 'protocol-metadata.patch', 'unified-feed.patch',
+        'tip_counts.rs', 'tip-counts.patch', 'protocol-metadata.patch', 'unified-feed.patch', 'edited-metadata.patch',
     ]}
     inputs['shared_room_schema.sql'] = HERE.parent / 'social/rooms.sql'
     for name, native in {'shared_read_schema.sql':'read_views.sql', 'shared_edit_authorization.sql':'edit_authorization.sql', 'shared_unquote_order.sql':'unquote_order.sql', 'shared_social_schema.sql':'shared_social.sql', 'shared_kaposts_schema.sql':'kaposts_projection.sql'}.items():
