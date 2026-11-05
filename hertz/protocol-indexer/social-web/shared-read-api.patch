@@ -1,0 +1,343 @@
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -52,10 +52,12 @@
+     }
+ 
+     /// Get network type from k_vars table (internal implementation)
+-    async fn get_network_from_db(&self) -> Result<String, sqlx::Error> {
++    async fn get_network_from_db(&self) -> DatabaseResult<String> {
++        let mut read = self.read_session().await?;
++
+         let result = sqlx::query("SELECT value FROM k_vars WHERE key = 'network'")
+-            .fetch_optional(&self.pool)
+-            .await?;
++            .fetch_optional(&mut *read)
++            .await.map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+         Ok(result
+             .map(|row| row.get("value"))
+@@ -283,7 +285,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!(
+                 "Failed to fetch all broadcasts with block status: {}",
+                 e
+@@ -421,7 +425,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!("Failed to fetch most active users: {}", e))
+         })?;
+ 
+@@ -598,8 +604,10 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(format!("Failed to search users: {}", e)))?;
+ 
+@@ -679,10 +687,12 @@
+             LIMIT 1
+         "#;
+ 
++        let mut read = self.read_session().await?;
++
+         let row_opt = sqlx::query(query)
+             .bind(&user_pubkey_bytes)
+             .bind(&requester_pubkey_bytes)
+-            .fetch_optional(&self.pool)
++            .fetch_optional(&mut *read)
+             .await
+             .map_err(|e| {
+                 DatabaseError::QueryError(format!("Failed to fetch broadcast by user: {}", e))
+@@ -738,7 +748,7 @@
+             let status_row = sqlx::query(status_query)
+                 .bind(&user_pubkey_bytes)
+                 .bind(&requester_pubkey_bytes)
+-                .fetch_one(&self.pool)
++                .fetch_one(&mut *read)
+                 .await
+                 .map_err(|e| {
+                     DatabaseError::QueryError(format!("Failed to check block/follow status: {}", e))
+@@ -846,7 +856,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!("Failed to fetch blocked users by requester: {}", e))
+         })?;
+ 
+@@ -955,7 +967,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!(
+                 "Failed to fetch followed users by requester: {}",
+                 e
+@@ -1073,7 +1087,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!("Failed to fetch users following: {}", e))
+         })?;
+ 
+@@ -1196,7 +1212,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!("Failed to fetch users followers: {}", e))
+         })?;
+ 
+@@ -1409,8 +1427,10 @@
+         }
+         query_builder = query_builder.bind(offset_limit);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -1619,7 +1639,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!("Failed to fetch followed content: {}", e))
+         })?;
+ 
+@@ -1911,8 +1933,10 @@
+             .bind(offset_limit)
+             .bind(&requester_pubkey_bytes);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -2017,13 +2041,15 @@
+     ) -> DatabaseResult<Option<KVoteRecord>> {
+         let vote_id_bytes = Self::decode_hex_to_bytes(vote_id)?;
+         let requester_bytes = Self::decode_hex_to_bytes(requester_pubkey)?;
++        let mut read = self.read_session().await?;
++
+         let row = sqlx::query(
+             "SELECT id, transaction_id, block_time, sender_pubkey, sender_signature, post_id, vote \
+              FROM k_votes WHERE transaction_id = $1 AND sender_pubkey = $2 LIMIT 1",
+         )
+         .bind(vote_id_bytes)
+         .bind(requester_bytes)
+-        .fetch_optional(&self.pool)
++        .fetch_optional(&mut *read)
+         .await
+         .map_err(|error| DatabaseError::QueryError(error.to_string()))?;
+         Ok(row.map(|row| KVoteRecord {
+@@ -2141,10 +2167,12 @@
+             LIMIT 1
+         "#;
+ 
++        let mut read = self.read_session().await?;
++
+         let row = match sqlx::query(query)
+             .bind(&content_id_bytes)
+             .bind(&requester_pubkey_bytes)
+-            .fetch_optional(&self.pool)
++            .fetch_optional(&mut *read)
+             .await
+         {
+             Ok(Some(row)) => row,
+@@ -2417,8 +2445,10 @@
+             .bind(offset_limit)
+             .bind(&requester_pubkey_bytes);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -2646,8 +2676,10 @@
+             .bind(offset_limit)
+             .bind(&requester_pubkey_bytes);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -2895,8 +2927,10 @@
+             .bind(offset_limit)
+             .bind(&requester_pubkey_bytes);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -2955,6 +2989,11 @@
+         after: Option<String>,
+     ) -> DatabaseResult<u64> {
+         let requester_pubkey_bytes = Self::decode_hex_to_bytes(requester_pubkey)?;
++
++        if after.as_ref().is_some_and(|value| Self::parse_compound_cursor(value).is_err()) {
++            return Err(DatabaseError::InvalidInput("Invalid cursor format".into()));
++        }
++        let mut read = self.read_session().await?;
+ 
+         let count_result = if let Some(cursor_str) = after {
+             // If after cursor is provided, count notifications since that cursor (excluding blocked users)
+@@ -2981,7 +3020,7 @@
+                 .bind(&requester_pubkey_bytes)
+                 .bind(cursor_timestamp as i64)
+                 .bind(cursor_id)
+-                .fetch_one(&self.pool)
++                .fetch_one(&mut *read)
+                 .await
+             } else {
+                 return Err(DatabaseError::InvalidInput(
+@@ -3009,7 +3048,7 @@
+                 "#,
+             )
+             .bind(&requester_pubkey_bytes)
+-            .fetch_one(&self.pool)
++            .fetch_one(&mut *read)
+             .await
+         };
+ 
+@@ -3159,8 +3198,10 @@
+             .bind(offset_limit)
+             .bind(&requester_pubkey_bytes);
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = query_builder
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -3332,12 +3373,14 @@
+     }
+ 
+     async fn get_users_count(&self) -> DatabaseResult<u64> {
++        let mut read = self.read_session().await?;
++
+         let row = sqlx::query(
+             r#"
+             SELECT COUNT(*) as count FROM k_broadcasts
+             "#,
+         )
+-        .fetch_one(&self.pool)
++        .fetch_one(&mut *read)
+         .await
+         .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -3346,6 +3389,8 @@
+     }
+ 
+     async fn get_stats(&self) -> DatabaseResult<crate::database_trait::DatabaseStats> {
++        let mut read = self.read_session().await?;
++
+         let row = sqlx::query(
+             r#"
+             SELECT
+@@ -3358,7 +3403,7 @@
+                 (SELECT COUNT(*) FROM k_blocks) as blocks_count
+             "#,
+         )
+-        .fetch_one(&self.pool)
++        .fetch_one(&mut *read)
+         .await
+         .map_err(|e| DatabaseError::QueryError(e.to_string()))?;
+ 
+@@ -3533,7 +3578,9 @@
+ 
+         query_builder = query_builder.bind(offset_limit);
+ 
+-        let rows = query_builder.fetch_all(&self.pool).await.map_err(|e| {
++        let mut read = self.read_session().await?;
++
++        let rows = query_builder.fetch_all(&mut *read).await.map_err(|e| {
+             DatabaseError::QueryError(format!("Failed to fetch hashtag content: {}", e))
+         })?;
+ 
+@@ -3638,11 +3685,13 @@
+             LIMIT $3
+         "#;
+ 
++        let mut read = self.read_session().await?;
++
+         let rows = sqlx::query(query)
+             .bind(from_time as i64)
+             .bind(to_time as i64)
+             .bind(limit as i64)
+-            .fetch_all(&self.pool)
++            .fetch_all(&mut *read)
+             .await
+             .map_err(|e| {
+                 DatabaseError::QueryError(format!("Failed to fetch trending hashtags: {}", e))
+--- a/K-webserver/src/main.rs
++++ b/K-webserver/src/main.rs
+@@ -1,5 +1,8 @@
+ mod api_handlers;
+ mod shared_rooms;
++mod shared_reads;
++#[cfg(all(test, feature = "shared-web-contract"))]
++mod shared_read_tests;
+ #[cfg(all(test, feature = "shared-web-contract"))]
+ mod shared_room_tests;
+ mod config;
+@@ -152,7 +155,7 @@
+ 
+     if let Some(source_id) = args.shared_source_id {
+         db_manager.shared = Some(shared_rooms::Binding { network: args.shared_network.expect("clap requires shared network"), source_id, statement_timeout_ms: config.server.request_timeout.saturating_mul(1000) });
+-        db_manager.validate_shared_binding().await?;
++        db_manager.validate_shared_reads().await?;
+     }
+ 
+     // Create web server

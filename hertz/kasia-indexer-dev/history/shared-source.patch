@@ -1,0 +1,283 @@
+--- a/indexer-actors/src/data_source.rs
++++ b/indexer-actors/src/data_source.rs
+@@ -138,7 +138,22 @@
+     }
+ 
+     async fn handle_connect_impl(&mut self) -> anyhow::Result<()> {
++        let shared = std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true");
++        self.handle_connect_for_mode(shared).await
++    }
++
++    async fn handle_connect_for_mode(&mut self, shared: bool) -> anyhow::Result<()> {
+         info!("Connected to {:?}", self.rpc_client.url());
++        if shared {
++            // Retain ordinary request dispatch and queued sender resolution.
++            // Only BlockAdded/VCP scanner subscriptions/connect events are skipped.
++            self.connected = true;
++            for req in self.requests_queue.drain(..) {
++                self.command_rx.send(Command::Request(req)).await?;
++            }
++            info!("Shared ingestion enabled; independent chain scanner disabled");
++            return Ok(());
++        }
+         // register for notifications
+         self.register_notification_listeners().await?;
+         let info = self.rpc_client.get_block_dag_info().await?;
+@@ -567,3 +582,50 @@
+     #[error("RPC error: {0}")]
+     RpcError(#[from] workflow_rpc::client::error::Error),
+ }
++
++#[cfg(test)]
++mod shared_source_tests {
++    use super::*;
++    #[tokio::test]
++    async fn shared_connect_drains_ordinary_requests_without_scanner_notifications()
++    -> anyhow::Result<()> {
++        let client = KaspaRpcClient::new(
++            kaspa_wrpc_client::WrpcEncoding::Borsh,
++            Some("ws://127.0.0.1:1"),
++            None,
++            Some(kaspa_wrpc_client::prelude::NetworkId::new(
++                kaspa_wrpc_client::prelude::NetworkType::Mainnet,
++            )),
++            None,
++        )?;
++        let (blocks, block_rx) = flume::bounded(4);
++        let (vcc, vcc_rx) = flume::bounded(4);
++        let (_shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
++        let (sender, receiver) = workflow_core::channel::bounded(8);
++        let read = receiver.clone();
++        let mut source = DataSource::new(
++            client,
++            blocks,
++            vcc,
++            shutdown_rx,
++            Arc::new(AtomicU64::new(0)),
++            Channel { sender, receiver },
++        );
++        source
++            .handle_command(Command::Request(Request::RequestSender {
++                daa_score: 42,
++                tx_id: [7; 32],
++            }))
++            .await?;
++        assert_eq!(source.requests_queue.len(), 1);
++        source.handle_connect_for_mode(true).await?;
++        assert!(source.connected);
++        assert!(source.requests_queue.is_empty());
++        assert!(
++            matches!(read.recv().await?,Command::Request(Request::RequestSender{daa_score:42,tx_id}) if tx_id==[7;32])
++        );
++        assert!(block_rx.is_empty());
++        assert!(vcc_rx.is_empty());
++        Ok(())
++    }
++}
+--- a/indexer-actors/src/periodic_processor.rs
++++ b/indexer-actors/src/periodic_processor.rs
+@@ -79,6 +79,11 @@
+     }
+ 
+     fn prune(&self) -> anyhow::Result<u64> {
++        // Shared ingestion owns retention. Continue do_job's metric refresh and
++        // compaction so the established API/monitoring contracts remain intact.
++        if std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true") {
++            return Ok(0);
++        }
+         let current_daa = self.virtual_daa.load(Ordering::Relaxed);
+         let prune_threshold = current_daa.saturating_sub(self.pruning_depth);
+         debug!(current_daa, prune_threshold, "Starting block pruning");
+--- a/protocol/src/operation/deserializer.rs
++++ b/protocol/src/operation/deserializer.rs
+@@ -15,6 +15,7 @@
+ pub fn parse_sealed_operation(payload_bytes: &[u8]) -> Option<SealedOperation<'_>> {
+     // Dual-read: accept the canonical `kchat:` prefix and the legacy `ciph_msg:` prefix (same
+     // payload grammar after the prefix), so old on-chain content still parses.
++    let is_kchat = payload_bytes.starts_with(PROTOCOL_PREFIX.as_bytes());
+     let payload_without_protocol = payload_bytes
+         .strip_prefix(PROTOCOL_PREFIX.as_bytes())
+         .or_else(|| payload_bytes.strip_prefix(LEGACY_PROTOCOL_PREFIX.as_bytes()))?;
+@@ -30,7 +31,10 @@
+             },
+         )),
+         Some([b'p', b'a', b'y', b':', sealed_hex @ ..]) => {
+-            Some(SealedOperation::PaymentV1(SealedPaymentV1 { sealed_hex }))
++            Some(SealedOperation::PaymentV1(SealedPaymentV1 {
++                sealed_hex,
++                hex_encoded: false,
++            }))
+         }
+         Some(
+             [
+@@ -44,7 +48,35 @@
+                 b':',
+                 sealed_hex @ ..,
+             ],
+-        ) => Some(SealedOperation::PaymentV1(SealedPaymentV1 { sealed_hex })),
++        ) => Some(SealedOperation::PaymentV1(SealedPaymentV1 {
++            sealed_hex,
++            hex_encoded: false,
++        })),
++        // The deployed Social wire signs with64-byte BIP340 Schnorr.
++        // Preserve only its sealed payment memo here; signature/payment evidence
++        // is validated by the shared source before consumer delivery.
++        Some([b't', b'i', b'p', b':', remaining @ ..]) if is_kchat => {
++            let fields: Vec<&[u8]> = remaining.split(|byte| *byte == b':').collect();
++            let [pubkey, signature, post_id, author_pubkey, sealed_hex] = fields.as_slice() else {
++                return None;
++            };
++            if !(is_fixed_hex(pubkey, 32) || is_fixed_hex(pubkey, 33))
++                || !is_fixed_hex(signature, 64)
++                || !is_fixed_hex(post_id, 32)
++                || !(is_fixed_hex(author_pubkey, 32) || is_fixed_hex(author_pubkey, 33))
++                || sealed_hex.is_empty()
++                || sealed_hex.len() % 2 != 0
++                || !sealed_hex
++                    .iter()
++                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
++            {
++                return None;
++            }
++            Some(SealedOperation::PaymentV1(SealedPaymentV1 {
++                sealed_hex,
++                hex_encoded: true,
++            }))
++        }
+         Some(
+             [
+                 b'h',
+@@ -178,3 +210,50 @@
+ fn is_nonempty_hex(value: &[u8]) -> bool {
+     !value.is_empty() && value.len().is_multiple_of(2) && value.iter().all(u8::is_ascii_hexdigit)
+ }
++
++#[cfg(test)]
++mod shared_tip_tests {
++    use super::*;
++    #[test]
++    fn accepted_real_tip_preserves_its_payment_memo_and_rejects_foreign_shapes() {
++        // Public TN10 chain vector7cb3e349... from the accepted Alice->Charlie tip.
++        let wire = "kchat:1:tip:03b736ec7820b077f71daee7dae1b62d910983f25b11ff7fb87a79caa2e37d264f:32c541d3a9e6d58bc867f3e4d5d788a362ca29a94c533b2d51b97eae76abc9adaef2dc45640e190974b4734f2836781c402ccccf16b990098aa81048780b1909:f3941dc64ae4db441c746f7fd6bd7d6d44436ef84cf61c02c6516e6d4f8f4b61:022037bed70bc8f3d71a5696616c4f1a5cdf4239ea5c6e1774a0b48a3a6b473943:77a9b66575b85cbeff35deee0290e59cd739af5c965b558fd6858434193ef97236a7549128f482d796728dd75d997d5ea35cb4755ea8ab5fe098a6a7e8752a28855035d4f9da8df915007bbab9748c7c9b30c16fbf9f33f53803c92dab9281f2e855792b36d97dc1fd89fb05bfb9ed635826d2bc710ef4e08fccf1b8655d85d73224d7f7d7936f9287654ac5c94c286486669241";
++        let Some(SealedOperation::PaymentV1(payment)) = parse_sealed_operation(wire.as_bytes())
++        else {
++            panic!("accepted tip must preserve payment memo")
++        };
++        assert_eq!(
++            payment.sealed_hex,
++            wire.rsplit(':').next().unwrap().as_bytes()
++        );
++        assert_eq!(
++            faster_hex::hex_string(payment.storage_bytes().unwrap().as_ref()),
++            wire.rsplit(':').next().unwrap()
++        );
++        let Some(SealedOperation::PaymentV1(raw)) =
++            parse_sealed_operation(b"ciph_msg:1:pay:deadbeef")
++        else {
++            panic!("ordinary pay")
++        };
++        assert_eq!(raw.storage_bytes().unwrap().as_ref(), b"deadbeef");
++        assert!(
++            parse_sealed_operation(wire.replacen("kchat:", "ciph_msg:", 1).as_bytes()).is_none()
++        );
++        assert!(parse_sealed_operation(b"kchat:1:post:key:sig:body").is_none());
++        let upper = wire.rsplit_once(':').unwrap();
++        assert!(
++            parse_sealed_operation(format!("{}:{}", upper.0, upper.1.to_uppercase()).as_bytes())
++                .is_none()
++        );
++        let mut fields: Vec<&str> = wire.split(':').collect();
++        fields[4] = "00";
++        assert!(parse_sealed_operation(fields.join(":").as_bytes()).is_none());
++        for malformed in [
++            "tip:key:sig:post:author:00ff",
++            "tip:a:b:c:d:",
++            "tip:a:b:c:d:xyz",
++        ] {
++            assert!(parse_sealed_operation(format!("kchat:1:{malformed}").as_bytes()).is_none());
++        }
++    }
++}
+--- a/protocol/src/operation.rs
++++ b/protocol/src/operation.rs
+@@ -65,6 +65,23 @@
+ #[derive(Debug, PartialEq, Eq, Clone)]
+ pub struct SealedPaymentV1<'a> {
+     pub sealed_hex: &'a [u8],
++    pub hex_encoded: bool,
++}
++
++impl<'a> SealedPaymentV1<'a> {
++    /// Native payment partitions store raw sealed bytes for both ordinary
++    /// pay/payment and tips. Only the tip wire carries ASCII hex text.
++    pub fn storage_bytes(&self) -> Option<std::borrow::Cow<'a, [u8]>> {
++        if !self.hex_encoded {
++            return Some(std::borrow::Cow::Borrowed(self.sealed_hex));
++        }
++        if self.sealed_hex.len() % 2 != 0 {
++            return None;
++        }
++        let mut decoded = vec![0; self.sealed_hex.len() / 2];
++        faster_hex::hex_decode(self.sealed_hex, &mut decoded).ok()?;
++        Some(std::borrow::Cow::Owned(decoded))
++    }
+ }
+ 
+ #[derive(Debug, PartialEq, Eq, Clone)]
+@@ -172,6 +189,7 @@
+             result,
+             Some(SealedOperation::PaymentV1(SealedPaymentV1 {
+                 sealed_hex: b"abc123",
++                hex_encoded: false,
+             }))
+         );
+     }
+--- a/indexer-actors/src/block_processor.rs
++++ b/indexer-actors/src/block_processor.rs
+@@ -795,8 +795,9 @@
+         sender: Option<AddressPayload>,
+     ) -> anyhow::Result<()> {
+         debug!(%tx_id, sender = ?sender, receiver = ?receiver, amount, "Handling payment transaction");
++        let stored = pm.storage_bytes().ok_or_else(|| anyhow::anyhow!("invalid sealed tip memo"))?;
+         self.tx_id_to_payment_partition
+-            .insert_wtx(wtx, tx_id.as_ref(), amount, pm.sealed_hex)?;
++            .insert_wtx(wtx, tx_id.as_ref(), amount, stored.as_ref())?;
+         let pm_key = PaymentKeyByReceiver {
+             receiver,
+             block_time: header.timestamp.into(),
+--- a/indexer/src/context.rs
++++ b/indexer/src/context.rs
+@@ -4,6 +4,7 @@
+     prelude::{NetworkId, NetworkType},
+ };
+ use std::path::PathBuf;
++use std::str::FromStr;
+ use tracing::info;
+ 
+ #[derive(Clone)]
+@@ -26,11 +27,20 @@
+         Some(kaspa_wrpc_client::Resolver::default())
+     };
+ 
+-    let selected_network = if network_type == NetworkType::Mainnet {
+-        Some(NetworkId::new(NetworkType::Mainnet))
+-    } else {
+-        Some(NetworkId::with_suffix(network_type, 10))
+-    };
++    let selected_network =
++        if std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true") {
++            let configured = std::env::var("KASANOVA_SHARED_NETWORK")?;
++            let id = NetworkId::from_str(&configured)?;
++            anyhow::ensure!(
++                id.network_type() == network_type,
++                "shared source network conflicts with native configuration"
++            );
++            Some(id)
++        } else if network_type == NetworkType::Mainnet {
++            Some(NetworkId::new(NetworkType::Mainnet))
++        } else {
++            Some(NetworkId::with_suffix(network_type, 10))
++        };
+ 
+     let subscription_context = None;
+ 

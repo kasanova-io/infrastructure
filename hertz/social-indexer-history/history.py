@@ -103,24 +103,31 @@ class History:
         if not 0.4 <= archive_interval <= 60:
             raise ValueError("Archive pacing must be between 0.4 and 60 seconds")
         interval = 1.0 if source_request else archive_interval
+        max_wait = getattr(self, 'request_max_wait', None)
         bucket = "source-rate.txt" if source_request else "archive-rate.txt"
         with (rate_root / bucket).open("a+") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            fcntl.flock(stream, fcntl.LOCK_EX | (fcntl.LOCK_NB if max_wait is not None else 0))
             stream.seek(0)
             next_at = float(stream.read() or 0)
-            time.sleep(max(0, next_at - time.time()))
+            delay = max(0, next_at - time.time())
+            if max_wait is not None and delay > max_wait:
+                raise _chats.RatePending('shared history cooldown')
+            time.sleep(delay)
             stream.seek(0)
             stream.truncate()
             stream.write(str(time.time() + interval))
             stream.flush()
-        return _chats.request(url)[0]
+        return _chats.request(url, **getattr(self, 'request_options', {}))[0]
+
+    def guard_capacity(self):
+        if shutil.disk_usage(self.root).free < 2 * 1024**3:
+            raise CapacityPause("History collection paused: less than 2 GiB free")
 
     def cache(self, directory, key, url):
         path = self.root / directory / (key + ".json.gz")
         if path.exists():
             return load(path)
-        if shutil.disk_usage(self.root).free < 2 * 1024**3:
-            raise CapacityPause("History collection paused: less than 2 GiB free")
+        self.guard_capacity()
         value = self.request(url)
         atomic_json(path, value)
         return value
@@ -223,33 +230,32 @@ class History:
                         "INSERT OR IGNORE INTO observations VALUES (?,?,?)",
                         (txid, jid, json.dumps(row)),
                     )
-                    author = row.get("userPublicKey", "")
-                    if KEY.fullmatch(author):
-                        self.add_job(
-                            "/get-replies",
-                            {"user": author, "requesterPubkey": ANON},
-                            "replies",
-                        )
-                    # Traverse every discovered parent, including orphan roots
-                    # referred to by replies; no assumption repliesCount is complete.
-                    if route != "/get-users":
-                        self.add_job(
-                            "/get-replies",
-                            {"post": txid, "requesterPubkey": ANON},
-                            "replies",
-                        )
-                    parent = row.get("parentPostId")
-                    if parent and HEX64.fullmatch(parent):
-                        self.add_job(
-                            "/get-replies",
-                            {"post": parent, "requesterPubkey": ANON},
-                            "replies",
-                        )
+                    self.queue_related(row, route)
                 self.db.execute(
                     "UPDATE jobs SET cursor=?,pages=pages+1,done=? WHERE id=?",
                     (next_cursor, int(not pagination["hasMore"]), jid),
                 )
             self.status()
+
+    def is_content(self, row, route):
+        return route != "/get-users"
+
+    def queue_related(self, row, route):
+        author = row.get("userPublicKey", "")
+        if KEY.fullmatch(author):
+            self.add_job(
+                "/get-replies", {"user": author, "requesterPubkey": ANON}, "replies"
+            )
+        # Traverse every discovered content, including orphan reply roots.
+        if self.is_content(row, route):
+            self.add_job(
+                "/get-replies", {"post": row["id"], "requesterPubkey": ANON}, "replies"
+            )
+        parent = row.get("parentPostId")
+        if parent and HEX64.fullmatch(parent):
+            self.add_job(
+                "/get-replies", {"post": parent, "requesterPubkey": ANON}, "replies"
+            )
 
     def verify_one(self, txid, observations=None):
         url = (
@@ -366,28 +372,36 @@ class History:
         if not 1 <= workers <= 4:
             raise ValueError("Archive workers must be between 1 and 4")
         condition = "status!='verified'" if retry else "status='discovered'"
-        txids = [
-            r[0]
-            for r in self.db.execute(
-                "SELECT txid FROM records WHERE "
-                + condition
-                + " ORDER BY txid LIMIT ?",
-                (budget or 10**9,),
-            )
-        ]
         if selected:
             if any(not HEX64.fullmatch(txid) for txid in selected):
                 raise ValueError("Invalid selected transaction ID")
-            missing = set(selected) - set(txids)
+            # Selection is independent of the global pending queue. Apply its
+            # budget after selecting, so an unrelated older ID cannot prevent
+            # a bounded retry of the requested transaction.
+            selected = list(dict.fromkeys(selected))
+            missing = {
+                txid for txid in selected
+                if self.db.execute(
+                    "SELECT 1 FROM records WHERE txid=? AND " + condition,
+                    (txid,),
+                ).fetchone() is None
+            }
             if missing:
                 raise ValueError(
                     "Selected transaction absent or already verified: "
                     + ",".join(sorted(missing))
                 )
-            txids = selected
+            txids = selected[:budget] if budget else selected
         elif not retry:
             # Include records discovered while archive verification is running.
             txids = self.pending_ids(budget)
+        else:
+            txids = [
+                r[0] for r in self.db.execute(
+                    "SELECT txid FROM records WHERE " + condition + " ORDER BY txid LIMIT ?",
+                    (budget or 10**9,),
+                )
+            ]
         if workers == 1:
             for txid in txids:
                 self.finish_verification(txid, lambda: self.verify_one(txid))

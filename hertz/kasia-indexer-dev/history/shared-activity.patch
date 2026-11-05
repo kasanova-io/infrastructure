@@ -1,0 +1,152 @@
+--- a/indexer-actors/src/push.rs
++++ b/indexer-actors/src/push.rs
+@@ -1,4 +1,5 @@
+ use indexer_db::AddressPayload;
++use kaspa_rpc_core::{RpcHeader, RpcTransaction};
+ 
+ #[derive(Debug, Clone, Copy)]
+ pub enum PushEventKind {
+@@ -79,6 +80,29 @@
+     pub daa_score: u64,
+ }
+ 
++/// Same watched-output and best-effort sender rules for standalone blocks and
++/// source-bound shared activity. Keep actual script versions and header context.
++pub fn funds_event(
++    tx: &RpcTransaction,
++    tx_id: [u8; 32],
++    header: &RpcHeader,
++    sender: impl FnOnce() -> Option<AddressPayload>,
++) -> Option<FundsPushEvent> {
++    if crate::watch_only_is_empty() { return None; }
++    let credited = tx.outputs.iter().filter_map(|output| {
++        AddressPayload::try_from(&output.script_public_key).ok()
++            .filter(crate::watch_only_contains).map(|address| (address, output.value))
++    }).collect::<Vec<_>>();
++    if credited.is_empty() { return None; }
++    Some(FundsPushEvent { credited, sender: sender(), tx_id,
++        timestamp: header.timestamp, daa_score: header.daa_score })
++}
++
++/// Recompute with the same SDK as native ingestion; verbose IDs are not proof.
++pub fn funds_transaction_id(tx: &RpcTransaction) -> anyhow::Result<[u8; 32]> {
++    Ok(kaspa_consensus_core::tx::Transaction::try_from(tx.clone())?.id().as_bytes())
++}
++
+ #[derive(Debug, Clone)]
+ pub struct PushEvent {
+     pub kind: PushEventKind,
+--- a/indexer-actors/src/block_processor.rs
++++ b/indexer-actors/src/block_processor.rs
+@@ -377,39 +377,14 @@
+         let Some(funds_tx) = &self.push_funds_tx else {
+             return;
+         };
+-        if crate::watch_only_is_empty() {
+-            return;
+-        }
+-        let mut credited: Vec<(AddressPayload, u64)> = Vec::new();
+-        for output in &tx.outputs {
+-            if let Ok(addr) = AddressPayload::try_from(&output.script_public_key)
+-                && crate::watch_only_contains(&addr)
+-            {
+-                credited.push((addr, output.value));
+-            }
+-        }
+-        if credited.is_empty() {
+-            return;
+-        }
+-        // Best-effort sender resolution (first input) for self-send filtering — catches the common
+-        // case of change returning to one's own address from one's own outgoing payment.
+-        let sender = tx.inputs.first().and_then(|input| {
+-            let outpoint = input.previous_outpoint;
+-            self.tx_id_to_acceptance_partition
+-                .key_by_tx_id(outpoint.transaction_id.as_ref())
+-                .ok()
+-                .flatten()
+-                .map(|key| key.receiver)
+-        });
+-        let event = FundsPushEvent {
+-            credited,
+-            sender,
+-            tx_id: tx_id.as_bytes(),
+-            timestamp: block_header.timestamp,
+-            daa_score: block_header.daa_score,
+-        };
+-        if funds_tx.try_send(event).is_err() {
+-            warn!("Dropping funds push event; queue is full");
++        if let Some(event) = crate::push::funds_event(tx, tx_id.as_bytes(), block_header, || {
++            tx.inputs.first().and_then(|input| self.tx_id_to_acceptance_partition
++                .key_by_tx_id(input.previous_outpoint.transaction_id.as_ref()).ok().flatten()
++                .map(|key| key.receiver))
++        }) {
++            if funds_tx.try_send(event).is_err() {
++                warn!("Dropping funds push event; queue is full");
++            }
+         }
+     }
+ 
+--- a/indexer/src/api/v1.rs
++++ b/indexer/src/api/v1.rs
+@@ -38,6 +38,7 @@
+ pub mod history;
+ pub mod shared_ingestion;
+ pub mod shared_notifications;
++pub mod shared_activity;
+ pub mod group_control;
+ pub mod group_messages;
+ pub mod handshakes;
+@@ -93,6 +94,10 @@
+ const PUSH_REQUEST_BODY_MAX_BYTES: usize = 64 * 1024;
+ 
+ impl Api {
++    pub fn shared_import_lock(&self) -> std::sync::Arc<std::sync::Mutex<()>> {
++        self.export_api.shared_ingestion_lock.clone()
++    }
++
+     pub fn with_shared_push(mut self, sender: flume::Sender<indexer_actors::push::PushEvent>) -> Self {
+         self.export_api.shared_push_tx = Some(sender);
+         self
+--- a/indexer/src/main.rs
++++ b/indexer/src/main.rs
+@@ -453,6 +453,7 @@
+             .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
+             .into_boxed_str(),
+     );
++    let shared_import_lock = api_service.shared_import_lock();
+     let mut api_handle = tokio::spawn(api_service.serve(api_bind, api_shutdown_rx));
+ 
+     let options = ConnectOptions {
+@@ -470,6 +471,10 @@
+         .connect(Some(options))
+         .await
+         .map_err(|e| anyhow::anyhow!("Failed to connect to node: {}", e))?;
++    // Watch-only registry is loaded and the existing RPC client is connected.
++    let activity_worker = shared_ingestion.then(|| api::v1::shared_activity::Worker::start(
++        tx_keyspace.clone(), context.rpc_client.clone(), funds_push_tx.clone(), shared_import_lock,
++    ));
+     let shutdown = Shutdown {
+         api: api_shutdown_tx,
+         data_source: shutdown_data_source_tx,
+@@ -498,6 +503,7 @@
+              Some(Exclude::Ticker)
+         },
+     };
++    drop(activity_worker); // join before the final native keyspace SyncAll
+     if shared_ingestion {
+         // No legacy worker joins exist to keep the process alive in this mode.
+         // Drain the API/source tasks, then persist the same native keyspace.
+--- a/indexer-actors/src/lib.rs
++++ b/indexer-actors/src/lib.rs
+@@ -67,6 +67,11 @@
+         .unwrap_or(false)
+ }
+ 
++/// Snapshot the same registered watch union for bounded shared-source filtering.
++pub fn watch_only_snapshot() -> Vec<AddressPayload> {
++    WATCH_ONLY_ADDRESSES.read().map(|g| g.iter().copied().collect()).unwrap_or_default()
++}
++
+ /// Replace the personal-mode address allowlist. An empty vec turns personal mode OFF.
+ pub fn set_personal_addresses(addrs: Vec<AddressPayload>) {
+     if let Ok(mut guard) = PERSONAL_ADDRESSES.write() {

@@ -1,0 +1,654 @@
+--- a/indexer/src/main.rs
++++ b/indexer/src/main.rs
+@@ -12,7 +12,7 @@
+ use indexer_actors::periodic_processor::PeriodicProcessor;
+ use indexer_actors::ticker::Ticker;
+ use indexer_actors::util::ToHex64;
+-use indexer_actors::virtual_chain_processor::{CompactHeader, VirtualProcessor};
++use indexer_actors::virtual_chain_processor::VirtualProcessor;
+ use indexer_db::headers::block_compact_headers::BlockCompactHeaderPartition;
+ use indexer_db::headers::block_gaps::{BlockGap, BlockGapsPartition};
+ use indexer_db::headers::daa_index::DaaIndexPartition;
+@@ -41,7 +41,6 @@
+     DeviceRegistrationPartition, PrimaryAddressPartition, WatchedAddressPartition,
+     WatchedGroupIdPartition,
+ };
+-use kaspa_rpc_core::RpcBlueWorkType;
+ use kaspa_wrpc_client::client::{ConnectOptions, ConnectStrategy};
+ use kaspa_wrpc_client::prelude::NetworkType;
+ use std::sync::Arc;
+@@ -60,6 +59,7 @@
+ mod fcm;
+ mod push;
+ mod signals;
++mod shared_runtime;
+ 
+ /// Load the personal-mode address allowlist (KaChat fork). The admin dashboard writes one
+ /// address per line to `KASIA_PERSONAL_FILE` (default `/app/data/personal_addresses.txt`) and
+@@ -150,6 +150,7 @@
+ 
+     let config = get_indexer_config()?;
+     let context = get_indexer_context(&config)?;
++    let shared_ingestion = std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true");
+ 
+     let _g = init_logs(&context)?;
+ 
+@@ -163,7 +164,7 @@
+     let virtual_daa = Arc::new(AtomicU64::new(0));
+     // Partitions
+     let metadata_partition = MetadataPartition::new(&tx_keyspace)?;
+-    {
++    if !shared_ingestion {
+         metadata_partition.0.inner().major_compact()?;
+     }
+     apply_migrations(&metadata_partition, &tx_keyspace)?;
+@@ -197,10 +198,16 @@
+     let watched_group_id_partition = WatchedGroupIdPartition::new(&tx_keyspace)?;
+     let primary_address_partition = PrimaryAddressPartition::new(&tx_keyspace)?;
+ 
+-    let gaps = block_gaps_partition
+-        .get_all_gaps()
+-        .collect::<Result<Vec<_>, _>>()?;
+-    print_gaps(&gaps);
++    let chain_startup = shared_runtime::chain_startup(
++        shared_ingestion,
++        &tx_keyspace,
++        &block_gaps_partition,
++        &block_compact_header_partition,
++        &block_daa_index_partition,
++    )?;
++    if let Some(startup) = &chain_startup {
++        print_gaps(&startup.gaps);
++    }
+ 
+     let push_registered_devices = device_registration_partition.approximate_len() as u64;
+ 
+@@ -212,7 +219,7 @@
+         contextual_messages: contextual_message_partition.len()? as u64,
+         group_messages: group_message_by_blinded_group_id_partition.approximate_len() as u64,
+         group_controls: tx_id_to_group_control_partition.approximate_len() as u64,
+-        blocks_processed: block_compact_header_partition.len()? as u64,
++        blocks_processed: chain_startup.as_ref().map_or(0, |state| state.blocks_processed),
+         latest_block: metadata_partition
+             .get_latest_block_cursor_rtx(&tx_keyspace.read_tx())?
+             .unwrap_or_default()
+@@ -293,99 +300,109 @@
+     let (periodic_resp_tx, periodic_resp_rx) = workflow_core::channel::bounded(1);
+     let (shutdown_ticker_tx, shutdown_ticker_rx) = tokio::sync::mpsc::channel(2);
+ 
+-    let mut block_processor = BlockProcessor::builder()
+-        .notification_rx(block_intake_rx.clone())
+-        .gap_result_rx(gap_result_rx)
+-        .gap_result_tx(gap_result_tx)
+-        .processed_block_tx(processed_block_tx)
+-        .command_tx(command_channel.sender.clone())
+-        .tx_keyspace(tx_keyspace.clone())
+-        .blocks_gap_partition(block_gaps_partition.clone())
+-        .runtime_handle(tokio::runtime::Handle::current())
+-        .metadata_partition(metadata_partition.clone())
+-        .block_compact_header_partition(block_compact_header_partition.clone())
+-        .daa_index_partition(block_daa_index_partition.clone())
+-        .handshake_by_receiver_partition(handshake_by_receiver_partition.clone())
+-        .handshake_by_sender_partition(handshake_by_sender_partition.clone())
+-        .tx_id_to_handshake_partition(tx_id_to_handshake_partition.clone())
+-        .contextual_message_by_sender_partition(contextual_message_partition.clone())
+-        .tx_id_to_contextual_message_partition(tx_id_to_contextual_message_partition.clone())
+-        .payment_by_receiver_partition(payment_by_receiver_partition.clone())
+-        .payment_by_sender_partition(payment_by_sender_partition.clone())
+-        .self_stash_by_owner_partition(self_stash_by_owner_partition.clone())
+-        .tx_id_to_self_stash_partition(tx_id_to_self_stash_partition.clone())
+-        .tx_id_to_payment_partition(tx_id_to_payment_partition.clone())
+-        .group_message_by_blinded_group_id_partition(
+-            group_message_by_blinded_group_id_partition.clone(),
+-        )
+-        .tx_id_to_group_message_partition(tx_id_to_group_message_partition.clone())
+-        .group_sender_binding_partition(group_sender_binding_partition.clone())
+-        .group_control_by_sender_partition(group_control_by_sender_partition.clone())
+-        .group_control_by_recipient_partition(group_control_by_recipient_partition.clone())
+-        .tx_id_to_group_control_partition(tx_id_to_group_control_partition.clone())
+-        .tx_id_to_acceptance_partition(tx_id_to_acceptance_partition.clone())
+-        .shared_metrics(metrics.clone())
+-        .push_tx(push_tx.clone())
+-        .push_funds_tx(funds_push_tx.clone())
+-        .build();
+-    let mut virtual_processor = VirtualProcessor::builder()
+-        .synced_capacity(3_000_000)
+-        .processed_block_tx(processed_block_rx)
+-        .realtime_vcc_tx(vcc_intake_rx)
+-        .syncer_rx(syncer_rx)
+-        .syncer_tx(syncer_tx)
+-        .command_tx(command_channel.sender.clone())
+-        .tx_keyspace(tx_keyspace.clone())
+-        .metadata_partition(metadata_partition.clone())
+-        .tx_id_to_acceptance_partition(tx_id_to_acceptance_partition.clone())
+-        .accepting_block_to_tx_id_partition(acceptance_to_tx_id_partition.clone())
+-        .pending_sender_resolution_partition(pending_sender_resolution_partition.clone())
+-        .handshake_by_receiver_partition(handshake_by_receiver_partition.clone())
+-        .handshake_by_sender_partition(handshake_by_sender_partition.clone())
+-        .contextual_message_by_sender_partition(contextual_message_partition.clone())
+-        .payment_by_receiver_partition(payment_by_receiver_partition.clone())
+-        .payment_by_sender_partition(payment_by_sender_partition.clone())
+-        .self_stash_by_owner_partition(self_stash_by_owner_partition.clone())
+-        .tx_id_to_payment_partition(tx_id_to_payment_partition.clone())
+-        .tx_id_to_handshake_partition(tx_id_to_handshake_partition.clone())
+-        .tx_id_to_contextual_message_partition(tx_id_to_contextual_message_partition.clone())
+-        .tx_id_to_self_stash_partition(tx_id_to_self_stash_partition.clone())
+-        .group_message_by_blinded_group_id_partition(
+-            group_message_by_blinded_group_id_partition.clone(),
+-        )
+-        .tx_id_to_group_message_partition(tx_id_to_group_message_partition.clone())
+-        .group_sender_binding_partition(group_sender_binding_partition)
+-        .group_control_by_sender_partition(group_control_by_sender_partition.clone())
+-        .group_control_by_recipient_partition(group_control_by_recipient_partition.clone())
+-        .tx_id_to_group_control_partition(tx_id_to_group_control_partition.clone())
+-        .runtime(tokio::runtime::Handle::current())
+-        .push_tx(push_tx.clone())
+-        .build();
+-
++    let chain_handles = if let Some(startup) = chain_startup {
++        let mut block_processor = BlockProcessor::builder()
++            .notification_rx(block_intake_rx.clone())
++            .gap_result_rx(gap_result_rx)
++            .gap_result_tx(gap_result_tx)
++            .processed_block_tx(processed_block_tx)
++            .command_tx(command_channel.sender.clone())
++            .tx_keyspace(tx_keyspace.clone())
++            .blocks_gap_partition(block_gaps_partition.clone())
++            .runtime_handle(tokio::runtime::Handle::current())
++            .metadata_partition(metadata_partition.clone())
++            .block_compact_header_partition(block_compact_header_partition.clone())
++            .daa_index_partition(block_daa_index_partition.clone())
++            .handshake_by_receiver_partition(handshake_by_receiver_partition.clone())
++            .handshake_by_sender_partition(handshake_by_sender_partition.clone())
++            .tx_id_to_handshake_partition(tx_id_to_handshake_partition.clone())
++            .contextual_message_by_sender_partition(contextual_message_partition.clone())
++            .tx_id_to_contextual_message_partition(tx_id_to_contextual_message_partition.clone())
++            .payment_by_receiver_partition(payment_by_receiver_partition.clone())
++            .payment_by_sender_partition(payment_by_sender_partition.clone())
++            .self_stash_by_owner_partition(self_stash_by_owner_partition.clone())
++            .tx_id_to_self_stash_partition(tx_id_to_self_stash_partition.clone())
++            .tx_id_to_payment_partition(tx_id_to_payment_partition.clone())
++            .group_message_by_blinded_group_id_partition(
++                group_message_by_blinded_group_id_partition.clone(),
++            )
++            .tx_id_to_group_message_partition(tx_id_to_group_message_partition.clone())
++            .group_sender_binding_partition(group_sender_binding_partition.clone())
++            .group_control_by_sender_partition(group_control_by_sender_partition.clone())
++            .group_control_by_recipient_partition(group_control_by_recipient_partition.clone())
++            .tx_id_to_group_control_partition(tx_id_to_group_control_partition.clone())
++            .tx_id_to_acceptance_partition(tx_id_to_acceptance_partition.clone())
++            .shared_metrics(metrics.clone())
++            .push_tx(push_tx.clone())
++            .push_funds_tx(funds_push_tx.clone())
++            .build();
++        let mut virtual_processor = VirtualProcessor::builder()
++            .synced_capacity(3_000_000)
++            .processed_block_tx(processed_block_rx)
++            .realtime_vcc_tx(vcc_intake_rx)
++            .syncer_rx(syncer_rx)
++            .syncer_tx(syncer_tx)
++            .command_tx(command_channel.sender.clone())
++            .tx_keyspace(tx_keyspace.clone())
++            .metadata_partition(metadata_partition.clone())
++            .tx_id_to_acceptance_partition(tx_id_to_acceptance_partition.clone())
++            .accepting_block_to_tx_id_partition(acceptance_to_tx_id_partition.clone())
++            .pending_sender_resolution_partition(pending_sender_resolution_partition.clone())
++            .handshake_by_receiver_partition(handshake_by_receiver_partition.clone())
++            .handshake_by_sender_partition(handshake_by_sender_partition.clone())
++            .contextual_message_by_sender_partition(contextual_message_partition.clone())
++            .payment_by_receiver_partition(payment_by_receiver_partition.clone())
++            .payment_by_sender_partition(payment_by_sender_partition.clone())
++            .self_stash_by_owner_partition(self_stash_by_owner_partition.clone())
++            .tx_id_to_payment_partition(tx_id_to_payment_partition.clone())
++            .tx_id_to_handshake_partition(tx_id_to_handshake_partition.clone())
++            .tx_id_to_contextual_message_partition(tx_id_to_contextual_message_partition.clone())
++            .tx_id_to_self_stash_partition(tx_id_to_self_stash_partition.clone())
++            .group_message_by_blinded_group_id_partition(
++                group_message_by_blinded_group_id_partition.clone(),
++            )
++            .tx_id_to_group_message_partition(tx_id_to_group_message_partition.clone())
++            .group_sender_binding_partition(group_sender_binding_partition)
++            .group_control_by_sender_partition(group_control_by_sender_partition.clone())
++            .group_control_by_recipient_partition(group_control_by_recipient_partition.clone())
++            .tx_id_to_group_control_partition(tx_id_to_group_control_partition.clone())
++            .runtime(tokio::runtime::Handle::current())
++            .push_tx(push_tx.clone())
++            .build();
++
++        let periodic_processor = PeriodicProcessor::builder()
++            .pruning_depth(3_000_000)
++            .job_trigger_rx(periodic_intake_rx)
++            .resp_tx(periodic_resp_tx)
++            .metrics(metrics.clone())
++            .virtual_daa(virtual_daa.clone())
++            .tx_keyspace(tx_keyspace.clone())
++            .daa_index_partition(block_daa_index_partition.clone())
++            .block_compact_header_partition(block_compact_header_partition.clone())
++            .accepting_block_to_tx_id_partition(acceptance_to_tx_id_partition.clone())
++            .metadata_partition(metadata_partition.clone())
++            .tx_id_to_handshake_partition(tx_id_to_handshake_partition.clone())
++            .tx_id_to_payment_partition(tx_id_to_payment_partition.clone())
++            .payment_by_sender_partition(payment_by_sender_partition.clone())
++            .handshake_by_sender_partition(handshake_by_sender_partition.clone())
++            .contextual_message_by_sender_partition(contextual_message_partition.clone())
++            .build();
++
++        let processed_blocks = startup.processed_blocks;
++        let block_processor_handle = std::thread::spawn(move || block_processor.process());
++        let virtual_processor_handle =
++            std::thread::spawn(move || virtual_processor.process(processed_blocks, false));
++        let periodic_processor_handle = std::thread::spawn(move || periodic_processor.process());
++        Some((block_processor_handle, virtual_processor_handle, periodic_processor_handle))
++    } else {
++        None
++    };
+     let mut ticker = Ticker::new(
+         Duration::from_secs(context.config.periodic_processor_interval_secs),
+         shutdown_ticker_rx,
+         periodic_intake_tx,
+         periodic_resp_rx,
+     );
+-
+-    let periodic_processor = PeriodicProcessor::builder()
+-        .pruning_depth(3_000_000)
+-        .job_trigger_rx(periodic_intake_rx)
+-        .resp_tx(periodic_resp_tx)
+-        .metrics(metrics.clone())
+-        .virtual_daa(virtual_daa.clone())
+-        .tx_keyspace(tx_keyspace.clone())
+-        .daa_index_partition(block_daa_index_partition.clone())
+-        .block_compact_header_partition(block_compact_header_partition.clone())
+-        .accepting_block_to_tx_id_partition(acceptance_to_tx_id_partition.clone())
+-        .metadata_partition(metadata_partition.clone())
+-        .tx_id_to_handshake_partition(tx_id_to_handshake_partition.clone())
+-        .tx_id_to_payment_partition(tx_id_to_payment_partition.clone())
+-        .payment_by_sender_partition(payment_by_sender_partition.clone())
+-        .handshake_by_sender_partition(handshake_by_sender_partition.clone())
+-        .contextual_message_by_sender_partition(contextual_message_partition.clone())
+-        .build();
+ 
+     let mut data_source = DataSource::new(
+         context.rpc_client.clone(),
+@@ -395,26 +412,9 @@
+         virtual_daa.clone(),
+         command_channel,
+     );
+-    info!("start filling processed block cache");
+-    let rtx = tx_keyspace.read_tx();
+-    let processed_blocks = block_daa_index_partition
+-        .iter_lt(&rtx, u64::MAX)
+-        .rev() // we need to get values from the end (desc order)
+-        .map(|r| {
+-            r.map(|k| CompactHeader {
+-                block_hash: k.block_hash,
+-                blue_work: RpcBlueWorkType::from_be_bytes(k.blue_work),
+-                daa_score: k.daa_score.get(),
+-            })
+-        })
+-        .take(3_000_000)
+-        .collect::<Result<Vec<_>, _>>()?;
+-    let block_processor_handle = std::thread::spawn(move || block_processor.process());
+-    let virtual_processor_handle =
+-        std::thread::spawn(move || virtual_processor.process(processed_blocks, false));
+-    let periodic_processor_handle = std::thread::spawn(move || periodic_processor.process());
+-    let data_source_handle = tokio::spawn(async move { data_source.task().await });
+-    let ticker_handle = tokio::spawn(async move { ticker.process().await });
++    let mut data_source_handle = tokio::spawn(async move { data_source.task().await });
++    let mut ticker_handle = chain_handles.as_ref().map(|_| tokio::spawn(async move { ticker.process().await }));
++    let has_ticker = ticker_handle.is_some();
+ 
+     let api_service = api::v1::Api::new(
+         tx_keyspace.clone(),
+@@ -453,7 +453,7 @@
+             .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
+             .into_boxed_str(),
+     );
+-    let api_handle = tokio::spawn(api_service.serve(api_bind, api_shutdown_rx));
++    let mut api_handle = tokio::spawn(api_service.serve(api_bind, api_shutdown_rx));
+ 
+     let options = ConnectOptions {
+         block_async_connect: false,
+@@ -473,45 +473,63 @@
+     let shutdown = Shutdown {
+         api: api_shutdown_tx,
+         data_source: shutdown_data_source_tx,
+-        ticker: shutdown_ticker_tx,
++        ticker: has_ticker.then_some(shutdown_ticker_tx),
+     };
+-    tokio::select! {
++    let stopped = tokio::select! {
+         _ = shutdown_signal => {
+             info!("Termination signal received. Shutting down...");
+-            shutdown.shutdown(None).await
++            shutdown.shutdown(None).await;
++            None
+         },
+-        r = api_handle => {
++        r = &mut api_handle => {
+            _ = r.inspect(|_| info!("api has stopped"))
+                 .inspect_err(|err| error!("api has stopped with error: {}", err));
+             shutdown.shutdown(Some(Exclude::Api)).await;
++            Some(Exclude::Api)
+         },
+-        r = data_source_handle => {
++        r = &mut data_source_handle => {
+            _ = r.inspect(|_| info!("data source has stopped")).inspect_err(|err| error!("data_source finished with err: {}", err));
+              shutdown.shutdown(Some(Exclude::DataSource)).await;
++             Some(Exclude::DataSource)
+         },
+-        r = ticker_handle => {
++        r = async { ticker_handle.as_mut().expect("enabled legacy ticker").await }, if has_ticker => {
+             _ = r.inspect(|_| info!("ticker has stopped")).inspect_err(|err| error!("ticker processing error: {}", err));
+              shutdown.shutdown(Some(Exclude::Ticker)).await;
++             Some(Exclude::Ticker)
+         },
+-    }
+-
+-    info!("waiting for virtual processor finish");
+-    _ = virtual_processor_handle
+-        .join()
+-        .expect("failed to join virtual_processor thread")
+-        .inspect_err(|err| error!("virtual_processor stopped error: {}", err));
+-
+-    info!("waiting for block processor finish");
+-    _ = block_processor_handle
+-        .join()
+-        .expect("failed to join block_processor thread")
+-        .inspect_err(|err| error!("block_processor stopped error: {}", err));
+-
+-    info!("waiting for periodic processor finish");
+-    _ = periodic_processor_handle
+-        .join()
+-        .expect("failed to join periodic_processor thread")
+-        .inspect_err(|err| error!("periodic_processor stopped error: {}", err));
++    };
++    if shared_ingestion {
++        // No legacy worker joins exist to keep the process alive in this mode.
++        // Drain the API/source tasks, then persist the same native keyspace.
++        if !matches!(stopped, Some(Exclude::Api)) {
++            api_handle.await??;
++        }
++        if !matches!(stopped, Some(Exclude::DataSource)) {
++            data_source_handle.await??;
++        }
++        tx_keyspace.persist(fjall::PersistMode::SyncAll)?;
++    }
++
++    if let Some((block_processor_handle, virtual_processor_handle, periodic_processor_handle)) = chain_handles {
++        info!("waiting for virtual processor finish");
++        _ = virtual_processor_handle
++            .join()
++            .expect("failed to join virtual_processor thread")
++            .inspect_err(|err| error!("virtual_processor stopped error: {}", err));
++
++        info!("waiting for block processor finish");
++        _ = block_processor_handle
++            .join()
++            .expect("failed to join block_processor thread")
++            .inspect_err(|err| error!("block_processor stopped error: {}", err));
++
++        info!("waiting for periodic processor finish");
++        _ = periodic_processor_handle
++            .join()
++            .expect("failed to join periodic_processor thread")
++            .inspect_err(|err| error!("periodic_processor stopped error: {}", err));
++
++    }
+ 
+     info!("All tasks shut down.");
+ 
+@@ -578,15 +596,22 @@
+ struct Shutdown {
+     api: tokio::sync::mpsc::Sender<()>,
+     data_source: tokio::sync::mpsc::Sender<()>,
+-    ticker: tokio::sync::mpsc::Sender<()>,
+-}
+-
++    ticker: Option<tokio::sync::mpsc::Sender<()>>,
++}
++
++#[derive(Clone, Copy)]
+ enum Exclude {
+     Api,
+     DataSource,
+     Ticker,
+ }
+ impl Shutdown {
++    async fn shutdown_ticker(&self) {
++        if let Some(ticker) = &self.ticker {
++            _ = ticker.send(()).await.inspect_err(|_err| error!("failed to shutdown ticker"));
++        }
++    }
++
+     async fn shutdown(&self, exclude: Option<Exclude>) {
+         match exclude {
+             None => {
+@@ -597,9 +622,7 @@
+                     self.data_source
+                         .send(())
+                         .inspect_err(|_err| error!("failed to shutdown data source")),
+-                    self.ticker
+-                        .send(())
+-                        .inspect_err(|_err| error!("failed to shutdown ticker"))
++                    self.shutdown_ticker()
+                 );
+             }
+             Some(Exclude::Api) => {
+@@ -607,9 +630,7 @@
+                     self.data_source
+                         .send(())
+                         .inspect_err(|_err| error!("failed to shutdown data source")),
+-                    self.ticker
+-                        .send(())
+-                        .inspect_err(|_err| error!("failed to shutdown ticker"))
++                    self.shutdown_ticker()
+                 );
+             }
+             Some(Exclude::DataSource) => {
+@@ -617,9 +638,7 @@
+                     self.api
+                         .send(())
+                         .inspect_err(|_err| error!("failed to shutdown api")),
+-                    self.ticker
+-                        .send(())
+-                        .inspect_err(|_err| error!("failed to shutdown ticker"))
++                    self.shutdown_ticker()
+                 );
+             }
+             Some(Exclude::Ticker) => {
+@@ -635,3 +654,32 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod shared_shutdown_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn shared_shutdown_drains_api_and_data_source_without_legacy_ticker() -> anyhow::Result<()> {
++        let (api, mut api_rx) = tokio::sync::mpsc::channel(1);
++        let (data_source, mut source_rx) = tokio::sync::mpsc::channel(1);
++        let shutdown = Shutdown { api, data_source, ticker: None };
++        tokio::time::timeout(Duration::from_secs(1), shutdown.shutdown(None)).await?;
++        assert_eq!(api_rx.try_recv(), Ok(()));
++        assert_eq!(source_rx.try_recv(), Ok(()));
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn standalone_shutdown_keeps_ticker_and_existing_exclusion() -> anyhow::Result<()> {
++        let (api, mut api_rx) = tokio::sync::mpsc::channel(1);
++        let (data_source, mut source_rx) = tokio::sync::mpsc::channel(1);
++        let (ticker, mut ticker_rx) = tokio::sync::mpsc::channel(1);
++        let shutdown = Shutdown { api, data_source, ticker: Some(ticker) };
++        tokio::time::timeout(Duration::from_secs(1), shutdown.shutdown(Some(Exclude::Api))).await?;
++        assert!(api_rx.try_recv().is_err());
++        assert_eq!(source_rx.try_recv(), Ok(()));
++        assert_eq!(ticker_rx.try_recv(), Ok(()));
++        Ok(())
++    }
++}
+--- a/indexer-actors/src/data_source.rs
++++ b/indexer-actors/src/data_source.rs
+@@ -30,6 +30,8 @@
+     /// RPC client for communicating with Kaspa node
+     rpc_client: KaspaRpcClient,
+     connected: bool,
++    /// One ingestion mode governs every RPC scanner lifecycle callback.
++    shared_ingestion: bool,
+     /// Channel to send processed blocks to handler
+     block_sender: flume::Sender<BlockNotification>,
+     block_sender_closed: bool,
+@@ -64,6 +66,7 @@
+         Self {
+             rpc_client,
+             connected: false,
++            shared_ingestion: std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true"),
+             block_sender,
+             block_sender_closed: false,
+             vcc_sender,
+@@ -97,7 +100,9 @@
+                     match shutdown_result {
+                         Some(()) => {
+                             info!("Shutdown signal received, initiating data source shutdown");
+-                            self.handle_shutdown().await?;
++                            if self.handle_shutdown().await? {
++                                return Ok(());
++                            }
+                             info!("Data source shutdown initiated, waiting for processors to close");
+                             // no need to return, we are waiting for command to mark other processor closed
+                         }
+@@ -138,8 +143,7 @@
+     }
+ 
+     async fn handle_connect_impl(&mut self) -> anyhow::Result<()> {
+-        let shared = std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true");
+-        self.handle_connect_for_mode(shared).await
++        self.handle_connect_for_mode(self.shared_ingestion).await
+     }
+ 
+     async fn handle_connect_for_mode(&mut self, shared: bool) -> anyhow::Result<()> {
+@@ -275,6 +279,11 @@
+         }
+         info!("Disconnected from {:?}", self.rpc_client.url());
+         self.connected = false;
++        if self.shared_ingestion {
++            // No scanner processors exist in this mode, including reconnects.
++            self.unregister_notification_listener().await?;
++            return Ok(());
++        }
+         let pair = futures_util::future::join(
+             async {
+                 self.block_sender
+@@ -305,6 +314,11 @@
+     }
+ 
+     async fn handle_notification(&mut self, notification: Notification) -> anyhow::Result<()> {
++        if self.shared_ingestion {
++            // Shared ingestion never subscribes to scanner notifications. Also
++            // discard a queued/stale notification without touching idle channels.
++            return Ok(());
++        }
+         match notification {
+             Notification::BlockAdded(BlockAddedNotification { block }) => {
+                 if self.block_sender_closed {
+@@ -335,7 +349,12 @@
+         Ok(())
+     }
+ 
+-    async fn handle_shutdown(&mut self) -> anyhow::Result<()> {
++    async fn handle_shutdown(&mut self) -> anyhow::Result<bool> {
++        self.handle_shutdown_for_mode(self.shared_ingestion).await?;
++        Ok(self.shared_ingestion)
++    }
++
++    async fn handle_shutdown_for_mode(&mut self, shared: bool) -> anyhow::Result<()> {
+         if self.shutting_down {
+             return Ok(());
+         };
+@@ -345,6 +364,13 @@
+             .disconnect()
+             .await
+             .inspect_err(|err| error!("Error disconnecting: {err}"));
++
++        if shared {
++            // This mode has no scanner processors to send to or await.
++            self.connected = false;
++            self.unregister_notification_listener().await?;
++            return Ok(());
++        }
+ 
+         info!("Sending shutdown signals to block and VCC processors");
+ 
+@@ -629,3 +655,70 @@
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod shared_shutdown_tests {
++    use super::*;
++
++    fn source() -> anyhow::Result<(DataSource, flume::Receiver<BlockNotification>, flume::Receiver<RealTimeVccNotification>)> {
++        let client = KaspaRpcClient::new(
++            kaspa_wrpc_client::WrpcEncoding::Borsh,
++            Some("ws://127.0.0.1:1"),
++            None,
++            Some(kaspa_wrpc_client::prelude::NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet)),
++            None,
++        )?;
++        let (blocks, block_rx) = flume::bounded(4);
++        let (vcc, vcc_rx) = flume::bounded(4);
++        let (_shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
++        let (sender, receiver) = workflow_core::channel::bounded(8);
++        Ok((DataSource::new(client, blocks, vcc, shutdown_rx, Arc::new(AtomicU64::new(0)), Channel { sender, receiver }), block_rx, vcc_rx))
++    }
++
++    #[tokio::test]
++    async fn shared_shutdown_does_not_wait_for_absent_chain_processors() -> anyhow::Result<()> {
++        let (mut source, blocks, vcc) = source()?;
++        drop(blocks);
++        drop(vcc);
++        tokio::time::timeout(std::time::Duration::from_secs(1), source.handle_shutdown_for_mode(true)).await??;
++        assert!(source.shutting_down);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn standalone_shutdown_keeps_both_processor_signals() -> anyhow::Result<()> {
++        let (mut source, blocks, vcc) = source()?;
++        tokio::time::timeout(std::time::Duration::from_secs(1), source.handle_shutdown_for_mode(false)).await??;
++        assert!(matches!(blocks.try_recv()?, BlockNotification::Shutdown));
++        assert!(matches!(vcc.try_recv()?, RealTimeVccNotification::Shutdown));
++        Ok(())
++    }
++    #[tokio::test]
++    async fn shared_disconnect_handles_full_and_closed_scanner_channels_then_reconnects()
++    -> anyhow::Result<()> {
++        let (mut source, blocks, vcc) = source()?;
++        source.shared_ingestion = true;
++        source.connected = true;
++        for _ in 0..4 {
++            source.block_sender.send(BlockNotification::Disconnected)?;
++            source.vcc_sender.send(RealTimeVccNotification::Disconnected)?;
++        }
++        tokio::time::timeout(std::time::Duration::from_secs(1), source.handle_disconnect()).await??;
++        assert!(!source.connected);
++        assert_eq!(blocks.len(), 4);
++        assert_eq!(vcc.len(), 4);
++        drop(blocks);
++        drop(vcc);
++        source.handle_command(Command::Request(Request::RequestSender { daa_score: 42, tx_id: [7; 32] })).await?;
++        assert_eq!(source.requests_queue.len(), 1);
++        tokio::time::timeout(std::time::Duration::from_secs(1), source.handle_disconnect()).await??;
++        source.handle_connect_impl().await?;
++        assert!(source.connected);
++        assert!(source.requests_queue.is_empty());
++        assert!(matches!(source.command_rx.receiver.recv().await?, Command::Request(Request::RequestSender { daa_score: 42, tx_id }) if tx_id == [7; 32]));
++        tokio::time::timeout(std::time::Duration::from_secs(1), source.handle_shutdown()).await??;
++        assert!(!source.connected);
++        Ok(())
++    }
++
++}
