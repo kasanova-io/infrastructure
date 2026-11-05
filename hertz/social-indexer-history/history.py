@@ -110,13 +110,11 @@ class History:
         max_wait = getattr(self, 'request_max_wait', None)
         bucket = "source-rate.txt" if source_request else "archive-rate.txt"
         with (rate_root / bucket).open("a+") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX | (fcntl.LOCK_NB if max_wait is not None else 0))
+            deadline = _chats.lock_rate_bucket(stream, max_wait)
             stream.seek(0)
             next_at = float(stream.read() or 0)
             delay = max(0, next_at - time.time())
-            if max_wait is not None and delay > max_wait:
-                raise _chats.RatePending('shared history cooldown')
-            time.sleep(delay)
+            _chats.wait_rate_delay(delay, deadline)
             stream.seek(0)
             stream.truncate()
             stream.write(str(time.time() + interval))
