@@ -230,33 +230,32 @@ class History:
                         "INSERT OR IGNORE INTO observations VALUES (?,?,?)",
                         (txid, jid, json.dumps(row)),
                     )
-                    author = row.get("userPublicKey", "")
-                    if KEY.fullmatch(author):
-                        self.add_job(
-                            "/get-replies",
-                            {"user": author, "requesterPubkey": ANON},
-                            "replies",
-                        )
-                    # Traverse every discovered parent, including orphan roots
-                    # referred to by replies; no assumption repliesCount is complete.
-                    if route != "/get-users":
-                        self.add_job(
-                            "/get-replies",
-                            {"post": txid, "requesterPubkey": ANON},
-                            "replies",
-                        )
-                    parent = row.get("parentPostId")
-                    if parent and HEX64.fullmatch(parent):
-                        self.add_job(
-                            "/get-replies",
-                            {"post": parent, "requesterPubkey": ANON},
-                            "replies",
-                        )
+                    self.queue_related(row, route)
                 self.db.execute(
                     "UPDATE jobs SET cursor=?,pages=pages+1,done=? WHERE id=?",
                     (next_cursor, int(not pagination["hasMore"]), jid),
                 )
             self.status()
+
+    def is_content(self, row, route):
+        return route != "/get-users"
+
+    def queue_related(self, row, route):
+        author = row.get("userPublicKey", "")
+        if KEY.fullmatch(author):
+            self.add_job(
+                "/get-replies", {"user": author, "requesterPubkey": ANON}, "replies"
+            )
+        # Traverse every discovered content, including orphan reply roots.
+        if self.is_content(row, route):
+            self.add_job(
+                "/get-replies", {"post": row["id"], "requesterPubkey": ANON}, "replies"
+            )
+        parent = row.get("parentPostId")
+        if parent and HEX64.fullmatch(parent):
+            self.add_job(
+                "/get-replies", {"post": parent, "requesterPubkey": ANON}, "replies"
+            )
 
     def verify_one(self, txid, observations=None):
         url = (

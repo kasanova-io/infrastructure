@@ -352,8 +352,13 @@ python3 archive_backfill.py export "$ARCHIVE_INVENTORY" \
 
 Run it from the infrastructure tree, keeping the existing sibling history tools
 present. No new dependencies or archive endpoint/network defaults are introduced.
-`discover` uses the established public Social inventory traversal; private Chats
-history still requires the existing address/indexer inventories to supply IDs.
+`discover` uses the established public Social inventory traversal and its public
+`get-notifications` read API to find historical action IDs for observed authors.
+Resuming an older completed content inventory adds action jobs without resetting
+its saved pages or cursors. Votes are candidates for the same archive and native
+verification, never posts or newly dispatched notifications. Referenced content
+IDs are collected too; private Chats history still requires the existing
+address/indexer inventories to supply IDs.
 This does not claim exhaustive discovery of messages or deleted Social actions.
 Selected IDs resume quietly if already verified. Quarantines require explicit
 `--retry-quarantine`; original failure evidence remains. Export refuses overwrite.
