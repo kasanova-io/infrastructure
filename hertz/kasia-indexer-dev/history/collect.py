@@ -6,6 +6,7 @@ import gzip
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,35 @@ class RatePending(OSError):
     """Caller elected to defer instead of waiting through a shared cooldown."""
 
 
+def lock_rate_bucket(stream, max_wait=None):
+    """Acquire a rate bucket within the same budget used for its pacing delay."""
+    if max_wait is None:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        return None
+    if not math.isfinite(max_wait) or max_wait < 0:
+        raise ValueError('invalid rate wait budget')
+    deadline = time.monotonic() + max_wait
+    while True:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return deadline
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RatePending('shared rate bucket busy')
+            time.sleep(min(0.01, remaining))
+            if time.monotonic() >= deadline:
+                raise RatePending('shared rate bucket busy')
+
+
+def wait_rate_delay(delay, deadline):
+    if deadline is not None and delay > max(0, deadline - time.monotonic()):
+        raise RatePending('shared archive cooldown')
+    time.sleep(delay)
+    if deadline is not None and time.monotonic() >= deadline:
+        raise RatePending('shared rate wait budget exhausted')
+
+
 def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False):
     # Separate API buckets share a cross-process lock, so collection and
     # confirmation lookups cannot each consume the full allowance.
@@ -34,7 +64,7 @@ def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False):
     interval = 2.1 if bucket == "addresses" else 0.4
     filename = Path(os.environ.get("CHATS_RATE_DIR", ".")) / ("rate-" + bucket + ".txt")
     with filename.open("a+") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX | (fcntl.LOCK_NB if max_wait is not None else 0))
+        deadline = lock_rate_bucket(stream, max_wait)
         stream.seek(0)
         next_at = float(stream.read() or 0)
         now = time.time()
@@ -42,9 +72,7 @@ def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False):
             next_at = max(next_at, now + cooldown)
         else:
             delay = max(0, next_at - now)
-            if max_wait is not None and delay > max_wait:
-                raise RatePending('shared archive cooldown')
-            time.sleep(delay)
+            wait_rate_delay(delay, deadline)
             next_at = time.time() + interval
         stream.seek(0); stream.truncate(); stream.write(str(next_at)); stream.flush()
 
