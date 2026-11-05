@@ -360,6 +360,33 @@ verification, never posts or newly dispatched notifications. Referenced content
 IDs are collected too; private Chats history still requires the existing
 address/indexer inventories to supply IDs.
 This does not claim exhaustive discovery of messages or deleted Social actions.
+`discover-actions` extends that same inventory with the source client's per-post
+engagement and tippers routes and the existing Chats address-history scanner:
+
+```sh
+python3 archive_backfill.py discover-actions "$ARCHIVE_INVENTORY" \
+  --source "$DISCOVERY_SOURCE" --archive "$ARCHIVE_SOURCE" \
+  --network "$PROTOCOL_NETWORK" --limit 100
+```
+
+It seeds actual input/output addresses from already verified six-family receipts;
+`--address` can add explicit public participant addresses. Address scans use the
+configured archive, shared pacing/429 handling and the common byte router, with
+network/archive/filter-bound checkpoints separate from old chat-only scans.
+One page per job keeps long address histories from monopolizing discovery.
+Engagement action IDs and tip IDs are unverified candidates, never post bodies,
+payment counts or notifications. Their opaque cursors have durable cycle checks.
+Address checkpoints replay accumulated IDs after an interrupted SQLite commit.
+Both discovery modes take the same lock and preserve existing content cursors.
+
+Alternate `discover-actions` and `verify` passes until the known address frontier
+and pending proof queue drain: newly verified transactions can reveal additional
+participants. A drained known-address inventory still does not prove exhaustive
+chain-wide history, particularly for unobserved authors or unrelated funding
+addresses. Do not infer a deletion from an API 404 or a missing current-feed row.
+Recover verified edit/delete/unquote and vote/follow controls before importing
+more old bodies; the native consumer retains its order-independent mutation
+guards. Old public-content traversal alone cannot establish current state.
 Selected IDs resume quietly if already verified. Quarantines require explicit
 `--retry-quarantine`; original failure evidence remains. Export refuses overwrite.
 An HTTP404 for a transaction or required accepting/containing block records an
