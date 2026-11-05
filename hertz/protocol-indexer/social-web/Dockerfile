@@ -9,7 +9,7 @@ ADD https://github.com/thesheepcat/K-indexer/archive/${UPSTREAM_REVISION}.tar.gz
 RUN test -n "$UPSTREAM_ARCHIVE_SHA256" && echo "$UPSTREAM_ARCHIVE_SHA256  /tmp/upstream.tar.gz" | sha256sum -c -
 WORKDIR /src
 RUN tar -xzf /tmp/upstream.tar.gz --strip-components=1
-COPY prepare_web.py historical-author-keys.patch exact-vote-details.patch content-search.patch shared-api.patch shared-read-api.patch tip-counts.patch protocol-metadata.patch unified-feed.patch /inputs/
+COPY prepare_web.py historical-author-keys.patch exact-vote-details.patch content-search.patch shared-api.patch shared-read-api.patch tip-counts.patch protocol-metadata.patch unified-feed.patch edited-metadata.patch /inputs/
 RUN python3 /inputs/prepare_web.py
 COPY shared_rooms.rs shared_room_tests.rs shared_reads.rs shared_read_tests.rs tip_counts.rs /src/K-webserver/src/
 COPY shared_room_schema.sql shared_read_schema.sql shared_edit_authorization.sql shared_unquote_order.sql shared_social_schema.sql shared_kaposts_schema.sql /src/K-webserver/src/
