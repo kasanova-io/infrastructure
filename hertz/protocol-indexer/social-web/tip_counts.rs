@@ -19,6 +19,7 @@ pub(crate) trait TipCount {
     fn tip_content_id(&self) -> Option<&str>;
     fn set_tip_count(&mut self, count: u64);
     fn set_protocol(&mut self, protocol: String);
+    fn set_edited_at(&mut self, _edited_at: Option<u64>) {}
     fn set_legacy_k_compatible(&mut self, _compatible: bool) {}
     fn set_reference_legacy_k_compatible(&mut self, _compatible: bool) {}
     fn reference_content_id(&self) -> Option<&str> {
@@ -28,6 +29,9 @@ pub(crate) trait TipCount {
     fn set_poll(&mut self, _poll: Option<crate::models::PollData>) {}
 }
 impl TipCount for KPostRecord {
+    fn set_edited_at(&mut self, edited_at: Option<u64>) {
+        self.edited_at = edited_at;
+    }
     fn set_legacy_k_compatible(&mut self, compatible: bool) {
         self.legacy_k_compatible = Some(compatible);
     }
@@ -63,6 +67,9 @@ impl TipCount for KPostRecord {
     }
 }
 impl TipCount for KReplyRecord {
+    fn set_edited_at(&mut self, edited_at: Option<u64>) {
+        self.edited_at = edited_at;
+    }
     fn set_legacy_k_compatible(&mut self, compatible: bool) {
         self.legacy_k_compatible = Some(compatible);
     }
@@ -90,6 +97,13 @@ impl TipCount for crate::models::KVoteRecord {
     }
 }
 impl TipCount for ContentRecord {
+    fn set_edited_at(&mut self, edited_at: Option<u64>) {
+        match self {
+            Self::Post(p) => p.set_edited_at(edited_at),
+            Self::Reply(p) => p.set_edited_at(edited_at),
+            Self::Vote(_) => {}
+        }
+    }
     fn set_legacy_k_compatible(&mut self, compatible: bool) {
         match self {
             Self::Post(p) => p.set_legacy_k_compatible(compatible),
@@ -141,6 +155,9 @@ impl TipCount for ContentRecord {
     }
 }
 impl TipCount for crate::models::NotificationContentRecord {
+    fn set_edited_at(&mut self, edited_at: Option<u64>) {
+        self.content.set_edited_at(edited_at);
+    }
     fn set_legacy_k_compatible(&mut self, compatible: bool) {
         self.content.set_legacy_k_compatible(compatible);
     }
@@ -236,7 +253,7 @@ impl PostgresDbManager {
         }
         // Preserve the actual namespace of the visible representative. Markers
         // and author identities cannot establish a post's transaction root.
-        let rows = sqlx::query("SELECT a.transaction_id,a.source_payload,a.provenance,proof.root AS retained_root,CASE WHEN a.provenance='retained_native' AND proof.root IS NULL THEN social_shared_legacy_api.is_k_member(a.transaction_id) ELSE false END AS legacy_k_member,post.content_type,poll.options AS poll_options,poll.closes_at AS poll_closes_at,(SELECT COUNT(*)::bigint FROM social_shared.current_tips t WHERE t.content_transaction_id=a.transaction_id) AS tips_count FROM social_shared_api.current_actions a LEFT JOIN LATERAL (SELECT proof.root FROM social_shared.current_retained_wire_roots proof WHERE proof.transaction_id=a.transaction_id OFFSET 0) proof ON true LEFT JOIN social_shared_api.k_contents post USING(transaction_id) LEFT JOIN social_shared_api.current_polls poll ON poll.post_id=a.transaction_id WHERE a.transaction_id=ANY($1)")
+        let rows = sqlx::query("SELECT a.transaction_id,a.source_payload,a.provenance,proof.root AS retained_root,CASE WHEN a.provenance='retained_native' AND proof.root IS NULL THEN social_shared_legacy_api.is_k_member(a.transaction_id) ELSE false END AS legacy_k_member,post.content_type,post.edited_at,poll.options AS poll_options,poll.closes_at AS poll_closes_at,(SELECT COUNT(*)::bigint FROM social_shared.current_tips t WHERE t.content_transaction_id=a.transaction_id) AS tips_count FROM social_shared_api.current_actions a LEFT JOIN LATERAL (SELECT proof.root FROM social_shared.current_retained_wire_roots proof WHERE proof.transaction_id=a.transaction_id OFFSET 0) proof ON true LEFT JOIN social_shared_api.k_contents post USING(transaction_id) LEFT JOIN social_shared_api.current_polls poll ON poll.post_id=a.transaction_id WHERE a.transaction_id=ANY($1)")
             .bind(&ids).fetch_all(&mut **read).await.map_err(lookup_error)?;
         let mut counts = HashMap::new();
         for row in rows {
@@ -268,14 +285,18 @@ impl PostgresDbManager {
             } else {
                 None
             };
+            let edited_at = row.get::<Option<i64>, _>("edited_at")
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DatabaseError::QueryError("Invalid Social edit timestamp".into()))?;
             counts.insert(
                 row.get::<Vec<u8>, _>("transaction_id"),
-                (count, protocol, poll, legacy_k_compatible),
+                (count, protocol, poll, legacy_k_compatible, edited_at),
             );
         }
         for item in items {
             if let Some(id) = item.tip_content_id() {
-                let (count, protocol, poll, legacy_k_compatible) = counts
+                let (count, protocol, poll, legacy_k_compatible, edited_at) = counts
                     .get(&content_id(id)?)
                     .ok_or_else(|| DatabaseError::QueryError("Missing Social protocol".into()))?;
                 let count = *count;
@@ -287,6 +308,7 @@ impl PostgresDbManager {
                     .is_some_and(|b| b.read_contract == crate::shared_rooms::ReadContract::Unified)
                 {
                     item.set_legacy_k_compatible(*legacy_k_compatible);
+                    item.set_edited_at(*edited_at);
                     let reference_protocol = if let Some(reference) = item.reference_content_id() {
                         Some(
                             counts
@@ -302,7 +324,7 @@ impl PostgresDbManager {
                         None
                     };
                     item.set_protocol(protocol);
-                    if let Some((_, reference_protocol, _, compatible)) = reference_protocol {
+                    if let Some((_, reference_protocol, _, compatible, _)) = reference_protocol {
                         item.set_reference_protocol(reference_protocol);
                         item.set_reference_legacy_k_compatible(compatible);
                     }

@@ -581,6 +581,24 @@ async fn postgres_shared_reads_edits_bind_exact_latest_body_tuple_and_literal_ta
     extension(&db.pool, 10, 1, "edit", 1100, "b2xk").await;
     show(&db.pool, 1, Some(1100), "b2xk").await;
     assert_eq!(feed(&db).await[0].base64_encoded_message, "b2xk");
+    assert_eq!(feed(&db).await[0].edited_at, Some(1100));
+    let api = ApiHandlers::new(Arc::new(PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: db.shared.clone(),
+    }));
+    let detail: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(1)), &hex::encode(viewer()))
+            .await
+            .unwrap(),
+    ).unwrap();
+    assert_eq!(detail["post"]["editedAt"], json!(1100));
+    let record = &feed(&db).await[0];
+    let blocked = crate::models::ServerPost::from_enriched_k_post_record_with_block_status(record, true);
+    assert!(serde_json::to_value(blocked).unwrap().get("editedAt").is_none());
+    let legacy = PostgresDbManager { pool: db.pool.clone(), shared: None };
+    let record = &feed(&legacy).await[0];
+    let legacy_post = crate::models::ServerPost::from_enriched_k_post_record_with_block_status(record, false);
+    assert!(serde_json::to_value(legacy_post).unwrap().get("editedAt").is_none());
     extension(&db.pool, 20, 1, "edit", 1100, "bmV3").await;
     assert!(
         feed(&db).await.is_empty(),
