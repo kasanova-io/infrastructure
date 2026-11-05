@@ -24,6 +24,46 @@ class ArchiveHistory(history.History):
     # Do not reuse a K-only inventory or mislabel old receipts with the new checks.
     scope = "six-protocol-archive-evidence-v1"
 
+    def seed(self):
+        super().seed()
+        # Existing completed inventories predate action discovery. Add jobs for
+        # their observed authors without resetting any content page/cursor.
+        for (author,) in self.db.execute(
+            "SELECT DISTINCT json_extract(data,'$.userPublicKey') FROM observations"
+        ).fetchall():
+            self.queue_actions(author)
+        self.db.commit()
+
+    def queue_actions(self, author):
+        if isinstance(author, str) and history.KEY.fullmatch(author):
+            self.add_job(
+                "/get-notifications", {"requesterPubkey": author}, "notifications"
+            )
+
+    def is_content(self, row, route):
+        # A vote's transaction ID is not a post. Avoid thousands of meaningless
+        # reply scans while retaining the normal content traversal.
+        return super().is_content(row, route) and (
+            route != "/get-notifications"
+            or row.get("contentType") in ("post", "reply", "quote", "poll")
+        )
+
+    def queue_related(self, row, route):
+        super().queue_related(row, route)
+        self.queue_actions(row.get("userPublicKey"))
+        if route == "/get-notifications":
+            for field in ("contentId", "postId"):
+                target = row.get(field)
+                if isinstance(target, str) and HEX64.fullmatch(target):
+                    # Public API rows supply candidates, never authenticity or
+                    # a native notification. Every ID still needs full proofs.
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO records(txid) VALUES (?)", (target,)
+                    )
+                    self.add_job(
+                        "/get-replies", {"post": target, "requesterPubkey": history.ANON}, "replies"
+                    )
+
     def bind_network(self):
         # Check the current endpoint every invocation, rather than trusting a
         # cached health response or an address prefix shared by TN10/TN11.
