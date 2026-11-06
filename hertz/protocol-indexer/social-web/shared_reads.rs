@@ -71,6 +71,78 @@ impl PostgresDbManager {
         Ok(ReadSession::Shared(tx))
     }
 
+    pub(crate) async fn resolve_current_content_alias(
+        &self,
+        content_id: &str,
+    ) -> DatabaseResult<Option<String>> {
+        let Some(binding) = &self.shared else {
+            return Ok(None);
+        };
+        if binding.read_contract != crate::shared_rooms::ReadContract::Unified {
+            return Ok(None);
+        }
+        let id = hex::decode(content_id)
+            .map_err(|_| DatabaseError::InvalidInput("Invalid post ID".into()))?;
+        if id.len() != 32 {
+            return Ok(None);
+        }
+        let mut read = self.read_session().await?;
+        // Both sides must be current and the selected native card must remain
+        // visible under all deletion/edit/source/pending/reorg fences. Match
+        // original signed envelope, not only a possibly shared signature.
+        let query = r#"
+            SELECT encode(visible.transaction_id,'hex')
+            FROM social_shared_api.current_actions literal
+            JOIN LATERAL (
+                SELECT social_shared_api.selected_k_contents(literal.subject) AS id
+                OFFSET 0
+            ) picked ON true
+            JOIN social_shared_api.k_contents visible ON visible.transaction_id=picked.id
+            JOIN social_shared_api.current_actions chosen ON chosen.transaction_id=picked.id
+            WHERE literal.transaction_id=$1 AND literal.native_table='k_contents'
+              AND literal.provenance='canonical' AND picked.id<>literal.transaction_id
+              AND chosen.subject=literal.subject
+              -- The owning writer stores the full immutable verified wire
+              -- payload on every action, including aliases never materialized.
+              -- Its native snapshot is optional and contains edited state.
+              -- Compare the entire envelope, not a fabricated snapshot shape.
+              AND lower(literal.source_payload)=lower(chosen.source_payload)
+              AND NOT EXISTS (
+                SELECT 1 FROM social_shared.extensions malformed
+                WHERE malformed.transaction_id=literal.transaction_id
+                  AND malformed.kind='poll' AND NOT malformed.shape_valid
+              )
+              AND (visible.content_type<>'poll' OR EXISTS (
+                SELECT 1 FROM social_shared.extensions original_poll
+                JOIN social_shared.extensions selected_poll ON selected_poll.transaction_id=chosen.transaction_id
+                WHERE original_poll.transaction_id=literal.transaction_id
+                  AND original_poll.kind='poll' AND selected_poll.kind='poll'
+                  AND original_poll.shape_valid AND selected_poll.shape_valid
+                  AND original_poll.revision=literal.revision AND selected_poll.revision=chosen.revision
+                  AND original_poll.options=selected_poll.options AND original_poll.closes_at=selected_poll.closes_at
+              ))
+              AND (visible.content_type NOT IN ('quote','repost') OR EXISTS (
+                SELECT 1 FROM social_shared.content_keys k
+                WHERE k.transaction_id=literal.transaction_id AND k.signature=visible.sender_signature
+                  AND k.author=visible.sender_pubkey AND k.kind=visible.content_type
+                  AND k.reference IS NOT DISTINCT FROM visible.referenced_content_id
+              ))
+              AND NOT EXISTS (
+                SELECT 1 FROM social_shared.content_keys k
+                JOIN social_shared.extensions e ON e.kind='unquote' AND e.sender=k.author AND e.target=k.reference
+                JOIN social_shared_api.current_actions mutation ON mutation.transaction_id=e.transaction_id
+                WHERE k.transaction_id=literal.transaction_id AND k.kind IN('quote','repost')
+                  AND e.shape_valid AND e.revision=mutation.revision AND __UNQUOTE_ORDER__
+              )
+            LIMIT 1
+        "#.replace("__UNQUOTE_ORDER__", include_str!("shared_unquote_order.sql"));
+        sqlx::query_scalar(&query)
+            .bind(id)
+            .fetch_optional(&mut *read)
+            .await
+            .map_err(error)
+    }
+
     pub(crate) async fn validate_shared_reads(&self) -> DatabaseResult<()> {
         let _read = self.read_session().await?;
         Ok(())
