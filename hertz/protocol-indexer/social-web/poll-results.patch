@@ -1,0 +1,104 @@
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -1484,7 +1484,7 @@
+             posts.push(post_record);
+         }
+ 
+-        self.enrich_tip_counts(&mut read, &mut posts).await?;
++        self.enrich_tip_counts(&mut read, &mut posts, requester_pubkey).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&posts, limit as u32, has_more);
+ 
+@@ -1714,7 +1714,7 @@
+         }
+ 
+         // Build pagination metadata
+-        self.enrich_tip_counts(&mut read, &mut items).await?;
++        self.enrich_tip_counts(&mut read, &mut items, requester_pubkey).await?;
+ 
+         let pagination = if items.is_empty() {
+             PaginationMetadata {
+@@ -2056,7 +2056,7 @@
+             content_records.push(content_record);
+         }
+ 
+-        self.enrich_tip_counts(&mut read, &mut content_records).await?;
++        self.enrich_tip_counts(&mut read, &mut content_records, requester_pubkey).await?;
+ 
+         let pagination =
+             self.create_compound_pagination_metadata(&content_records, limit as u32, has_more);
+@@ -2100,7 +2100,7 @@
+             user_nickname: None,
+             user_profile_image: None,
+         }).into_iter().collect::<Vec<_>>();
+-        self.enrich_tip_counts(&mut read, &mut votes).await?;
++        self.enrich_tip_counts(&mut read, &mut votes, requester_pubkey).await?;
+         Ok(votes.pop())
+     }
+ 
+@@ -2312,7 +2312,7 @@
+             }
+         };
+ 
+-        self.enrich_tip_counts(&mut read, std::slice::from_mut(&mut content_record)).await?;
++        self.enrich_tip_counts(&mut read, std::slice::from_mut(&mut content_record), requester_pubkey).await?;
+         Ok(Some((content_record, is_blocked)))
+     }
+ 
+@@ -2543,7 +2543,7 @@
+             replies.push(reply_record);
+         }
+ 
+-        self.enrich_tip_counts(&mut read, &mut replies).await?;
++        self.enrich_tip_counts(&mut read, &mut replies, requester_pubkey).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&replies, limit as u32, has_more);
+ 
+@@ -2780,7 +2780,7 @@
+             replies.push(reply_record);
+         }
+ 
+-        self.enrich_tip_counts(&mut read, &mut replies).await?;
++        self.enrich_tip_counts(&mut read, &mut replies, requester_pubkey).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&replies, limit as u32, has_more);
+ 
+@@ -3043,7 +3043,7 @@
+             posts.push(post_record);
+         }
+ 
+-        self.enrich_tip_counts(&mut read, &mut posts).await?;
++        self.enrich_tip_counts(&mut read, &mut posts, requester_pubkey).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&posts, limit as u32, has_more);
+ 
+@@ -3452,7 +3452,7 @@
+             ));
+         }
+ 
+-        self.enrich_tip_counts(&mut read, &mut notifications).await?;
++        self.enrich_tip_counts(&mut read, &mut notifications, requester_pubkey).await?;
+ 
+         Ok(PaginatedResult {
+             items: notifications,
+@@ -3736,7 +3736,7 @@
+         }
+ 
+         // Build pagination metadata
+-        self.enrich_tip_counts(&mut read, &mut items).await?;
++        self.enrich_tip_counts(&mut read, &mut items, requester_pubkey).await?;
+ 
+         let pagination = if items.is_empty() {
+             PaginationMetadata {
+--- a/K-webserver/src/models.rs
++++ b/K-webserver/src/models.rs
+@@ -205,6 +205,9 @@
+ pub struct PollData {
+     pub options: Vec<String>,
+     pub closes_at: u64,
++    pub counts: Vec<u64>,
++    pub total: u64,
++    pub my_vote: Option<u32>,
+ }
+ 
+ // API Response models
