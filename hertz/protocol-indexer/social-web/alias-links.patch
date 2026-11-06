@@ -1,0 +1,63 @@
+--- a/K-webserver/src/database_trait.rs
++++ b/K-webserver/src/database_trait.rs
+@@ -172,2 +172,8 @@
+ 
++    // Canonical duplicates may link to the existing visible representative.
++    // Other database implementations preserve their exact-ID behavior.
++    async fn resolve_content_alias(&self, _content_id: &str) -> DatabaseResult<Option<String>> {
++        Ok(None)
++    }
++
+     // NEW: k_contents table - Get content by ID using unified content table
+--- a/K-webserver/src/web_server.rs
++++ b/K-webserver/src/web_server.rs
+@@ -490,3 +490,4 @@
+     Query(params): Query<GetPostDetailsQuery>,
+-) -> Result<Json<PostDetailsResponse>, (StatusCode, Json<ApiError>)> {
++) -> Result<axum::response::Response, (StatusCode, Json<ApiError>)> {
++    use axum::response::IntoResponse;
+     // Check rate limit first
+@@ -526,3 +527,3 @@
+             match serde_json::from_str::<PostDetailsResponse>(&response_json) {
+-                Ok(post_details_response) => Ok(Json(post_details_response)),
++                Ok(post_details_response) => Ok(Json(post_details_response).into_response()),
+                 Err(err) => {
+@@ -541,2 +542,29 @@
+                 Ok(api_error) => {
++                    if api_error.code == "NOT_FOUND" {
++                        // A redirect changes no content identity or target authorization. The
++                        // destination performs the normal current-source read again. Never cache
++                        // eligibility or let a revoked literal borrow its representative's state.
++                        if post_id.len() == 64 && hex::decode(&post_id).is_ok()
++                            && matches!(requester_pubkey.len(), 64 | 66)
++                            && hex::decode(&requester_pubkey).is_ok()
++                        {
++                            match app_state.db.resolve_content_alias(&post_id).await {
++                                Ok(Some(selected)) => {
++                                    let mut response = axum::response::Redirect::temporary(&format!(
++                                        "?id={selected}&requesterPubkey={requester_pubkey}"
++                                    )).into_response();
++                                    response.headers_mut().insert(
++                                        axum::http::header::CACHE_CONTROL,
++                                        axum::http::HeaderValue::from_static("private, no-store"),
++                                    );
++                                    return Ok(response);
++                                }
++                                Ok(None) => {}
++                                Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, Json(ApiError {
++                                    error: "Social read source unavailable".into(),
++                                    code: "SERVICE_UNAVAILABLE".into(),
++                                }))),
++                            }
++                        }
++                    }
+                     let status_code = match api_error.code.as_str() {
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -2104,2 +2104,6 @@
+         Ok(votes.pop())
++    }
++
++    async fn resolve_content_alias(&self, content_id: &str) -> DatabaseResult<Option<String>> {
++        self.resolve_current_content_alias(content_id).await
+     }
