@@ -182,3 +182,24 @@ public-cutover acceptance; the current candidate's verdict is in `SOURCE.lock`.
 
 
 Unified reads expose `legacyKCompatible` separately from `protocol`: an unknown-wire retained item may keep the established K-only action contract only while `social_shared_legacy_api.is_k_member` permits it. This is dataset compatibility, never original-wire proof. Known roots always win. Visible quote references carry their own `referencedLegacyKCompatible`; hidden references reveal neither field. Both are evaluated on the same bounded repeatable-read snapshot, with current source/pending/revocation/stale-proof fences. Legacy API DTOs omit these additive fields.
+
+
+## Poll results
+
+The poll-results candidate adds `counts`, `total` and nullable `myVote` to the
+existing poll object. Enrichment receives the requester's existing public key;
+there is no cross-request viewer state. A single additional query for a page
+containing polls uses `social_shared.current_poll_votes` on the same read
+snapshot. Latest `(block_time, transaction_id)` wins per voter and resolved
+visible poll; counts never come from the public KaChat API. Native signatures,
+close-time/option validation, accepted revision and pending-removal fences stay
+with the existing native projection.
+
+Before switching a reader, grant SELECT on `social_shared.current_poll_votes`
+to its existing read-only role. The unvote-aware selector also requires SELECT
+on `social_shared.ordinary_vote_targets` and `social_shared.current_vote_withdrawals`.
+These are read dependencies, not projection write or role-provisioning grants.
+The frozen candidate passed compilation, existing pure checks and all32
+PostgreSQL/router contracts, including current tally, requester, alias, snapshot
+and actual restricted-role cases. Independent source review found no P1/P2.
+Actual DEV/PROD acceptance remains pending.
