@@ -57,7 +57,13 @@ CREATE TABLE IF NOT EXISTS social_shared.quote_withdrawals (
 CREATE TABLE IF NOT EXISTS social_shared.ordinary_vote_targets (
   transaction_id bytea PRIMARY KEY REFERENCES social_shared.actions,post_id bytea NOT NULL
 );
+ALTER TABLE social_shared.ordinary_vote_targets ADD COLUMN IF NOT EXISTS sender bytea;
 CREATE INDEX IF NOT EXISTS social_shared_ordinary_vote_target ON social_shared.ordinary_vote_targets(post_id,transaction_id);
+CREATE INDEX IF NOT EXISTS social_shared_ordinary_vote_sender ON social_shared.ordinary_vote_targets(sender,post_id,transaction_id);
+CREATE TABLE IF NOT EXISTS social_shared.vote_withdrawals (
+  sender bytea NOT NULL,post_id bytea NOT NULL,transaction_id bytea NOT NULL,original_time bigint NOT NULL,
+  PRIMARY KEY(sender,post_id)
+);
 CREATE TABLE IF NOT EXISTS social_shared.extensions (
   transaction_id bytea PRIMARY KEY REFERENCES social_shared.actions,
   revision bigint NOT NULL,original_time bigint NOT NULL,kind text NOT NULL,sender bytea NOT NULL,signature bytea NOT NULL,
@@ -94,9 +100,23 @@ SELECT t.transaction_id,t.sender_signature,t.sender_pubkey,t.content_type,t.refe
 FROM k_contents t JOIN social_shared.actions a USING(transaction_id) WHERE a.status='verified'
 ON CONFLICT DO NOTHING;
 INSERT INTO social_shared.ordinary_vote_targets
-SELECT t.transaction_id,t.post_id FROM k_votes t JOIN social_shared.actions a USING(transaction_id) WHERE a.status='verified'
-ON CONFLICT DO NOTHING;
+SELECT t.transaction_id,t.post_id,t.sender_pubkey FROM k_votes t JOIN social_shared.actions a USING(transaction_id) WHERE a.status='verified'
+ON CONFLICT(transaction_id) DO UPDATE SET sender=EXCLUDED.sender;
 INSERT INTO social_shared.decoder_epochs(kind) VALUES('kchat:1:extensions') ON CONFLICT DO NOTHING;
+-- Only the normal verified KaChat decoder writes unvote extensions. A cached
+-- withdrawal is never authority: both native and read selection use these
+-- current accepted/revision-fenced actions, including pending revocations.
+CREATE OR REPLACE VIEW social_shared.current_vote_withdrawals AS
+SELECT e.sender,e.target AS post_id,e.transaction_id,e.original_time,c.revision
+FROM social_shared.extensions e
+JOIN protocol_indexer.canonical c USING(transaction_id)
+JOIN social_shared.actions a USING(transaction_id)
+JOIN social_shared.source_facts f USING(transaction_id)
+WHERE e.kind='unvote' AND e.shape_valid AND e.revision=c.revision
+AND a.status='verified' AND a.revision=c.revision AND f.eligible AND f.revision=c.revision
+AND c.accepting_block IS NOT NULL
+AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p
+ WHERE p.transaction_id=e.transaction_id AND p.acceptance_changed AND p.accepting_block IS NULL);
 CREATE OR REPLACE VIEW social_shared.current_poll_votes AS
 SELECT vote.*,post.transaction_id AS content_transaction_id FROM k_poll_votes vote
 JOIN protocol_indexer.canonical c USING(transaction_id)

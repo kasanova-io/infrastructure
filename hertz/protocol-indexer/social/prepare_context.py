@@ -9,7 +9,7 @@ import shutil
 HERE = Path(__file__).resolve().parent
 FILES = [
     'Cargo.lock', 'Dockerfile', 'LICENSE.K-indexer', 'prepare_manifests.py',
-    'real_kpost.json', 'real_tip.json', 'release_tip.json', 'transaction_tests.rs',
+    'real_kpost.json', 'real_tip.json', 'release_tip.json', 'transaction_tests.rs', 'unvote_tests.rs',
     'transactional-protocol.patch', 'shared_social.rs', 'shared_social.sql',
     'notification_capture.sql', 'notification_capture.sha256', 'tips.rs',
     'tip_evidence.rs', 'tip_projection.rs', 'kaposts.rs', 'kaposts_projection.rs',
@@ -23,7 +23,7 @@ def prepare(output):
     if output.exists():
         raise ValueError('fresh build directory required; preserve existing work')
     history = json.loads((HERE / 'SOURCE.lock').read_text())
-    lock = history.get('retained_root_candidate') or history.get('unified_feed_candidate') or history.get('bounded_read_candidate', history['retained_history_candidate'])
+    lock = history.get('unvote_candidate') or history.get('retained_root_candidate') or history.get('unified_feed_candidate') or history.get('bounded_read_candidate', history['retained_history_candidate'])
     inputs = {name: HERE / name for name in FILES}
     # The journal installer and native verifier compile this SAME owned asset.
     inputs['source_fence.sql'] = HERE.parent / 'protocol_indexer/source_fence.sql'

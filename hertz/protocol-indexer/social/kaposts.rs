@@ -10,11 +10,22 @@ use tracing::error;
 
 #[derive(Debug, Clone)]
 pub enum KaPostsAction {
+    Unvote(KUnvote),
     Unquote(KUnquote),
     Edit(KEdit),
     Delete(KDelete),
     Poll(KPoll),
     PollVote(KPollVote),
+}
+
+/// KaChat carries withdrawal as a value of vote, signing the same three fields
+/// as an ordinary vote. It removes this sender's earlier votes for the post.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct KUnvote {
+    pub sender_pubkey: String,
+    pub sender_signature: String,
+    pub post_id: String,
+    pub mentioned_pubkey: String,
 }
 
 /// Removal counter-action for a quote/repost (fork addition). The sender withdraws their
@@ -88,6 +99,12 @@ pub fn parse_parts(parts: &[&str]) -> Result<KaPostsAction> {
     // Called only for the canonical kchat:1: envelope, by the existing native verifier.
     let is_kchat = true;
     match action {
+        "vote" if parts.len() == 6 && parts[4] == "unvote" => Ok(KaPostsAction::Unvote(KUnvote {
+            sender_pubkey: parts[1].to_string(),
+            sender_signature: parts[2].to_string(),
+            post_id: parts[3].to_string(),
+            mentioned_pubkey: parts[5].to_string(),
+        })),
         "unquote" => {
             // Expected format: unquote:sender_pubkey:sender_signature:content_id
             // (fork addition) Removal counter-action for a prior quote/repost.
@@ -210,6 +227,7 @@ impl KaPostsAction {
     /// Exact upstream signing strings; unquote intentionally signs the bare ID.
     pub fn signing_string(&self) -> Result<String> {
         Ok(match self {
+            Self::Unvote(v) => format!("{}:unvote:{}", v.post_id, v.mentioned_pubkey),
             Self::Unquote(v) => v.content_id.clone(),
             Self::Edit(v) => format!(
                 "edit:{}:{}:{}",
@@ -231,6 +249,7 @@ impl KaPostsAction {
 
     pub fn signature_fields(&self) -> (&str, &str) {
         match self {
+            Self::Unvote(v) => (&v.sender_signature, &v.sender_pubkey),
             Self::Unquote(v) => (&v.sender_signature, &v.sender_pubkey),
             Self::Edit(v) => (&v.sender_signature, &v.sender_pubkey),
             Self::Delete(v) => (&v.sender_signature, &v.sender_pubkey),
@@ -244,6 +263,7 @@ impl KaPostsAction {
     pub fn storage_fields_are_decodable(&self) -> bool {
         let hex_ok = |s: &str| hex::decode(s).is_ok();
         match self {
+            Self::Unvote(v) => hex_ok(&v.post_id) && hex_ok(&v.mentioned_pubkey),
             Self::Unquote(v) => hex_ok(&v.content_id),
             Self::Edit(v) => hex_ok(&v.post_id) && v.mentioned_pubkeys.iter().all(|s| hex_ok(s)),
             Self::Delete(v) => hex_ok(&v.post_id),
