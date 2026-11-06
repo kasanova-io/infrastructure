@@ -77,6 +77,7 @@ pub fn subject(value: &VerifiedKaPosts) -> (String, &'static str) {
 fn kind(value: &KaPostsAction) -> &'static str {
     match value {
         KaPostsAction::Unquote(_) => "unquote",
+        KaPostsAction::Unvote(_) => "unvote",
         KaPostsAction::Edit(_) => "edit",
         KaPostsAction::Delete(_) => "delete",
         KaPostsAction::Poll(_) => "poll",
@@ -89,6 +90,9 @@ pub fn relation_lock(
     extension: Option<&VerifiedKaPosts>,
 ) -> Option<String> {
     if let Some(value) = core {
+        if let KActionType::Vote(v) = value.action() {
+            return Some(format!("vote_relation:{}:{}", v.sender_pubkey, v.post_id).to_lowercase());
+        }
         if let KActionType::Quote(v) = value.action() {
             return Some(
                 format!("quote_relation:{}:{}", v.sender_pubkey, v.content_id).to_lowercase(),
@@ -96,6 +100,9 @@ pub fn relation_lock(
         }
     }
     if let Some(value) = extension {
+        if let KaPostsAction::Unvote(v) = value.action() {
+            return Some(format!("vote_relation:{}:{}", v.sender_pubkey, v.post_id).to_lowercase());
+        }
         if let KaPostsAction::Unquote(v) = value.action() {
             return Some(
                 format!("quote_relation:{}:{}", v.sender_pubkey, v.content_id).to_lowercase(),
@@ -121,8 +128,8 @@ pub async fn record_core(tx: &mut Tx<'_>, value: &VerifiedAction) -> Result<()> 
             Some(v.content_id.as_str()),
         ),
         KActionType::Vote(v) => {
-            sqlx::query("INSERT INTO social_shared.ordinary_vote_targets VALUES($1,$2) ON CONFLICT DO NOTHING")
-                .bind(hex::decode(&value.transaction().transaction_id)?).bind(hex::decode(&v.post_id)?).execute(&mut **tx).await?;
+            sqlx::query("INSERT INTO social_shared.ordinary_vote_targets(transaction_id,post_id,sender) VALUES($1,$2,$3) ON CONFLICT(transaction_id) DO UPDATE SET sender=EXCLUDED.sender")
+                .bind(hex::decode(&value.transaction().transaction_id)?).bind(hex::decode(&v.post_id)?).bind(hex::decode(&v.sender_pubkey)?).execute(&mut **tx).await?;
             return Ok(());
         }
         _ => return Ok(()),
@@ -169,6 +176,10 @@ pub async fn record_extension(
     let mut index = None;
     let mut valid = true;
     match value.action() {
+        KaPostsAction::Unvote(v) => {
+            target = Some(v.post_id.clone());
+            valid = v.post_id.len() == 64;
+        }
         KaPostsAction::Unquote(v) => target = Some(v.content_id.clone()),
         KaPostsAction::Delete(v) => {
             target = Some(v.post_id.clone());
@@ -243,7 +254,9 @@ async fn target(tx: &mut Tx<'_>, processor: &KProtocolProcessor, id: &[u8]) -> R
             TargetState::Missing
         });
     };
-    if !crate::retained_history::fence(tx, id, row.get("revision"), row.get("retained_native")).await? {
+    if !crate::retained_history::fence(tx, id, row.get("revision"), row.get("retained_native"))
+        .await?
+    {
         return Ok(TargetState::Busy);
     }
     let time: Option<i64> = row.get("original_time");
@@ -307,6 +320,7 @@ async fn target(tx: &mut Tx<'_>, processor: &KProtocolProcessor, id: &[u8]) -> R
 
 pub struct Plan {
     pub content_keys: Vec<String>,
+    pub vote_keys: Vec<String>,
     pub pending: bool,
     pub busy: bool,
 }
@@ -318,6 +332,7 @@ pub async fn plan(
 ) -> Result<Plan> {
     let mut result = Plan {
         content_keys: vec![],
+        vote_keys: vec![],
         pending: false,
         busy: false,
     };
@@ -336,6 +351,54 @@ pub async fn plan(
         return Ok(result);
     }
     let reference: Vec<u8> = row.get("target");
+    if let KaPostsAction::Unvote(v) = value.action() {
+        let sender = hex::decode(&v.sender_pubkey)?;
+        let selected=sqlx::query("SELECT transaction_id,original_time,revision FROM social_shared.current_vote_withdrawals WHERE sender=$1 AND post_id=$2 ORDER BY original_time DESC,transaction_id DESC LIMIT 1")
+            .bind(&sender).bind(&reference).fetch_all(&mut **tx).await?;
+        if !fenced(tx, &selected).await? {
+            result.busy = true;
+            return Ok(result);
+        }
+        let old=sqlx::query("SELECT transaction_id,original_time FROM social_shared.vote_withdrawals WHERE sender=$1 AND post_id=$2")
+            .bind(&sender).bind(&reference).fetch_optional(&mut **tx).await?;
+        let previous = old.as_ref().map(|r| {
+            (
+                r.get::<i64, _>("original_time"),
+                r.get::<Vec<u8>, _>("transaction_id"),
+            )
+        });
+        let next = selected.first().map(|r| {
+            (
+                r.get::<i64, _>("original_time"),
+                r.get::<Vec<u8>, _>("transaction_id"),
+            )
+        });
+        if previous == next {
+            return Ok(result);
+        }
+        let (lower, upper) = if previous < next {
+            (previous, next.clone().unwrap())
+        } else {
+            (next.clone(), previous.unwrap())
+        };
+        // Match quote withdrawal's changed-range reconciliation. Signature
+        // subjects remain immutable; a later alias/re-vote can activate again.
+        result.vote_keys=sqlx::query_scalar("SELECT DISTINCT a.subject FROM social_shared.ordinary_vote_targets d JOIN social_shared.actions a USING(transaction_id) WHERE d.sender=$1 AND d.post_id=$2 AND a.native_table='k_votes' AND a.subject IS NOT NULL AND ($3::bigint IS NULL OR (a.original_time,a.transaction_id)>($3,$4)) AND (a.original_time,a.transaction_id)<=($5,$6) ORDER BY a.subject")
+            .bind(&sender).bind(&reference).bind(lower.as_ref().map(|v|v.0)).bind(lower.as_ref().map(|v|v.1.as_slice())).bind(upper.0).bind(upper.1).fetch_all(&mut **tx).await?;
+        if let Some((time, id)) = next {
+            sqlx::query("INSERT INTO social_shared.vote_withdrawals VALUES($1,$2,$3,$4) ON CONFLICT(sender,post_id) DO UPDATE SET transaction_id=EXCLUDED.transaction_id,original_time=EXCLUDED.original_time")
+                .bind(sender).bind(reference).bind(id).bind(time).execute(&mut **tx).await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM social_shared.vote_withdrawals WHERE sender=$1 AND post_id=$2",
+            )
+            .bind(sender)
+            .bind(reference)
+            .execute(&mut **tx)
+            .await?;
+        }
+        return Ok(result);
+    }
     if matches!(value.action(), KaPostsAction::Delete(_)) {
         let (_, sender) = value.action().signature_fields();
         let candidates=sqlx::query("SELECT e.transaction_id,a.original_time,c.revision FROM social_shared.extensions e JOIN social_shared.actions a USING(transaction_id) JOIN protocol_indexer.canonical c USING(transaction_id) WHERE e.kind='delete' AND e.target=$1 AND e.sender=$2 AND e.shape_valid AND c.accepting_block IS NOT NULL ORDER BY a.original_time,e.transaction_id LIMIT 1")
@@ -476,7 +539,14 @@ async fn fenced(tx: &mut Tx<'_>, rows: &Rows) -> Result<bool> {
         if let Some(target) = row.try_get::<Option<Vec<u8>>, _>("target").ok().flatten() {
             let target_revision: Option<i64> = row.try_get("target_revision").ok().flatten();
             if let Some(expected) = target_revision {
-                if !crate::retained_history::fence(tx, &target, expected, row.try_get("target_retained").unwrap_or(false)).await? {
+                if !crate::retained_history::fence(
+                    tx,
+                    &target,
+                    expected,
+                    row.try_get("target_retained").unwrap_or(false),
+                )
+                .await?
+                {
                     return Ok(false);
                 }
             }
@@ -854,6 +924,15 @@ pub async fn ordinary_vote_hidden(
     let KActionType::Vote(v) = value.action() else {
         return Ok(Some(false));
     };
+    let withdrawals=sqlx::query("SELECT transaction_id,revision FROM social_shared.current_vote_withdrawals WHERE sender=$1 AND post_id=$2 AND (original_time,transaction_id)>($3,$4) ORDER BY original_time DESC,transaction_id DESC LIMIT 1")
+        .bind(hex::decode(&v.sender_pubkey)?).bind(hex::decode(&v.post_id)?)
+        .bind(value.transaction().block_time).bind(hex::decode(&value.transaction().transaction_id)?).fetch_all(&mut **tx).await?;
+    if !fenced(tx, &withdrawals).await? {
+        return Ok(None);
+    }
+    if !withdrawals.is_empty() {
+        return Ok(Some(true));
+    }
     match target(tx, processor, &hex::decode(&v.post_id)?).await? {
         TargetState::Busy => Ok(None),
         TargetState::Ready(parent) => {
