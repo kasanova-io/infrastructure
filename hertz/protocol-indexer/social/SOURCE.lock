@@ -627,9 +627,24 @@
     "contract_image": "sha256:2fdb7b91f3d8685bc7ce36fb7bd18019566657f02fd7a9671dc1ab68a1f0e494",
     "source_reviewed": true,
     "postgres_contracts_accepted": true,
-    "runtime_accepted": false,
+    "runtime_accepted": true,
     "native_unit_tests_passed": 64,
     "postgres_contracts_passed": 64,
-    "unvote_postgres_contracts_passed": 10
+    "unvote_postgres_contracts_passed": 10,
+    "runtime_acceptance": {
+      "main": "7538137cfaae6ed30e817fabbae6f46dcb891ffc",
+      "DEV": "c95aec57ae2cd7f4f48145ed4f1fecd6ccd7ca928e4cac23b6b95b559a28e5c2",
+      "PROD": "125fdb36a2c18f3d28c293a5f73108e74e872b16dff4c231adf2c60fdfec108c",
+      "historical_unvotes_verified_current": 2,
+      "consumer_jobs_pending": 0,
+      "historical_target_outbox": 0,
+      "unrelated_native_votes_preserved": true,
+      "existing_native_vote_removal_observed": false,
+      "receipt_sha256": "0161ea1ab081ca34e55d47492ae33a27bab9a715dddc0e029fa5f58505a40391",
+      "readonly_role_dependencies": [
+        "social_shared.current_vote_withdrawals",
+        "social_shared.ordinary_vote_targets"
+      ]
+    }
   }
 }
