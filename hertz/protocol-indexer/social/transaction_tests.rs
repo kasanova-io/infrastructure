@@ -3506,6 +3506,7 @@ mod shared_consumer {
         assert_eq!(count(&pool,"social_shared.retained_wire_roots").await,0);
     }
 
+    include!("unvote_tests.rs");
 }
 
 #[tokio::test]

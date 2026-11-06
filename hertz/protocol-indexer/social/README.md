@@ -357,3 +357,15 @@ native rows and quiet notification state, and never fabricates canonical
 receipts. The bounded inventory can now include up to64MiB of explicit recovery
 material. Original wire root, transaction identity and acceptance are not
 inferred from this field recovery; full RPC evidence remains separate.
+
+
+KaChat vote withdrawals use `kchat:1:vote:<sender>:<signature>:<post>:unvote:<mentioned-key>`.
+The existing SDK verifies the exact ordinary-vote signing fields. A withdrawal
+removes the sender's earlier votes and mentions for that literal post; ordinary
+signature identity and multiple distinct votes remain unchanged. Native and read
+selection use accepted current revisions ordered by original chain time and
+transaction ID, so late history cannot remove a later re-vote. Revoking a
+withdrawal restores the previous native IDs, timestamps and mentions quietly.
+The deployment must replay the existing public-action consumer backfill to
+reconsider previously acknowledged unsupported withdrawals. Historical replay
+keeps the existing activation epochs and never copies primary API counts.
