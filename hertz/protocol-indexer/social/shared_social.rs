@@ -72,7 +72,7 @@ pub(crate) fn selection_sql(table: &str) -> String {
             "SELECT {fields} {base} AND NOT EXISTS(SELECT 1 FROM social_shared.extensions e WHERE e.transaction_id=a.transaction_id AND e.kind='poll' AND NOT e.shape_valid) ORDER BY EXISTS(SELECT 1 FROM k_contents native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1"
         ),
         "k_votes" => format!(
-            "SELECT {fields} {base} ORDER BY EXISTS(SELECT 1 FROM {table} native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1"
+            "SELECT {fields} {base} AND NOT EXISTS(SELECT 1 FROM social_shared.ordinary_vote_targets d JOIN social_shared.current_vote_withdrawals w ON w.sender=d.sender AND w.post_id=d.post_id WHERE d.transaction_id=a.transaction_id AND (w.original_time,w.transaction_id)>(a.original_time,a.transaction_id)) ORDER BY EXISTS(SELECT 1 FROM {table} native WHERE native.transaction_id=a.transaction_id) DESC,a.original_time,a.transaction_id LIMIT 1"
         ),
         _ => unreachable!("native table is a closed verified action mapping"),
     }
@@ -87,12 +87,18 @@ pub(crate) async fn restore_snapshot(
     if let Some(previous) = previous {
         let saved: Value = serde_json::from_str(previous)?;
         if let Some(saved_id) = saved["main"]["id"].as_i64() {
-            sqlx::query(&format!("UPDATE {table} SET id=$1,block_time=$2 WHERE transaction_id=$3"))
-                .bind(saved_id)
-                .bind(saved["main"]["block_time"].as_i64().context("snapshot original time missing")?)
-                .bind(id)
-                .execute(&mut **tx)
-                .await?;
+            sqlx::query(&format!(
+                "UPDATE {table} SET id=$1,block_time=$2 WHERE transaction_id=$3"
+            ))
+            .bind(saved_id)
+            .bind(
+                saved["main"]["block_time"]
+                    .as_i64()
+                    .context("snapshot original time missing")?,
+            )
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
         }
         for child in ["k_mentions", "k_hashtags"] {
             if let Some(rows) = saved[child].as_array() {
@@ -192,7 +198,9 @@ impl SharedSocial {
     }
 
     pub(crate) async fn install_in(
-        tx: &mut sqlx::Transaction<'_, Postgres>, network: &str, source_id: &str,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        network: &str,
+        source_id: &str,
     ) -> Result<()> {
         sqlx::raw_sql(include_str!("shared_social.sql"))
             .execute(&mut **tx)
@@ -330,17 +338,29 @@ impl SharedSocial {
                 .await?;
         }
         match crate::retained_history::observe(
-            &mut tx, &processor, &transaction, verified.as_ref(), revision,
-        ).await? {
-            crate::retained_history::Observation::Ordinary => {},
+            &mut tx,
+            &processor,
+            &transaction,
+            verified.as_ref(),
+            revision,
+        )
+        .await?
+        {
+            crate::retained_history::Observation::Ordinary => {}
             crate::retained_history::Observation::Busy => {
                 tx.rollback().await?;
                 sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '50 milliseconds',last_error='retained_subject_busy' WHERE consumer='native-social-v1' AND transaction_id=$1")
                     .bind(&id).execute(&self.pool).await?;
                 return Ok(true);
-            },
-            crate::retained_history::Observation::Conflict { subject: old_key, table: old_table } => {
-                if !self.rebuild(&mut tx, &processor, &old_key, &old_table, &id, false).await? {
+            }
+            crate::retained_history::Observation::Conflict {
+                subject: old_key,
+                table: old_table,
+            } => {
+                if !self
+                    .rebuild(&mut tx, &processor, &old_key, &old_table, &id, false)
+                    .await?
+                {
                     tx.rollback().await?;
                     sqlx::query("UPDATE protocol_indexer.consumer_jobs SET available_at=clock_timestamp()+interval '50 milliseconds',last_error='retained_subject_busy' WHERE consumer='native-social-v1' AND transaction_id=$1")
                         .bind(&id).execute(&self.pool).await?;
@@ -350,7 +370,7 @@ impl SharedSocial {
                     .bind(&id).execute(&mut *tx).await?;
                 tx.commit().await?;
                 return Ok(true);
-            },
+            }
         }
         let old = sqlx::query(
             "SELECT source_payload,subject FROM social_shared.actions WHERE transaction_id=$1",
@@ -370,8 +390,12 @@ impl SharedSocial {
                 );
             }
         }
-        let imported_replay:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM social_shared.retained_replay WHERE transaction_id=$1)")
-            .bind(&id).fetch_one(&mut *tx).await?;
+        let imported_replay: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM social_shared.retained_replay WHERE transaction_id=$1)",
+        )
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?;
         sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,notification_consumed) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(transaction_id) DO UPDATE SET revision=EXCLUDED.revision,subject=EXCLUDED.subject,native_table=EXCLUDED.native_table,status=EXCLUDED.status,state_action=EXCLUDED.state_action")
             .bind(&id).bind(revision).bind(key.as_ref().map(|v|v.0.as_str())).bind(key.as_ref().map(|v|v.1))
             .bind(payload).bind(time).bind(if verified.is_some() || verified_tip.is_some() || verified_extension.is_some() {"verified"} else {"unsupported_or_invalid"})
@@ -447,6 +471,24 @@ impl SharedSocial {
                         }
                     }
                     if complete {
+                        for vote_key in plan.vote_keys {
+                            let acquired: bool = sqlx::query_scalar(
+                                "SELECT pg_try_advisory_xact_lock(hashtextextended($1,736124))",
+                            )
+                            .bind(&vote_key)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                            if !acquired
+                                || !self
+                                    .rebuild(&mut tx, &processor, &vote_key, "k_votes", &id, true)
+                                    .await?
+                            {
+                                complete = false;
+                                break;
+                            }
+                        }
+                    }
+                    if complete {
                         TipReconcile::Applied
                     } else {
                         TipReconcile::Busy
@@ -472,8 +514,10 @@ impl SharedSocial {
                 tx.rollback().await?;
                 if matches!(
                     outcome,
-                    TipReconcile::ProofPending | TipReconcile::SenderProofPending
-                    | TipReconcile::InvalidProofPending(_) | TipReconcile::InvalidSenderProofPending(_)
+                    TipReconcile::ProofPending
+                        | TipReconcile::SenderProofPending
+                        | TipReconcile::InvalidProofPending(_)
+                        | TipReconcile::InvalidSenderProofPending(_)
                 ) {
                     // Only the native SDK-verified tip + parent/author path
                     // admits archive work. Bind this durable queue state to
@@ -483,8 +527,12 @@ impl SharedSocial {
                     let (kind, fingerprint) = match &outcome {
                         TipReconcile::ProofPending => ("verified_tip_output_pending", None),
                         TipReconcile::SenderProofPending => ("parsed_room_sender_pending", None),
-                        TipReconcile::InvalidProofPending(fp) => ("verified_tip_output_pending", Some(fp)),
-                        TipReconcile::InvalidSenderProofPending(fp) => ("parsed_room_sender_pending", Some(fp)),
+                        TipReconcile::InvalidProofPending(fp) => {
+                            ("verified_tip_output_pending", Some(fp))
+                        }
+                        TipReconcile::InvalidSenderProofPending(fp) => {
+                            ("parsed_room_sender_pending", Some(fp))
+                        }
                         _ => unreachable!(),
                     };
                     let marker = match fingerprint {
@@ -537,7 +585,14 @@ impl SharedSocial {
         let mut evaluated = vec![current.to_vec()];
         for selected in &active {
             let id: Vec<u8> = selected.get("transaction_id");
-            if !crate::retained_history::fence(tx, &id, selected.get::<i64, _>("revision"), selected.get("retained_native")).await? {
+            if !crate::retained_history::fence(
+                tx,
+                &id,
+                selected.get::<i64, _>("revision"),
+                selected.get("retained_native"),
+            )
+            .await?
+            {
                 return Ok(false);
             }
             evaluated.push(id);
@@ -624,6 +679,11 @@ impl SharedSocial {
             } else {
                 false
             };
+            // Withdrawal/reorg reconciliation may restore a prior vote. It is
+            // not a fresh like and must not replay that vote's notification.
+            if table == "k_votes" && overlay_only {
+                notify = false;
+            }
             if poll
                 .as_ref()
                 .is_some_and(|v| matches!(v.action(), crate::kaposts::KaPostsAction::Poll(_)))
