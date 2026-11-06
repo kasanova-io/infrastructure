@@ -203,3 +203,5 @@ The frozen candidate passed compilation, existing pure checks and all32
 PostgreSQL/router contracts, including current tally, requester, alias, snapshot
 and actual restricted-role cases. Independent source review found no P1/P2.
 Actual DEV/PROD acceptance remains pending.
+
+Accepted duplicate post links use the existing unified `/get-post-details` route: a temporary query-relative redirect selects the already visible native representative. The literal must remain currently accepted and independently pass its own withdrawal/poll policy; original identity, message, reference, mentions and poll metadata must match. Legacy K reads and feed membership are unchanged. The redirect is `private, no-store`; its decision is bound to its source snapshot, while the following ordinary GET checks the representative anew. It conveys no transaction authorization.
