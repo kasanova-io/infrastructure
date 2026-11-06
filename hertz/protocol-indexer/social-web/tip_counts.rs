@@ -235,6 +235,7 @@ impl PostgresDbManager {
         &self,
         read: &mut ReadSession<'_>,
         items: &mut [T],
+        requester_pubkey: &str,
     ) -> DatabaseResult<()> {
         if matches!(read, ReadSession::Legacy(_)) || items.is_empty() {
             return Ok(());
@@ -281,11 +282,18 @@ impl PostgresDbManager {
                 if !(2..=4).contains(&options.len()) {
                     return Err(DatabaseError::QueryError("Invalid poll options".into()));
                 }
-                Some(crate::models::PollData { options, closes_at })
+                Some(crate::models::PollData {
+                    counts: vec![0; options.len()],
+                    options,
+                    closes_at,
+                    total: 0,
+                    my_vote: None,
+                })
             } else {
                 None
             };
-            let edited_at = row.get::<Option<i64>, _>("edited_at")
+            let edited_at = row
+                .get::<Option<i64>, _>("edited_at")
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| DatabaseError::QueryError("Invalid Social edit timestamp".into()))?;
@@ -293,6 +301,41 @@ impl PostgresDbManager {
                 row.get::<Vec<u8>, _>("transaction_id"),
                 (count, protocol, poll, legacy_k_compatible, edited_at),
             );
+        }
+        // Aggregate only this page's visible polls on its same read snapshot.
+        // One latest accepted transaction per voter, with the protocol's
+        // (block_time, transaction_id) tie break. Never copy public API totals.
+        let poll_ids = counts
+            .iter()
+            .filter_map(|(id, (_, _, poll, _, _))| poll.as_ref().map(|_| id.clone()))
+            .collect::<Vec<_>>();
+        if !poll_ids.is_empty() {
+            let requester = hex::decode(requester_pubkey)
+                .map_err(|_| DatabaseError::InvalidInput("Invalid requester public key".into()))?;
+            let rows = sqlx::query("WITH latest AS (SELECT DISTINCT ON(content_transaction_id,voter_pubkey) content_transaction_id,voter_pubkey,option_index FROM social_shared.current_poll_votes WHERE content_transaction_id=ANY($1) ORDER BY content_transaction_id,voter_pubkey,block_time DESC,transaction_id DESC) SELECT content_transaction_id,option_index,count(*)::bigint AS votes,bool_or(voter_pubkey=$2) AS mine FROM latest GROUP BY content_transaction_id,option_index")
+                .bind(&poll_ids).bind(requester).fetch_all(&mut **read).await.map_err(lookup_error)?;
+            for row in rows {
+                let id = row.get::<Vec<u8>, _>("content_transaction_id");
+                let poll = counts
+                    .get_mut(&id)
+                    .and_then(|(_, _, poll, _, _)| poll.as_mut())
+                    .ok_or_else(|| DatabaseError::QueryError("Missing visible poll".into()))?;
+                let index = row.get::<i32, _>("option_index");
+                let index = usize::try_from(index)
+                    .ok()
+                    .filter(|i| *i < poll.options.len())
+                    .ok_or_else(|| DatabaseError::QueryError("Invalid poll vote option".into()))?;
+                let votes = u64::try_from(row.get::<i64, _>("votes"))
+                    .map_err(|_| DatabaseError::QueryError("Invalid poll tally".into()))?;
+                poll.counts[index] = votes;
+                poll.total = poll
+                    .total
+                    .checked_add(votes)
+                    .ok_or_else(|| DatabaseError::QueryError("Poll tally overflow".into()))?;
+                if row.get::<bool, _>("mine") {
+                    poll.my_vote = Some(index as u32);
+                }
+            }
         }
         for item in items {
             if let Some(id) = item.tip_content_id() {

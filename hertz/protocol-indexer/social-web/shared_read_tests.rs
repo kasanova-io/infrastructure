@@ -174,6 +174,206 @@ fn k_contract(db: &PostgresDbManager) -> PostgresDbManager {
     }
 }
 
+async fn poll_vote_fixture(
+    pool: &PgPool,
+    n: u8,
+    target: u8,
+    representative: u8,
+    voter: Vec<u8>,
+    option: i32,
+    time: i64,
+) {
+    action(
+        pool,
+        n,
+        "kaposts",
+        format!("pollvote:{}", hex::encode(sig(n))),
+        "signed",
+        time,
+    )
+    .await;
+    sqlx::query("INSERT INTO social_shared.extensions(transaction_id,revision,original_time,kind,sender,signature,target,mentions,option_index,shape_valid,target_signature,target_author,target_kind,target_time) VALUES($1,1,$2,'pollvote',$3,$4,$5,'[]',$6,true,$7,$8,'poll',1700000000000)")
+        .bind(id(n)).bind(time).bind(&voter).bind(sig(n)).bind(id(target)).bind(option).bind(sig(representative)).bind(author()).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO social_shared.poll_vote_facts VALUES($1,1,$2)")
+        .bind(id(n))
+        .bind(sig(representative))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO public.k_poll_votes(transaction_id,poll_id,voter_pubkey,option_index,block_time,sender_signature) VALUES($1,$2,$3,$4,$5,$6)")
+        .bind(id(n)).bind(id(target)).bind(voter).bind(option).bind(time).bind(sig(n)).execute(pool).await.unwrap();
+}
+
+async fn poll_json(db: &PostgresDbManager, poll: u8, requester: Vec<u8>) -> serde_json::Value {
+    let api = ApiHandlers::new(Arc::new(PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: db.shared.clone(),
+    }));
+    let value: serde_json::Value = serde_json::from_str(
+        &api.get_post_details(&hex::encode(id(poll)), &hex::encode(requester))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    value["post"]["poll"].clone()
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_poll_tallies_latest_voter_ties_requester_and_page_isolation() {
+    let db = setup().await;
+    poll_fixture(&db.pool, 70).await;
+    poll_fixture(&db.pool, 75).await;
+    poll_vote_fixture(&db.pool, 80, 70, 70, viewer(), 0, 1700000001000).await;
+    poll_vote_fixture(&db.pool, 81, 70, 70, author(), 0, 1700000001000).await;
+    poll_vote_fixture(&db.pool, 82, 70, 70, viewer(), 1, 1700000002000).await;
+    poll_vote_fixture(&db.pool, 85, 75, 75, viewer(), 1, 1700000002000).await;
+    let result = poll_json(&db, 70, viewer()).await;
+    assert_eq!(result["counts"], json!([1, 1]));
+    assert_eq!(result["total"], json!(2));
+    assert_eq!(result["myVote"], json!(1));
+    assert_eq!(poll_json(&db, 70, author()).await["myVote"], json!(0));
+    assert_eq!(
+        poll_json(&db, 70, [vec![2], vec![0x44; 32]].concat()).await["myVote"],
+        json!(null)
+    );
+    assert_eq!(poll_json(&db, 75, viewer()).await["counts"], json!([0, 1]));
+    // A later transaction ID wins a chain-time tie, regardless of arrival.
+    poll_vote_fixture(&db.pool, 83, 70, 70, viewer(), 0, 1700000002000).await;
+    poll_vote_fixture(&db.pool, 84, 70, 70, viewer(), 1, 1700000001500).await;
+    let result = poll_json(&db, 70, viewer()).await;
+    assert_eq!(result["counts"], json!([2, 0]));
+    assert_eq!(result["total"], json!(2));
+    assert_eq!(result["myVote"], json!(0));
+    let posts = feed(&db).await;
+    let poll = posts
+        .iter()
+        .find(|p| p.transaction_id == hex::encode(id(70)))
+        .unwrap()
+        .poll
+        .as_ref()
+        .unwrap();
+    assert_eq!(poll.counts, vec![2, 0]);
+    assert_eq!(poll.my_vote, Some(0));
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_poll_tallies_reorg_pending_revision_and_same_read_snapshot() {
+    let db = setup().await;
+    poll_fixture(&db.pool, 70).await;
+    poll_vote_fixture(&db.pool, 80, 70, 70, viewer(), 0, 1700000001000).await;
+    poll_vote_fixture(&db.pool, 81, 70, 70, author(), 0, 1700000001000).await;
+    poll_vote_fixture(&db.pool, 82, 70, 70, viewer(), 1, 1700000002000).await;
+    sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+        .bind(id(82))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(poll_json(&db, 70, viewer()).await["counts"], json!([2, 0]));
+    sqlx::query("DELETE FROM protocol_indexer.pending WHERE transaction_id=$1")
+        .bind(id(82))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE protocol_indexer.canonical SET revision=2 WHERE transaction_id=$1")
+        .bind(id(82))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(poll_json(&db, 70, viewer()).await["counts"], json!([2, 0]));
+    sqlx::query("UPDATE protocol_indexer.canonical SET revision=1 WHERE transaction_id=$1")
+        .bind(id(82))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mut posts = feed(&db).await;
+    let mut read = db.read_session().await.unwrap();
+    let dsn = std::env::var("SOCIAL_SHARED_WEB_TEST_DATABASE_URL").unwrap();
+    let mut writer = <sqlx::PgConnection as sqlx::Connection>::connect(&dsn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE protocol_indexer.canonical SET accepting_block=NULL WHERE transaction_id=$1",
+    )
+    .bind(id(82))
+    .execute(&mut writer)
+    .await
+    .unwrap();
+    db.enrich_tip_counts(&mut read, &mut posts, &hex::encode(viewer()))
+        .await
+        .unwrap();
+    assert_eq!(posts[0].poll.as_ref().unwrap().counts, vec![1, 1]);
+    drop(read);
+    assert_eq!(poll_json(&db, 70, viewer()).await["counts"], json!([2, 0]));
+    sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+        .bind(id(70))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(feed(&db).await.is_empty());
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_poll_tallies_alias_target_and_restricted_reader_grants() {
+    let db = setup().await;
+    poll_fixture(&db.pool, 70).await;
+    action(
+        &db.pool,
+        71,
+        "k_contents",
+        format!("k_contents:{}", hex::encode(sig(70))),
+        "signed",
+        1700000000000,
+    )
+    .await;
+    poll_vote_fixture(&db.pool, 80, 71, 70, viewer(), 1, 1700000001000).await;
+    assert_eq!(poll_json(&db, 70, viewer()).await["counts"], json!([0, 1]));
+    // A real NOLOGIN role in this explicitly guarded disposable cluster proves
+    // the actual invoker-view dependencies, instead of testing only as owner.
+    let role = format!("social_web_poll_reader_{}", std::process::id());
+    sqlx::raw_sql(&format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS; GRANT USAGE ON SCHEMA public,protocol_indexer,social_shared,social_shared_api,social_shared_legacy_api TO {role}; GRANT SELECT ON ALL TABLES IN SCHEMA social_shared_api,social_shared_legacy_api TO {role}; GRANT SELECT ON protocol_indexer.config,protocol_indexer.pending,public.k_vars,public.k_contents,public.k_votes,social_shared.config,social_shared.actions,social_shared.source_facts,social_shared.extensions,social_shared.retained_imports,social_shared.retained_wire_roots,social_shared.current_retained_wire_roots,social_shared.current_tips,social_shared.current_broadcasts,social_shared.ordinary_vote_targets,social_shared.current_vote_withdrawals TO {role};"))
+        .execute(&db.pool).await.unwrap();
+    let set_role = format!("SET ROLE {role}");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |conn, _| {
+            let command = set_role.clone();
+            Box::pin(async move {
+                sqlx::query(&command).execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect(&std::env::var("SOCIAL_SHARED_WEB_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let restricted = PostgresDbManager {
+        pool,
+        shared: db.shared.clone(),
+    };
+    assert!(
+        restricted
+            .get_all_posts(&hex::encode(viewer()), options(20))
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT ON social_shared.current_poll_votes TO {role}"
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let posts = feed(&restricted).await;
+    assert_eq!(posts[0].poll.as_ref().unwrap().counts, vec![0, 1]);
+    assert_eq!(posts[0].poll.as_ref().unwrap().my_vote, Some(1));
+    let writes: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.k_contents','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'social_shared.ordinary_vote_targets','INSERT,UPDATE,DELETE,TRUNCATE')")
+        .fetch_one(&restricted.pool).await.unwrap();
+    assert!(!writes);
+    restricted.pool.close().await;
+    sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn postgres_shared_reads_k_contract_filters_before_limits_across_existing_routes() {
     let db = setup().await;
@@ -590,15 +790,31 @@ async fn postgres_shared_reads_edits_bind_exact_latest_body_tuple_and_literal_ta
         &api.get_post_details(&hex::encode(id(1)), &hex::encode(viewer()))
             .await
             .unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(detail["post"]["editedAt"], json!(1100));
     let record = &feed(&db).await[0];
-    let blocked = crate::models::ServerPost::from_enriched_k_post_record_with_block_status(record, true);
-    assert!(serde_json::to_value(blocked).unwrap().get("editedAt").is_none());
-    let legacy = PostgresDbManager { pool: db.pool.clone(), shared: None };
+    let blocked =
+        crate::models::ServerPost::from_enriched_k_post_record_with_block_status(record, true);
+    assert!(
+        serde_json::to_value(blocked)
+            .unwrap()
+            .get("editedAt")
+            .is_none()
+    );
+    let legacy = PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: None,
+    };
     let record = &feed(&legacy).await[0];
-    let legacy_post = crate::models::ServerPost::from_enriched_k_post_record_with_block_status(record, false);
-    assert!(serde_json::to_value(legacy_post).unwrap().get("editedAt").is_none());
+    let legacy_post =
+        crate::models::ServerPost::from_enriched_k_post_record_with_block_status(record, false);
+    assert!(
+        serde_json::to_value(legacy_post)
+            .unwrap()
+            .get("editedAt")
+            .is_none()
+    );
     extension(&db.pool, 20, 1, "edit", 1100, "bmV3").await;
     assert!(
         feed(&db).await.is_empty(),
@@ -1139,7 +1355,9 @@ async fn postgres_shared_reads_protocol_is_actual_representative_root_on_same_sn
     .execute(&mut writer)
     .await
     .unwrap();
-    db.enrich_tip_counts(&mut read, &mut posts).await.unwrap();
+    db.enrich_tip_counts(&mut read, &mut posts, &hex::encode(viewer()))
+        .await
+        .unwrap();
     assert_eq!(root(&posts, 2).as_deref(), Some("kchat"));
     drop(read);
     assert_eq!(root(&feed(&db).await, 2).as_deref(), Some("k"));
@@ -1255,7 +1473,9 @@ async fn postgres_shared_reads_tip_counts_receipts_aliases_and_snapshot_follow_n
     .execute(&mut writer)
     .await
     .unwrap();
-    db.enrich_tip_counts(&mut read, &mut posts).await.unwrap();
+    db.enrich_tip_counts(&mut read, &mut posts, &hex::encode(viewer()))
+        .await
+        .unwrap();
     assert_eq!(
         posts
             .iter()
@@ -1348,32 +1568,36 @@ async fn postgres_shared_reads_tip_details_router_checks_receipt_source_and_quer
     assert_eq!(request(&app, uri).await.0, StatusCode::SERVICE_UNAVAILABLE);
 }
 
+async fn poll_fixture(pool: &PgPool, n: u8) {
+    post(pool, n, 1700000000000).await;
+    sqlx::query("UPDATE public.k_contents SET content_type='poll' WHERE transaction_id=$1")
+        .bind(id(n))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE social_shared.content_keys SET kind='poll' WHERE transaction_id=$1")
+        .bind(id(n))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:poll:fixture','UTF8'),'hex') WHERE transaction_id=$1")
+        .bind(id(n)).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO social_shared.extensions(transaction_id,revision,original_time,kind,sender,signature,message,mentions,options,closes_at,shape_valid) VALUES($1,1,1700000000000,'poll',$2,$3,'aGk=','[]','Tm9ydGg=,U291dGg=',1700003600000,true)")
+        .bind(id(n)).bind(author()).bind(sig(n)).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO public.k_polls VALUES($1,'Tm9ydGg=,U291dGg=',1700003600000,1700000000000)",
+    )
+    .bind(id(n))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn postgres_shared_reads_poll_metadata_is_visible_in_feed_detail_search_and_current_revision_only()
  {
     let db = setup().await;
-    post(&db.pool, 70, 1700000000000).await;
-    sqlx::query("UPDATE public.k_contents SET content_type='poll' WHERE transaction_id=$1")
-        .bind(id(70))
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE social_shared.content_keys SET kind='poll' WHERE transaction_id=$1")
-        .bind(id(70))
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to('kchat:1:poll:fixture','UTF8'),'hex') WHERE transaction_id=$1")
-        .bind(id(70)).execute(&db.pool).await.unwrap();
-    sqlx::query("INSERT INTO social_shared.extensions(transaction_id,revision,original_time,kind,sender,signature,message,mentions,options,closes_at,shape_valid) VALUES($1,1,1700000000000,'poll',$2,$3,'aGk=','[]','Tm9ydGg=,U291dGg=',1700003600000,true)")
-        .bind(id(70)).bind(author()).bind(sig(70)).execute(&db.pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO public.k_polls VALUES($1,'Tm9ydGg=,U291dGg=',1700003600000,1700000000000)",
-    )
-    .bind(id(70))
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    poll_fixture(&db.pool, 70).await;
     mention(&db.pool, 70, "poll", viewer(), true).await;
     sqlx::query("INSERT INTO public.k_hashtags(content_id,block_time,sender_pubkey,hashtag) VALUES($1,1700000000000,$2,'poll')")
         .bind(id(70)).bind(author()).execute(&db.pool).await.unwrap();
