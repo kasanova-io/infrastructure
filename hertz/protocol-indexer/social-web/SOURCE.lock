@@ -654,5 +654,48 @@
     "postgres_contracts_passed": 29,
     "independent_source_review": "no P1/P2; review_dev_handoff",
     "real_environment_acceptance": false
+  },
+  "poll_results_candidate": {
+    "source_manifest": "fe74458f4bd6425c5f1b0c8bb1dc8452bffe451c04e7c75f8df2c421b385c8bd",
+    "scope": "Current accepted native poll tallies, latest vote per voter, viewer choice and existing feed/detail enrichment; no signing or native transaction changes",
+    "files_sha256": {
+      "Dockerfile": "5d011170f606c09b0d338927b603c740f0c1e0fe3c16e5477ab7cff354d1d703",
+      "prepare_web.py": "260c33176a6c3b754037c3d5eb5a80e204553e09b2e3e414ddefde15c6aebdf7",
+      "shared-api.patch": "fcb4d605ee1896b99e560cb6398c694fff1a5d31620992d33ad43081f2eb9814",
+      "shared_rooms.rs": "e380a88f46ce39890867ddec1f15190da30491439df97727221fedad69cf47ef",
+      "shared_room_tests.rs": "cc9f09366663e2bbc67fecdc1feeff7ea23d7234422bc1655958630925a65c52",
+      "shared_reads.rs": "6ac6a03f046fe9f584533646af9f0a740aacfa180536826b123bbd02d3c04c9e",
+      "shared_read_tests.rs": "239977be15090ab51cf3283ef646926dfe881c32a10fc4918504c9d1893c4114",
+      "shared-read-api.patch": "2dff5310a44038777cebd3883cabc492c1803def9b749a21244b23db9d5b7b37",
+      "Cargo.lock": "0e62efc0e201eeacd8acc9cfc4df671a23c26a03e6254344723c8531a45959a7",
+      "tip_counts.rs": "ee99a74364414e24acdc6672e79e374f8be9c0949cdf127d6ae534f6137a300e",
+      "tip-counts.patch": "f5578664db2e7b60a39a5177a22040c54bdf503335d587720bf65ba7f99a98e0",
+      "protocol-metadata.patch": "4663785b70909eaa66e5dfc1c78237480d66f362335214495f41d11546d94f58",
+      "unified-feed.patch": "205f3d57c736352b7b70497ba9223ea860d668f5c5db2c74fe07df9fe3aedb77",
+      "edited-metadata.patch": "dc863f4e40c65dc8c984ba11d82a05814a9e1bcb55c09397b1835ac950bebe91",
+      "shared_room_schema.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
+      "shared_read_schema.sql": "fff728dcab845e4b82ebbddaf23321fbb770c6124105fdcf0783831872e8ec5a",
+      "shared_edit_authorization.sql": "d42afbeecd7c96f716b0b38cc77b4255dd6445694f069d23147f8b64eb1edd89",
+      "shared_unquote_order.sql": "e972503ba710a99a9114f0f6dc9c71c110b67139c1ae4484d1d7404a9afa7235",
+      "shared_social_schema.sql": "5990ca135aa61c66ce20c4aceaf4460be8e3e08f739db8d744dbad33e809c1f8",
+      "shared_kaposts_schema.sql": "9ac6ac4994076de10aefe74d8a30123ba1c3ff9af4a13f325d323ca68ab3a872",
+      "historical-author-keys.patch": "ef2eed4659c5a52c9674843f9123c57fb60a88dec3acbb31fe5d2a7716c1e020",
+      "exact-vote-details.patch": "7e80616ccdf6148f45e6a5fe8d9a9d800c22fc5d4a26ba1ada323764560e4c48",
+      "content-search.patch": "6eca1c9ec4584566c40404bc02009108d060e86e994d0311dbec33bcba96794d",
+      "poll-results.patch": "472edefc17f71274a511e6db506d95fb8415c7fd54e26f8ca83e2730761a5cb6"
+    },
+    "build_accepted": true,
+    "postgres_contracts_accepted": true,
+    "independent_source_review": "No P1/P2: review_dev_handoff; 24 inputs hash-bound; runtime acceptance pending",
+    "real_environment_acceptance": false,
+    "reader_grants_required": [
+      "social_shared.current_poll_votes",
+      "social_shared.ordinary_vote_targets",
+      "social_shared.current_vote_withdrawals"
+    ],
+    "native_unit_tests_passed": 9,
+    "postgres_contracts_passed": 32,
+    "runtime_image": "sha256:d81d13e48fb4f29334efbda2a25ed2652f293dc333b9c5b09f4edbdf2cbd8d7f",
+    "contract_image": "sha256:6d2818257719990c84e51f5a248126c053b6016a3986157c0a3078c19f53d38c"
   }
 }
