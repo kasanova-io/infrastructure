@@ -625,7 +625,7 @@
     "build_source_manifest": "cdfd06e81523b532d7baea801e16470e7e4d7ca3fed5c6e986e0c11421b6b9b2",
     "runtime_image": "sha256:644785b67f3be54b3e4c8f7218402e4c23f050f369ff38cae96f4fc37d0353b4",
     "contract_image": "sha256:2fdb7b91f3d8685bc7ce36fb7bd18019566657f02fd7a9671dc1ab68a1f0e494",
-    "source_reviewed": false,
+    "source_reviewed": true,
     "postgres_contracts_accepted": true,
     "runtime_accepted": false,
     "native_unit_tests_passed": 64,
