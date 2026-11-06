@@ -2023,3 +2023,389 @@ async fn postgres_shared_reads_quotes_keep_reference_protocol_separate_from_quot
     );
     db.pool.close().await;
 }
+
+// Signature duplicates keep one native/feed identity; exact public links remain
+// usable only while BOTH the literal proof and the representative are current.
+async fn content_alias_fixture(db: &PostgresDbManager) {
+    post(&db.pool, 1, 1000).await;
+    action(
+        &db.pool,
+        9,
+        "k_contents",
+        format!("k_contents:{}", hex::encode(sig(1))),
+        "signed",
+        2000,
+    )
+    .await;
+    let wire = format!(
+        "k:1:post:{}:{}:aGk=:[]",
+        hex::encode(author()),
+        hex::encode(sig(1))
+    );
+    sqlx::query("UPDATE social_shared.actions SET source_payload=encode(convert_to($3,'UTF8'),'hex'),snapshot=CASE WHEN transaction_id=$1 THEN jsonb_build_object('main',(SELECT to_jsonb(p) FROM public.k_contents p WHERE p.transaction_id=$1),'k_mentions','[]'::jsonb,'k_hashtags','[]'::jsonb) ELSE NULL END WHERE transaction_id=ANY($2)")
+        .bind(id(1)).bind(vec![id(1),id(9)]).bind(wire).execute(&db.pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_duplicate_link_uses_current_representative_without_feed_duplicate() {
+    let db = setup().await;
+    content_alias_fixture(&db).await;
+    assert_eq!(
+        db.resolve_content_alias(&hex::encode(id(9))).await.unwrap(),
+        Some(hex::encode(id(1)))
+    );
+    assert_eq!(
+        db.resolve_content_alias(&hex::encode(id(1))).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        db.resolve_content_alias(&hex::encode(id(99)))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(feed(&db).await.len(), 1);
+    let legacy = PostgresDbManager {
+        pool: db.pool.clone(),
+        shared: None,
+    };
+    assert_eq!(
+        legacy
+            .resolve_content_alias(&hex::encode(id(9)))
+            .await
+            .unwrap(),
+        None
+    );
+    let k_only = k_contract(&db);
+    assert_eq!(
+        k_only
+            .resolve_content_alias(&hex::encode(id(9)))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_duplicate_link_fences_literal_revision_reorg_and_signed_fields() {
+    let db = setup().await;
+    content_alias_fixture(&db).await;
+    let alias = hex::encode(id(9));
+    for (change, restore) in [
+        (
+            "UPDATE protocol_indexer.canonical SET accepting_block=NULL WHERE transaction_id=decode(repeat('09',32),'hex')",
+            "UPDATE protocol_indexer.canonical SET accepting_block=decode(repeat('ab',32),'hex') WHERE transaction_id=decode(repeat('09',32),'hex')",
+        ),
+        (
+            "INSERT INTO protocol_indexer.pending VALUES(decode(repeat('09',32),'hex'),true,NULL)",
+            "DELETE FROM protocol_indexer.pending",
+        ),
+        (
+            "UPDATE protocol_indexer.canonical SET revision=2 WHERE transaction_id=decode(repeat('09',32),'hex')",
+            "UPDATE protocol_indexer.canonical SET revision=1 WHERE transaction_id=decode(repeat('09',32),'hex')",
+        ),
+        (
+            "UPDATE social_shared.actions SET status='unsupported_or_invalid' WHERE transaction_id=decode(repeat('09',32),'hex')",
+            "UPDATE social_shared.actions SET status='verified' WHERE transaction_id=decode(repeat('09',32),'hex')",
+        ),
+        (
+            "UPDATE social_shared.actions SET provenance='retained_native' WHERE transaction_id=decode(repeat('09',32),'hex')",
+            "UPDATE social_shared.actions SET provenance='canonical' WHERE transaction_id=decode(repeat('09',32),'hex')",
+        ),
+    ] {
+        sqlx::raw_sql(change).execute(&db.pool).await.unwrap();
+        assert_eq!(
+            db.resolve_content_alias(&alias).await.unwrap(),
+            None,
+            "{change}"
+        );
+        sqlx::raw_sql(restore).execute(&db.pool).await.unwrap();
+        assert_eq!(
+            db.resolve_content_alias(&alias).await.unwrap(),
+            Some(hex::encode(id(1)))
+        );
+    }
+    for field in [
+        "author",
+        "signature",
+        "kind",
+        "reference",
+        "message",
+        "mentions",
+        "root",
+    ] {
+        // Changed immutable wire bytes must never be inferred from the same
+        // signature/subject or a representative snapshot.
+        sqlx::query("UPDATE social_shared.actions SET source_payload=source_payload||encode(convert_to($2,'UTF8'),'hex') WHERE transaction_id=$1")
+            .bind(id(9)).bind(field).execute(&db.pool).await.unwrap();
+        assert_eq!(
+            db.resolve_content_alias(&alias).await.unwrap(),
+            None,
+            "mismatched envelope {field}"
+        );
+        sqlx::query("UPDATE social_shared.actions SET source_payload=(SELECT source_payload FROM social_shared.actions WHERE transaction_id=$1) WHERE transaction_id=$2")
+            .bind(id(1)).bind(id(9)).execute(&db.pool).await.unwrap();
+    }
+    sqlx::query("UPDATE social_shared.actions SET source_payload=upper(source_payload) WHERE transaction_id=$1").bind(id(9)).execute(&db.pool).await.unwrap();
+    assert_eq!(
+        db.resolve_content_alias(&alias).await.unwrap(),
+        Some(hex::encode(id(1))),
+        "outer hex case preserves wire bytes"
+    );
+    sqlx::query("UPDATE social_shared.config SET source_id='different-source'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(db.resolve_content_alias(&alias).await.is_err());
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_duplicate_link_cannot_rescue_hidden_representative() {
+    let db = setup().await;
+    content_alias_fixture(&db).await;
+    let alias = hex::encode(id(9));
+    sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+        .bind(id(1))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.resolve_content_alias(&alias).await.unwrap(), None);
+    sqlx::query("DELETE FROM protocol_indexer.pending")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    extension(&db.pool, 3, 1, "delete", 3000, "").await;
+    assert_eq!(db.resolve_content_alias(&alias).await.unwrap(), None);
+    assert!(
+        db.get_content_by_id(&hex::encode(id(1)), &hex::encode(viewer()))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_duplicate_link_router_redirect_is_relative_private_and_source_bound()
+{
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let db = setup().await;
+    content_alias_fixture(&db).await;
+    let pool = db.pool.clone();
+    let server = crate::web_server::WebServer::new(
+        Arc::new(db),
+        crate::config::ServerConfig {
+            bind_address: "127.0.0.1:0".into(),
+            request_timeout: 10,
+            rate_limit: 200,
+        },
+    )
+    .await;
+    let app = server.create_router();
+    async fn request(app: &axum::Router, uri: String) -> axum::response::Response {
+        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        app.clone().oneshot(request).await.unwrap()
+    }
+    let q = format!(
+        "/get-post-details?id={}&requesterPubkey={}",
+        hex::encode(id(9)),
+        hex::encode(viewer())
+    );
+    let redirect = request(&app, q.clone()).await;
+    assert_eq!(redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        redirect.headers()["location"],
+        format!(
+            "?id={}&requesterPubkey={}",
+            hex::encode(id(1)),
+            hex::encode(viewer())
+        )
+    );
+    assert_eq!(redirect.headers()["cache-control"], "private, no-store");
+    let destination = format!(
+        "/get-post-details{}",
+        redirect.headers()["location"].to_str().unwrap()
+    );
+    assert_eq!(request(&app, destination).await.status(), StatusCode::OK);
+    sqlx::query("INSERT INTO protocol_indexer.pending VALUES($1,true,NULL)")
+        .bind(id(9))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, q.clone()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE social_shared.config SET source_id='different-source'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The ordinary details handler already maps its initial DB/source error
+    // to500. An alias must preserve that denial, rather than treating the
+    // failure as NOT_FOUND or issuing a redirect to an unbound representative.
+    let direct_failure = request(
+        &app,
+        format!(
+            "/get-post-details?id={}&requesterPubkey={}",
+            hex::encode(id(1)),
+            hex::encode(viewer())
+        ),
+    )
+    .await;
+    assert_eq!(direct_failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let alias_failure = request(&app, q).await;
+    assert_eq!(alias_failure.status(), direct_failure.status());
+    assert!(alias_failure.headers().get("location").is_none());
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_withdrawn_duplicate_quote_cannot_borrow_later_requote() {
+    let db = setup().await;
+    content_alias_fixture(&db).await;
+    post(&db.pool, 2, 500).await;
+    sqlx::query("UPDATE public.k_contents SET content_type='quote',referenced_content_id=$2,block_time=3000 WHERE transaction_id=$1")
+        .bind(id(1)).bind(id(2)).execute(&db.pool).await.unwrap();
+    sqlx::query("UPDATE social_shared.content_keys SET kind='quote',reference=$2,original_time=3000 WHERE transaction_id=$1")
+        .bind(id(1)).bind(id(2)).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO social_shared.content_keys VALUES($1,$2,$3,'quote',$4,1000)")
+        .bind(id(9))
+        .bind(sig(1))
+        .bind(author())
+        .bind(id(2))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE social_shared.actions SET original_time=CASE WHEN transaction_id=$1 THEN 3000 ELSE 1000 END,source_payload=(SELECT source_payload FROM social_shared.actions WHERE transaction_id=$1),snapshot=CASE WHEN transaction_id=$1 THEN jsonb_build_object('main',(SELECT to_jsonb(p) FROM public.k_contents p WHERE p.transaction_id=$1),'k_mentions','[]'::jsonb,'k_hashtags','[]'::jsonb) ELSE NULL END WHERE transaction_id=ANY($2)")
+        .bind(id(1)).bind(vec![id(1),id(9)]).execute(&db.pool).await.unwrap();
+    let alias = hex::encode(id(9));
+    assert_eq!(
+        db.resolve_content_alias(&alias).await.unwrap(),
+        Some(hex::encode(id(1)))
+    );
+    extension(&db.pool, 3, 2, "unquote", 2000, "").await;
+    assert!(
+        feed(&db)
+            .await
+            .iter()
+            .any(|p| p.transaction_id == hex::encode(id(1))),
+        "later re-quote remains visible"
+    );
+    assert_eq!(
+        db.resolve_content_alias(&alias).await.unwrap(),
+        None,
+        "earlier literal quote was withdrawn"
+    );
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_duplicate_poll_and_mentions_require_original_literal_metadata() {
+    let db = setup().await;
+    poll_fixture(&db.pool, 1).await;
+    action(
+        &db.pool,
+        9,
+        "k_contents",
+        format!("k_contents:{}", hex::encode(sig(1))),
+        "signed",
+        1700000000001,
+    )
+    .await;
+    sqlx::query("UPDATE social_shared.actions SET source_payload=(SELECT source_payload FROM social_shared.actions WHERE transaction_id=$1),snapshot=CASE WHEN transaction_id=$1 THEN jsonb_build_object('main',(SELECT to_jsonb(p) FROM public.k_contents p WHERE p.transaction_id=$1),'k_mentions','[]'::jsonb,'k_hashtags','[]'::jsonb) ELSE NULL END WHERE transaction_id=ANY($2)")
+        .bind(id(1)).bind(vec![id(1),id(9)]).execute(&db.pool).await.unwrap();
+    sqlx::query("INSERT INTO social_shared.extensions(transaction_id,revision,original_time,kind,sender,signature,message,mentions,options,closes_at,shape_valid) SELECT $2,revision,original_time,kind,sender,signature,message,mentions,options,closes_at,shape_valid FROM social_shared.extensions WHERE transaction_id=$1")
+        .bind(id(1)).bind(id(9)).execute(&db.pool).await.unwrap();
+    let alias = hex::encode(id(9));
+    assert_eq!(
+        db.resolve_content_alias(&alias).await.unwrap(),
+        Some(hex::encode(id(1)))
+    );
+    sqlx::query("UPDATE social_shared.extensions SET shape_valid=false WHERE transaction_id=$1")
+        .bind(id(9))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.resolve_content_alias(&alias).await.unwrap(), None);
+    sqlx::query("UPDATE social_shared.extensions SET shape_valid=true,options='ZGlmZmVyZW50' WHERE transaction_id=$1").bind(id(9)).execute(&db.pool).await.unwrap();
+    assert_eq!(db.resolve_content_alias(&alias).await.unwrap(), None);
+    sqlx::query("UPDATE social_shared.extensions SET options='Tm9ydGg=,U291dGg=',closes_at=closes_at+1 WHERE transaction_id=$1").bind(id(9)).execute(&db.pool).await.unwrap();
+    assert_eq!(db.resolve_content_alias(&alias).await.unwrap(), None);
+    sqlx::query(
+        "UPDATE social_shared.extensions SET closes_at=closes_at-1 WHERE transaction_id=$1",
+    )
+    .bind(id(9))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        db.resolve_content_alias(&alias).await.unwrap(),
+        Some(hex::encode(id(1)))
+    );
+    sqlx::query("UPDATE social_shared.actions SET source_payload=source_payload||'00' WHERE transaction_id=$1")
+        .bind(id(9)).execute(&db.pool).await.unwrap();
+    assert_eq!(
+        db.resolve_content_alias(&alias).await.unwrap(),
+        None,
+        "different original mentions/envelope cannot be folded"
+    );
+}
+
+#[tokio::test]
+async fn postgres_shared_reads_duplicate_link_requires_existing_reader_select_dependency_without_dml()
+ {
+    let db = setup().await;
+    content_alias_fixture(&db).await;
+    let role = format!("social_web_alias_reader_{}", std::process::id());
+    sqlx::raw_sql(&format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS; GRANT USAGE ON SCHEMA public,protocol_indexer,social_shared,social_shared_api,social_shared_legacy_api TO {role}; GRANT SELECT ON ALL TABLES IN SCHEMA social_shared_api,social_shared_legacy_api TO {role}; GRANT SELECT ON protocol_indexer.config,protocol_indexer.pending,public.k_vars,public.k_contents,public.k_votes,social_shared.config,social_shared.actions,social_shared.source_facts,social_shared.extensions,social_shared.retained_imports,social_shared.retained_wire_roots,social_shared.current_retained_wire_roots,social_shared.current_tips,social_shared.current_broadcasts,social_shared.ordinary_vote_targets,social_shared.current_vote_withdrawals,social_shared.current_poll_votes TO {role};"))
+        .execute(&db.pool).await.unwrap();
+    let set_role = format!("SET ROLE {role}");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |conn, _| {
+            let command = set_role.clone();
+            Box::pin(async move {
+                sqlx::query(&command).execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect(&std::env::var("SOCIAL_SHARED_WEB_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let restricted = PostgresDbManager {
+        pool,
+        shared: db.shared.clone(),
+    };
+    assert!(
+        restricted
+            .resolve_content_alias(&hex::encode(id(9)))
+            .await
+            .is_err(),
+        "SQL dependency errors cannot become a 404 or unbound fallback"
+    );
+    sqlx::raw_sql(&format!(
+        "GRANT SELECT ON social_shared.content_keys TO {role}"
+    ))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        restricted
+            .resolve_content_alias(&hex::encode(id(9)))
+            .await
+            .unwrap(),
+        Some(hex::encode(id(1)))
+    );
+    let writes:bool=sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.k_contents','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege(current_user,'social_shared.content_keys','INSERT,UPDATE,DELETE,TRUNCATE')").fetch_one(&restricted.pool).await.unwrap();
+    assert!(!writes);
+    restricted.pool.close().await;
+    sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
