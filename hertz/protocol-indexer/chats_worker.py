@@ -2,14 +2,18 @@
 """Run the private journal-to-Chats connector using existing history HTTP tools."""
 
 import argparse
+from contextlib import closing
+import gzip
 import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import time
 import urllib.error
 import urllib.parse
+import zlib
 
 from psycopg.types.json import Jsonb
 
@@ -26,6 +30,58 @@ spec.loader.exec_module(history)
 
 class Resolver(history.History):
     scope = "shared-chat-delivery-evidence-v1"
+
+    def __init__(self, root, source, archive, network, *, history_cache=None):
+        self.history_cache = Path(history_cache) if history_cache else None
+        if self.history_cache is not None:
+            # Check the optional source before opening or changing our own cache.
+            with closing(self.checked_history_db(self.history_cache, archive.rstrip('/'), network)):
+                pass
+        super().__init__(root, source, archive, network)
+
+    @staticmethod
+    def checked_history_db(folder, archive, network):
+        file = folder / 'inventory.sqlite'
+        if not folder.is_dir() or folder.is_symlink() or not file.is_file() or file.is_symlink():
+            raise ValueError('shared history cache must be an existing ordinary inventory')
+        db = sqlite3.connect(file.absolute().as_uri() + '?mode=ro', uri=True, timeout=10)
+        try:
+            row = db.execute('SELECT value FROM config WHERE id=1').fetchone()
+            if row is None:
+                raise ValueError('shared history cache profile missing')
+            profile = json.loads(row[0])
+            scope = db.execute('SELECT value FROM config WHERE id=3').fetchone()
+            if (not isinstance(profile, dict) or profile.get('archive') != archive or profile.get('network') != network
+                    or scope != ('six-protocol-archive-evidence-v1',)):
+                raise ValueError('shared history cache archive/network/scope mismatch')
+            return db
+        except BaseException:
+            db.close()
+            raise
+
+    def history_value(self, directory, key):
+        folder = getattr(self, 'history_cache', None)
+        if folder is None:
+            return None
+        if directory not in {'blocks', 'verified'} or not isinstance(key, str) or not HEX64.fullmatch(key):
+            raise ValueError('invalid shared history cache lookup')
+        # Recheck the profile and status on every miss; a changed inventory cannot
+        # become an alternative authority. Neither its rows nor files are changed.
+        with closing(self.checked_history_db(folder, self.archive, self.network)) as db:
+            if directory == 'verified' and db.execute(
+                    'SELECT status FROM records WHERE txid=?', (key,)).fetchone() != ('verified',):
+                return None
+        file = folder / directory / (key + '.json.gz')
+        if not file.is_file() or file.is_symlink() or file.parent.is_symlink():
+            return None
+        try:
+            with gzip.open(file, 'rb') as stream:
+                raw = stream.read(8 * 1024**2 + 1)
+            if len(raw) > 8 * 1024**2:
+                return None
+            return json.loads(raw)
+        except (FileNotFoundError, EOFError, gzip.BadGzipFile, zlib.error, ValueError, RecursionError):
+            return None
 
     def request(self, url):
         try:
@@ -74,6 +130,15 @@ class Resolver(history.History):
                 return checked_receipt(history.load(verified), txid, self.network, with_input=False)
             except (OSError, EOFError, ValueError, TypeError, KeyError, IndexError, AttributeError):
                 self.quarantine(verified, txid)
+        if use_cache:
+            value = self.history_value('verified', txid)
+            if value is not None:
+                try:
+                    if value.get('archive') != self.archive or value.get('notify_allowed') is not False:
+                        raise ValueError('shared history receipt source mismatch')
+                    return checked_receipt(value, txid, self.network, with_input=False)
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                    pass
         # Do not cache a lagging detail or incomplete containing block. Only a
         # fully checked immutable transaction receipt is reusable on retries.
         self.guard_capacity()
@@ -110,6 +175,12 @@ class Resolver(history.History):
                 return checked(history.load(saved))
             except (OSError, EOFError, ValueError, TypeError, KeyError, AttributeError):
                 self.quarantine(saved, block)
+        shared = self.history_value('blocks', block)
+        if shared is not None:
+            try:
+                return checked(shared)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                pass
         self.guard_capacity()
         try:
             value = checked(self.request(self.archive + "/blocks/" + block + "?includeTransactions=false"))
@@ -234,6 +305,8 @@ def main():
     parser.add_argument("--network", required=True)
     parser.add_argument("--archive", required=True)
     parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument("--history-cache", type=Path,
+                        default=os.environ.get('PROTOCOL_HISTORY_CACHE_DIRECTORY') or None)
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--metrics-url", default=os.environ.get("SIMPLY_METRICS_URL", "http://indexer:8501/api/metrics"))
     parser.add_argument("--source-binding", default=os.environ.get("PROTOCOL_SOURCE_BINDING_FILE", "/run/protocol-indexer/source-binding.json"))
@@ -246,7 +319,8 @@ def main():
     if not dsn:
         parser.error("PROTOCOL_DATABASE_URL required")
     os.umask(0o077)
-    resolver = Resolver(args.cache, args.archive.rstrip("/"), args.archive.rstrip("/"), args.network)
+    resolver = Resolver(args.cache, args.archive.rstrip("/"), args.archive.rstrip("/"), args.network,
+                        history_cache=args.history_cache)
     transport = NativeTransport(args.endpoint, secret)
     running = True
 
