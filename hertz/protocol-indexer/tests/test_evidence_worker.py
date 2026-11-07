@@ -87,7 +87,7 @@ class BoundedRefreshTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             resolver=import_archive.ImportResolver(root,'https://archive','https://archive','testnet-10')
             try:
-                (Path(root)/'source-rate.txt').write_text(str(time.time()+60))
+                (Path(root)/'archive-rate.txt').write_text(str(time.time()+60))
                 resolver.network_info={'networkName':'kaspa-testnet-10'}
                 with patch.object(import_archive.worker.history._chats.urllib.request,'urlopen',side_effect=AssertionError('cooldown must defer')):
                     with self.assertRaises(EvidencePending):resolver.refresh_network()

@@ -2,6 +2,7 @@
 """Resumable public Social discovery and archive verification; never writes a service."""
 import argparse
 import collections
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import fcntl
 import hashlib
@@ -30,6 +31,10 @@ SIGNER_KEY = re.compile(r"^(?:0[23])?[0-9a-f]{64}$", re.IGNORECASE)
 KINDS = {"post", "quote", "reply", "broadcast"}
 
 
+class PacingProfileError(_chats.PacingError):
+    """A pacing configuration failure must leave candidates pending."""
+
+
 class CapacityPause(RuntimeError):
     """Pause without labelling valid history as invalid."""
 
@@ -51,10 +56,12 @@ class History:
     scope = "retained-content-and-current-profiles"
     kinds = KINDS
 
-    def __init__(self, root, source, archive, network):
+    def __init__(self, root, source, archive, network, *, shared_rate_root=None):
+        self.shared_rate_root = shared_rate_root
+        self.rate_root = self.checked_rate_root(shared_rate_root, archive.rstrip("/"), network) if shared_rate_root is not None else Path(root)
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        os.environ["CHATS_RATE_DIR"] = str(self.root)
+        os.environ["CHATS_RATE_DIR"] = str(self.rate_root)
         self.source, self.archive, self.network = (
             source.rstrip("/"),
             archive.rstrip("/"),
@@ -92,36 +99,52 @@ class History:
         for directory in ("pages", "archive", "blocks", "verified", "quarantine"):
             (self.root / directory).mkdir(exist_ok=True)
 
+    @staticmethod
+    def checked_rate_root(folder, archive, network, *, timeout=10):
+        try:
+            root = Path(folder)
+            file = root / "inventory.sqlite"
+            if not root.is_dir() or root.is_symlink() or not file.is_file() or file.is_symlink():
+                raise PacingProfileError("Shared rate directory requires an existing ordinary inventory")
+            with closing(sqlite3.connect(file.absolute().as_uri() + "?mode=ro", uri=True, timeout=timeout)) as db:
+                row = db.execute("SELECT value FROM config WHERE id=1").fetchone()
+                profile = json.loads(row[0]) if row else None
+            # Sharing pacing grants no trust in this inventory's receipts or filters.
+            if not isinstance(profile, dict) or profile.get("archive") != archive or profile.get("network") != network:
+                raise PacingProfileError("Shared rate directory archive/network mismatch")
+            return root
+        except (OSError, sqlite3.Error, ValueError, TypeError) as error:
+            raise PacingProfileError("Shared rate inventory unavailable or invalid") from error
+
     def request(self, url, *, data=None):
         if data is None:
             return self.request_with_headers(url)[0]
         return self.request_with_headers(url, data=data)[0]
 
     def request_with_headers(self, url, *, data=None):
-        # Share pacing across content/relationship collectors. The conservative
-        # archive default supplements Chats' 0.4s bucket and shared 429 cooldown.
-        source_request = url.startswith(self.source + "/")
+        # Use one bound bucket for cadence and Retry-After across callers;
+        # the existing helper also retains the endpoint's minimum interval.
+        archive_request = url.startswith(self.archive + "/")
+        source_request = url.startswith(self.source + "/") and not archive_request
         rate_root = getattr(self, "rate_root", self.root)
+        if getattr(self, "shared_rate_root", None) is not None:
+            self.checked_rate_root(rate_root, self.archive, self.network, timeout=0)
         interval_file = rate_root / "archive-interval.txt"
-        archive_interval = (
-            float(interval_file.read_text()) if interval_file.exists() else 0.6
-        )
-        if not 0.4 <= archive_interval <= 60:
-            raise ValueError("Archive pacing must be between 0.4 and 60 seconds")
+        try:
+            archive_interval = float(interval_file.read_text()) if interval_file.exists() else 0.6
+            if not 0.4 <= archive_interval <= 60:
+                raise ValueError('out of range')
+        except (OSError, ValueError) as error:
+            raise PacingProfileError("Archive pacing must be readable and between 0.4 and 60 seconds") from error
         interval = 1.0 if source_request else archive_interval
+        options = {**getattr(self, 'request_options', {}), 'rate_root': rate_root,
+                   'rate_bucket': 'source' if source_request else 'archive',
+                   'rate_interval': interval}
         max_wait = getattr(self, 'request_max_wait', None)
-        bucket = "source-rate.txt" if source_request else "archive-rate.txt"
-        with (rate_root / bucket).open("a+") as stream:
-            deadline = _chats.lock_rate_bucket(stream, max_wait)
-            stream.seek(0)
-            next_at = float(stream.read() or 0)
-            delay = max(0, next_at - time.time())
-            _chats.wait_rate_delay(delay, deadline)
-            stream.seek(0)
-            stream.truncate()
-            stream.write(str(time.time() + interval))
-            stream.flush()
-        options = getattr(self, 'request_options', {})
+        if max_wait is not None:
+            options['max_wait'] = min(max_wait, options['max_wait']) if options.get('max_wait') is not None else max_wait
+        if getattr(self, 'shared_rate_root', None) is not None:
+            options['rate_guard'] = lambda: self.checked_rate_root(rate_root, self.archive, self.network, timeout=0)
         if data is None:
             return _chats.request(url, **options)
         return _chats.request(url, data=data, **options)

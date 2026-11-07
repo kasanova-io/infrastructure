@@ -22,6 +22,10 @@ PREFIXES = (b"ciph_msg:", b"kchat:")
 LOCK = threading.Lock()
 
 
+class PacingError(RuntimeError):
+    """Operational pacing storage/configuration failure, never bad transaction evidence."""
+
+
 class RatePending(OSError):
     """Caller elected to defer instead of waiting through a shared cooldown."""
 
@@ -32,7 +36,7 @@ def lock_rate_bucket(stream, max_wait=None):
         fcntl.flock(stream, fcntl.LOCK_EX)
         return None
     if not math.isfinite(max_wait) or max_wait < 0:
-        raise ValueError('invalid rate wait budget')
+        raise PacingError('invalid rate wait budget')
     deadline = time.monotonic() + max_wait
     while True:
         try:
@@ -55,36 +59,75 @@ def wait_rate_delay(delay, deadline):
         raise RatePending('shared rate wait budget exhausted')
 
 
-def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False):
-    # Separate API buckets share a cross-process lock, so collection and
-    # confirmation lookups cannot each consume the full allowance.
-    if not all_hosts and not url.startswith("https://api.kaspa.org/"):
+def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False, rate_root=None,
+              rate_bucket=None, rate_interval=None, rate_guard=None):
+    # Keep legacy direct callers' endpoint policy. Shared callers choose one
+    # bound source/archive bucket for both cadence and server Retry-After.
+    if rate_bucket is None and not all_hosts and not url.startswith("https://api.kaspa.org/"):
         return
-    bucket = "addresses" if "/addresses/" in url else "details"
-    interval = 2.1 if bucket == "addresses" else 0.4
-    filename = Path(os.environ.get("CHATS_RATE_DIR", ".")) / ("rate-" + bucket + ".txt")
-    with filename.open("a+") as stream:
-        deadline = lock_rate_bucket(stream, max_wait)
-        stream.seek(0)
-        next_at = float(stream.read() or 0)
-        now = time.time()
-        if cooldown:
-            next_at = max(next_at, now + cooldown)
-        else:
-            delay = max(0, next_at - now)
-            wait_rate_delay(delay, deadline)
-            next_at = time.time() + interval
-        stream.seek(0); stream.truncate(); stream.write(str(next_at)); stream.flush()
+    if rate_bucket is not None and rate_bucket not in {"archive", "source"}:
+        raise PacingError('invalid shared rate bucket')
+    if rate_interval is not None and (isinstance(rate_interval, bool)
+            or not isinstance(rate_interval, (int, float)) or not math.isfinite(rate_interval)
+            or not 0.4 <= rate_interval <= 60):
+        raise PacingError('invalid shared rate interval')
+    if rate_guard is not None and not callable(rate_guard):
+        raise PacingError('invalid rate profile guard')
+    bucket = rate_bucket or ("addresses" if "/addresses/" in url else "details")
+    floor = 2.1 if "/addresses/" in url and bucket != "source" else 0.4
+    interval = max(floor, rate_interval if rate_interval is not None else floor)
+    filename = Path(rate_root if rate_root is not None else os.environ.get("CHATS_RATE_DIR", ".")) / (bucket + "-rate.txt" if rate_bucket is not None else "rate-" + bucket + ".txt")
+    first, deadline = True, None
+    while True:
+        if rate_guard is not None:
+            rate_guard()
+        remaining = max_wait if first or deadline is None else max(0, deadline - time.monotonic())
+        if not first and deadline is not None and remaining <= 0:
+            raise RatePending('shared rate wait budget exhausted')
+        with filename.open("a+") as stream:
+            acquired_deadline = lock_rate_bucket(stream, remaining)
+            deadline = acquired_deadline if first or deadline is None else min(deadline, acquired_deadline)
+            first = False
+            stream.seek(0)
+            try:
+                next_at = float(stream.read() or 0)
+                if not math.isfinite(next_at):raise ValueError('nonfinite rate counter')
+            except ValueError as error:
+                raise PacingError('invalid stored rate counter') from error
+            now = time.time()
+            delay = 0 if cooldown else max(0, next_at - now)
+            if cooldown:
+                # A sleeper never owns this lock: bounded 429 callers can record
+                # the provider's deadline without waiting behind its cooldown.
+                next_at = max(next_at, now + cooldown)
+            elif delay <= 0:
+                wait_rate_delay(0, deadline)
+                next_at = time.time() + interval
+            if cooldown or delay <= 0:
+                stream.seek(0); stream.truncate(); stream.write(str(next_at)); stream.flush()
+                return
+        wait_rate_delay(delay, deadline)
 
 
-def request(url, *, attempts=12, timeout=60, max_wait=None, rate_all_hosts=False, max_bytes=None, data=None):
+def request(url, *, attempts=12, timeout=60, max_wait=None, rate_all_hosts=False, max_bytes=None, data=None, rate_root=None, rate_bucket=None, rate_interval=None, rate_guard=None):
     if not 1 <= attempts <= 12 or not 0 < timeout <= 60:
         raise ValueError('invalid bounded request policy')
     if data is not None and (not isinstance(data, bytes) or len(data) > 65536):
         raise ValueError('invalid bounded JSON request body')
+    rate_options = {"max_wait": max_wait, "all_hosts": rate_all_hosts}
+    for key,value in [("rate_root",rate_root),("rate_bucket",rate_bucket),("rate_interval",rate_interval),("rate_guard",rate_guard)]:
+        if value is not None:rate_options[key]=value
+    def paced_slot(**extra):
+        try:
+            rate_slot(url, **rate_options, **extra)
+            if rate_guard is not None:rate_guard()
+        except RatePending:
+            raise
+        except OSError as error:
+            raise PacingError('rate storage unavailable') from error
     for attempt in range(attempts):
         try:
-            rate_slot(url, max_wait=max_wait, all_hosts=rate_all_hosts)
+            paced_slot()
             headers = {"User-Agent": "Kasanova-History-Migration/1"}
             if data is not None:
                 headers.update({"Content-Type": "application/json", "Cache-Control": "no-cache"})
@@ -97,12 +140,21 @@ def request(url, *, attempts=12, timeout=60, max_wait=None, rate_all_hosts=False
                     return json.loads(response_data), dict(response.headers)
                 return json.load(response), dict(response.headers)
         except urllib.error.HTTPError as error:
-            if error.code not in (429, 500, 502, 503, 504):
-                raise
-            delay = min(300, float(error.headers.get("Retry-After", max(60, 2 ** attempt) if error.code == 429 else 2 ** attempt)))
-            if error.code == 429:
-                rate_slot(url, cooldown=delay, max_wait=max_wait, all_hosts=rate_all_hosts)
-            error.close()
+            try:
+                if error.code not in (429, 500, 502, 503, 504):
+                    raise
+                try:
+                    delay = float(error.headers.get("Retry-After", max(60, 2 ** attempt) if error.code == 429 else 2 ** attempt))
+                    if not math.isfinite(delay):raise ValueError('nonfinite Retry-After')
+                    delay = max(0, min(300, delay))
+                except (ValueError, TypeError) as invalid:
+                    raise PacingError('invalid server retry policy') from invalid
+                if error.code == 429:
+                    try:paced_slot(cooldown=delay)
+                    except RatePending as pending:
+                        raise PacingError('unable to persist server cooldown within budget') from pending
+            finally:
+                error.close()
         except (TimeoutError, OSError):
             delay = min(30, 2 ** attempt)
         if attempt == attempts - 1:

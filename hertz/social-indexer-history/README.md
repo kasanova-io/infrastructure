@@ -31,10 +31,20 @@ checkpointed collector when reply-count reconciliation finds a gap.
 
 The implementation imports the existing Kasia history migration's atomic gzip
 writer, archive rate buckets, Retry-After handling and retries. Social discovery
-uses one request/second; archive detail requests share a conservative 0.6-second
-bucket, supplementing Chats’ own 0.4-second floor and shared 429 cooldown. A task
-operator can atomically set `archive-interval.txt` in the content inventory to a
-value from 0.4 to 60 seconds; use a longer interval when provider cooldowns appear.
+uses one request/second; configured archive requests share a conservative
+0.6-second bucket, including Retry-After and the existing2.1-second address
+minimum. An operator can atomically set `archive-interval.txt` in the selected
+pacing inventory to0.4..60seconds. The protocol wrapper CLIs
+(`archive_backfill.py`, `chats_worker.py`, `evidence_worker.py` and
+`import_archive.py`) accept `--shared-rate-root`/`PROTOCOL_SHARED_RATE_DIRECTORY`
+for callers with separate receipt caches. The existing inventory must match
+archive and network; the standalone legacy `history.py` CLI keeps its existing
+arguments. Rate slots and cooldowns use that same locked helper
+and explicit per-request directory. Waiters release the file lock before sleep,
+then recheck; configuration/storage failures remain operational pauses. Before
+upgrading existing callers, carry forward the maximum outstanding old pacing
+counter under an owned handoff, including legacy details buckets, and upgrade all
+active callers rather than mixing old long-held locks with the new helper.
 `verify --workers 4` overlaps archive latency while retaining the same shared
 request rate and 429 cooldown. Only the coordinator writes the SQLite ledger;
 worker results and source evidence remain atomic and resumable.
