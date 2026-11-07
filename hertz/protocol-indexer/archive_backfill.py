@@ -6,6 +6,7 @@ No canonical-journal import, service mutation, notification or transaction broad
 
 import argparse
 import fcntl
+import gzip
 import importlib.util
 import json
 import os
@@ -28,6 +29,79 @@ class ArchiveHistory(history.History):
     action_discovery = False
     address_route = "/archive-address-history-v1"
     engagement_routes = ("/get-post-engagement", "/get-post-tippers")
+    blue_route = "/archive-blue-score-history-v1"
+    range_discovery = False
+    blue_fields = "transaction_id,payload,is_accepted,accepting_block_blue_score"
+
+    @staticmethod
+    def blue_bounds(start, stop, step):
+        # The documented archive search bounds one request to 100 blue scores.
+        # Its zero lower bound is not a range lookup, so never accept it as an empty page.
+        if (any(type(v) is not int for v in (start, stop, step))
+                or not 0 < start < stop <= 2**63 - 1 or not 1 <= step <= 100):
+            raise ValueError("Archive discovery requires positive increasing blue scores and step1..100")
+
+    def queue_blue_range(self, start, stop, step=100):
+        self.blue_bounds(start, stop, step)
+        params = {"start": start, "stop": stop, "step": step}
+        self.add_job(self.blue_route, params, "transactions")
+        return history.digest([self.blue_route, params])
+
+    def blue_page(self, jid, params, cursor, pages):
+        start, stop, step = (params[k] for k in ("start", "stop", "step"))
+        self.blue_bounds(start, stop, step)
+        if cursor is not None and (not isinstance(cursor, str) or not cursor.isascii() or not cursor.isdigit()):
+            raise ValueError("Invalid archive blue-score cursor")
+        low = start if cursor is None else int(cursor)
+        if not start <= low < stop or (low - start) % step or pages != (low - start) // step:
+            raise ValueError("Archive blue-score cursor/page mismatch")
+        high = min(low + step, stop)
+        binding = {"scope": "six-family-blue-range-v1", "network": self.network,
+                   "archive": self.archive, "gte": low, "lt": high, "fields": self.blue_fields}
+        path = self.root / "pages" / (jid + "-" + str(pages) + ".json.gz")
+        url = self.archive + "/transactions/search?fields=" + self.blue_fields
+        cached = path.exists()
+        if cached:
+            with gzip.open(path, "rb") as stream:
+                raw = stream.read(16 * 1024**2 + 1)
+            if len(raw) > 16 * 1024**2:
+                raise ValueError("Archive range cache exceeds configured bound")
+            saved = json.loads(raw)
+            if not isinstance(saved, dict) or saved.get("binding") != binding:
+                raise ValueError("Archive range cache binding mismatch")
+            rows = saved.get("rows")
+        else:
+            self.guard_capacity()
+            prior = getattr(self, "request_options", None)
+            prior_limit = (prior or {}).get("max_bytes")
+            self.request_options = {**(prior or {}), "max_bytes": min(prior_limit, 8 * 1024**2) if prior_limit is not None else 8 * 1024**2}
+            try:
+                rows = self.request(url, data=json.dumps({"acceptingBlueScores": {"gte": low, "lt": high}}).encode())
+            finally:
+                if prior is None:
+                    del self.request_options
+                else:
+                    self.request_options = prior
+        if not isinstance(rows, list):
+            raise ValueError("Invalid archive range response")
+        seen, checked, candidates = set(), [], []
+        for row in rows:
+            if not isinstance(row, dict) or not set(self.blue_fields.split(",")) <= row.keys():
+                raise ValueError("Incomplete archive range transaction")
+            txid, score, payload = row["transaction_id"], row["accepting_block_blue_score"], row["payload"]
+            if (not isinstance(txid, str) or not HEX64.fullmatch(txid) or txid in seen
+                    or row["is_accepted"] is not True or type(score) is not int or not low <= score < high
+                    or (payload is not None and not isinstance(payload, str))):
+                raise ValueError("Archive range identity/acceptance mismatch")
+            raw = bytes.fromhex(payload or "")
+            seen.add(txid)
+            checked.append({k: row[k] for k in self.blue_fields.split(",")})
+            if classify(raw) is not None:
+                candidates.append({"id": txid})
+        if not cached:
+            history.atomic_json(path, {"binding": binding, "rows": checked})
+        return {"transactions": candidates,
+                "pagination": {"hasMore": high < stop, "nextCursor": str(high) if high < stop else None}}, url
 
     def queue_address(self, address):
         prefix = "kaspa:" if self.network == "mainnet" else "kaspatest:"
@@ -67,10 +141,14 @@ class ArchiveHistory(history.History):
         return "pages,id" if self.action_discovery else super().job_order()
 
     def empty_page_advances(self, route):
-        return route == self.address_route
+        return route in (self.address_route, self.blue_route)
 
     def validate_cursor(self, route, cursor, next_cursor):
-        if route == self.address_route:
+        if route == self.blue_route:
+            if (not next_cursor.isascii() or not next_cursor.isdigit() or int(next_cursor) <= 0
+                    or (cursor and int(next_cursor) <= int(cursor))):
+                raise ValueError("Archive blue-score cursor failed to advance")
+        elif route == self.address_route:
             if not next_cursor.isascii() or not next_cursor.isdigit() or int(next_cursor) <= 0 or (cursor and int(next_cursor) >= int(cursor)):
                 raise ValueError("Archive address cursor failed to advance")
         elif route not in self.engagement_routes:
@@ -79,6 +157,8 @@ class ArchiveHistory(history.History):
         # rejects repeated cursors (including A -> B -> A across restarts).
 
     def discovery_page(self, jid, route, params, cursor, pages):
+        if route == self.blue_route:
+            return self.blue_page(jid, params, cursor, pages)
         if route == self.address_route:
             self.guard_capacity()
             result = history._chats.collect_explorer(
@@ -108,6 +188,8 @@ class ArchiveHistory(history.History):
         return page, url
 
     def seed(self):
+        if self.range_discovery:
+            return
         super().seed()
         # Existing completed inventories predate action discovery. Add jobs for
         # their observed authors without resetting any content page/cursor.
@@ -134,7 +216,7 @@ class ArchiveHistory(history.History):
         )
 
     def queue_related(self, row, route):
-        if route == self.address_route:
+        if route in (self.address_route, self.blue_route):
             return
         if route in self.engagement_routes:
             self.queue_actions(row.get("userPublicKey"))
@@ -202,13 +284,16 @@ class ArchiveHistory(history.History):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("discover", "discover-actions", "verify", "status", "export"))
+    parser.add_argument("mode", choices=("discover", "discover-actions", "discover-range", "verify", "status", "export"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--source", required=True, help="existing public Social discovery API")
     parser.add_argument("--archive", required=True)
     parser.add_argument("--network", required=True)
     parser.add_argument("--txid", action="append", default=[], help="candidate ID from existing Chats/Social inventories; repeatable")
     parser.add_argument("--address", action="append", default=[], help="public participant address for action-history discovery; repeatable")
+    parser.add_argument("--blue-from", type=int, help="inclusive accepting blue score for archive range discovery")
+    parser.add_argument("--blue-to", type=int, help="exclusive accepting blue score for archive range discovery")
+    parser.add_argument("--blue-step", type=int, help="archive range page width1..100 (default100)")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=1)
     parser.add_argument("--retry-quarantine", action="store_true")
@@ -216,17 +301,29 @@ def main():
     args = parser.parse_args()
     if args.address and args.mode != "discover-actions":
         parser.error("--address requires discover-actions")
+    if args.mode == "discover-range":
+        try:
+            ArchiveHistory.blue_bounds(args.blue_from, args.blue_to, args.blue_step if args.blue_step is not None else 100)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif any(v is not None for v in (args.blue_from, args.blue_to, args.blue_step)):
+        parser.error("--blue-from/--blue-to/--blue-step require discover-range")
     if args.limit < 0 or len(args.txid) > 4096 or any(not HEX64.fullmatch(t) for t in args.txid):
         parser.error("nonnegative limit and at most4096 full transaction IDs required")
     os.umask(0o077)
     h = ArchiveHistory(args.directory, args.source, args.archive, args.network)
     try:
-        lock_mode = "discover" if args.mode == "discover-actions" else args.mode
+        lock_mode = "discover" if args.mode in ("discover-actions", "discover-range") else args.mode
         with (h.root / (lock_mode + ".lock")).open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if args.mode in ("discover", "discover-actions", "verify"):
+            if args.mode in ("discover", "discover-actions", "discover-range", "verify"):
                 h.bind_network()
-            if args.mode == "discover-actions":
+            if args.mode == "discover-range":
+                h.range_discovery = True
+                with h.db:
+                    jid = h.queue_blue_range(args.blue_from, args.blue_to, args.blue_step if args.blue_step is not None else 100)
+                h.discover(args.limit, job_ids=[jid])
+            elif args.mode == "discover-actions":
                 h.action_discovery = True
                 with h.db:
                     for address in args.address:

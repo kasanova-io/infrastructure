@@ -160,9 +160,14 @@ class History:
         self.add_job("/get-users", {"requesterPubkey": ANON}, "posts")
         self.db.commit()
 
-    def discover(self, budget, parents=None):
+    def discover(self, budget, parents=None, *, job_ids=None):
+        if job_ids is not None and (
+            parents or not isinstance(job_ids, (list, tuple)) or not 1 <= len(job_ids) <= 4096
+            or any(not isinstance(jid, str) or not HEX64.fullmatch(jid) for jid in job_ids)
+        ):
+            raise ValueError("Explicit discovery jobs require bounded full IDs and no parent filter")
         self.seed()
-        selected_jobs = []
+        selected_jobs = list(job_ids or [])
         for parent in parents or []:
             if not HEX64.fullmatch(parent):
                 raise ValueError("Invalid parent transaction ID")
