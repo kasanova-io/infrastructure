@@ -9,6 +9,7 @@ services:
     restart: unless-stopped
     environment:
       PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
+      PROTOCOL_HISTORY_CACHE_DIRECTORY: ${PROTOCOL_HISTORY_CACHE_DIRECTORY:-}
     command: [--network, '${PROTOCOL_NETWORK:?required}', --archive, '${PROTOCOL_ARCHIVE_URL:?configured HTTPS archive required}', --cache, /evidence]
     volumes:
       - chats_evidence:/evidence
