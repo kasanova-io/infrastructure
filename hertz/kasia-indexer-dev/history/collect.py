@@ -77,19 +77,24 @@ def rate_slot(url, cooldown=0, max_wait=None, all_hosts=False):
         stream.seek(0); stream.truncate(); stream.write(str(next_at)); stream.flush()
 
 
-def request(url, *, attempts=12, timeout=60, max_wait=None, rate_all_hosts=False, max_bytes=None):
+def request(url, *, attempts=12, timeout=60, max_wait=None, rate_all_hosts=False, max_bytes=None, data=None):
     if not 1 <= attempts <= 12 or not 0 < timeout <= 60:
         raise ValueError('invalid bounded request policy')
+    if data is not None and (not isinstance(data, bytes) or len(data) > 65536):
+        raise ValueError('invalid bounded JSON request body')
     for attempt in range(attempts):
         try:
             rate_slot(url, max_wait=max_wait, all_hosts=rate_all_hosts)
-            req = urllib.request.Request(url, headers={"User-Agent": "Kasanova-History-Migration/1"})
+            headers = {"User-Agent": "Kasanova-History-Migration/1"}
+            if data is not None:
+                headers.update({"Content-Type": "application/json", "Cache-Control": "no-cache"})
+            req = urllib.request.Request(url, headers=headers, data=data)
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 if max_bytes is not None:
-                    data = response.read(max_bytes + 1)
-                    if len(data) > max_bytes:
+                    response_data = response.read(max_bytes + 1)
+                    if len(response_data) > max_bytes:
                         raise ValueError('archive response exceeds configured bound')
-                    return json.loads(data), dict(response.headers)
+                    return json.loads(response_data), dict(response.headers)
                 return json.load(response), dict(response.headers)
         except urllib.error.HTTPError as error:
             if error.code not in (429, 500, 502, 503, 504):
