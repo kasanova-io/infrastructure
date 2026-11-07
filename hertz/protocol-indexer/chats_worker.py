@@ -83,9 +83,11 @@ class Resolver(history.History):
         except (FileNotFoundError, EOFError, gzip.BadGzipFile, zlib.error, ValueError, RecursionError):
             return None
 
-    def request(self, url):
+    def request(self, url, *, data=None):
         try:
-            return super().request(url)
+            if data is None:
+                return super().request(url)
+            return super().request(url, data=data)
         except RuntimeError as exc:
             # Existing HTTP helper's terminal transient failure is per job.
             # Keep capacity, storage and unrelated programmer failures visible.

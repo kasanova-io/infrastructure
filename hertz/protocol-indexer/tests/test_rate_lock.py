@@ -18,6 +18,31 @@ spec.loader.exec_module(history)
 collect = history._chats
 
 
+class RequestRetryTests(unittest.TestCase):
+    def check_retry(self, body):
+        class Response:
+            headers = {}
+            def __init__(self, fail_close): self.fail_close = fail_close
+            def __enter__(self): return self
+            def read(self, size): return b'[]'
+            def __exit__(self, *_):
+                if self.fail_close: raise OSError('retryable close failure')
+        with patch.object(collect, 'rate_slot'), patch.object(collect.time, 'sleep'), \
+             patch.object(collect.urllib.request, 'urlopen', side_effect=[Response(True), Response(False)]) as opening:
+            self.assertEqual(collect.request('https://archive/transactions/search', attempts=2,
+                                            max_bytes=1024, data=body), ([], {}))
+        requests = [call.args[0] for call in opening.call_args_list]
+        self.assertEqual([request.get_method() for request in requests],
+                         ['GET' if body is None else 'POST'] * 2)
+        self.assertEqual([request.data for request in requests], [body, body])
+
+    def test_get_retry_preserves_method_and_absent_body(self):
+        self.check_retry(None)
+
+    def test_post_retry_preserves_original_search_body(self):
+        self.check_retry(b'{"transactionIds":["' + b'ab' * 32 + b'"]}')
+
+
 class RateLockTests(unittest.TestCase):
     def setUp(self):
         root = self.enterContext(tempfile.TemporaryDirectory())
