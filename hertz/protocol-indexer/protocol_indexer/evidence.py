@@ -3,6 +3,7 @@
 from .chats import EvidencePending
 from .archive import HEX64
 from .routing import route
+from .jobs import claim_ready
 from psycopg.pq import TransactionStatus
 
 CONSUMER = 'output-evidence-v1'
@@ -52,9 +53,7 @@ class EvidenceConsumer:
             config = conn.execute('SELECT network,journal_id::text AS source_id FROM protocol_indexer.config').fetchone()
             if not config or config['network'] != self.network or config['source_id'] != self.source_id:
                 raise ValueError('output evidence journal network/identity mismatch')
-            job = conn.execute('''SELECT * FROM protocol_indexer.consumer_jobs
-                WHERE consumer=%s AND available_at<=clock_timestamp()
-                ORDER BY available_at,transaction_id LIMIT 1 FOR UPDATE SKIP LOCKED''', (CONSUMER,)).fetchone()
+            job = claim_ready(conn, CONSUMER)
             if job is None:
                 return None
             row = conn.execute('SELECT * FROM protocol_indexer.canonical WHERE transaction_id=%s',
