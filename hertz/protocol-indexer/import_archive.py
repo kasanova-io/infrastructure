@@ -118,6 +118,8 @@ def main():
     parser.add_argument('--network', required=True)
     parser.add_argument('--archive', required=True)
     parser.add_argument('--cache', type=Path, required=True)
+    parser.add_argument('--shared-rate-root', type=Path,
+                        default=os.environ.get('PROTOCOL_SHARED_RATE_DIRECTORY') or None)
     parser.add_argument('--batch', type=Path, required=True)
     parser.add_argument('--limit', type=int, default=500)
     parser.add_argument('--after-line', type=int, default=0, help='resume at next_after_line from the previous result')
@@ -135,7 +137,8 @@ def main():
     # No HTTP or historical source writes occur before the opt-in capability gate.
     with connect(os.environ['PROTOCOL_DATABASE_URL']) as conn:
         check_source(conn, args.metrics_url, args.network, args.source_binding, require_archive_import=True)
-        resolver = ImportResolver(args.cache, args.archive, args.archive, args.network)
+        resolver = ImportResolver(args.cache, args.archive, args.archive, args.network,
+                                  shared_rate_root=args.shared_rate_root)
         try:
             with (resolver.root / 'archive-import.lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

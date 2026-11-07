@@ -406,6 +406,41 @@ or upgrade that discovery owner before adding range jobs there. Exported IDs
 and receipts still use the existing verification/import pipeline; no parallel
 live indexer or alternate admission store is created.
 
+When historical verification and live proof consumers use separate caches, give
+all callers for that network and archive the same existing writable pacing
+inventory with `--shared-rate-root` or `PROTOCOL_SHARED_RATE_DIRECTORY`. The Chats,
+output-evidence and archive-import CLIs accept the same option. Its SQLite
+profile is opened read-only and must match the configured archive and network;
+Social discovery sources may differ. Missing, symlinked or rebound inventories
+fail closed. Only pacing files are written there; receipt caches and admission
+remain separate. This does not make a read-only history-cache mount writable:
+choose a separate writable pacing root when needed.
+
+Archive requests honor that directory's `archive-interval.txt`, including callers
+whose source and archive URL are the same. Configured DEV archives use the same
+Retry-After policy as Mainnet. Each request passes its own directory to the
+existing locked helper, so another resolver cannot redirect its cooldown through
+process-global environment state. A 429 shared by the history scanner therefore
+also defers live archive lookups. Current-acceptance callbacks keep their existing
+wait and wall-deadline limits; this option grants no signature, payment, source
+or notification authority. Pacing configuration/storage errors are operational
+pauses; they never quarantine a transaction. Profile bindings are rechecked on
+each retry and after waiting, outside the pacing file's short critical section.
+Waiters release that lock before sleeping, so another caller can persist a429
+without waiting through the provider's cooldown. HTTP errors are closed even
+when saving a cooldown fails.
+
+The unified archive bucket replaces the old separate archive/details cadence.
+Before starting upgraded callers, deliberately quiesce the owning actors and
+carry the maximum outstanding timestamp from every old archive/details bucket
+into the selected shared archive-rate.txt; never shorten a provider cooldown.
+This migration applies to default own-cache callers too. Upgrade all active
+archive callers together; an older sleeper still holding its lock cannot satisfy
+the new bounded-writer contract. Preserve the original counters and evidence.
+Do not roll a new image under a running owner's
+protected actor identities; use a reviewed handoff preserving cached evidence,
+SQLite progress, source binding and activation epochs.
+
 Alternate `discover-actions` and `verify` passes until the known address frontier
 and pending proof queue drain: newly verified transactions can reveal additional
 participants. A drained known-address inventory still does not prove exhaustive

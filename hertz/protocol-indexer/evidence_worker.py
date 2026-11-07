@@ -25,6 +25,8 @@ def main():
     parser.add_argument('--cache', type=Path, required=True)
     parser.add_argument('--history-cache', type=Path,
                         default=os.environ.get('PROTOCOL_HISTORY_CACHE_DIRECTORY') or None)
+    parser.add_argument('--shared-rate-root', type=Path,
+                        default=os.environ.get('PROTOCOL_SHARED_RATE_DIRECTORY') or None)
     parser.add_argument('--metrics-url', default=os.environ.get('SIMPLY_METRICS_URL', 'http://indexer:8501/api/metrics'))
     parser.add_argument('--source-binding', default=os.environ.get('PROTOCOL_SOURCE_BINDING_FILE', '/run/protocol-indexer/source-binding.json'))
     parser.add_argument('--once', action='store_true')
@@ -53,7 +55,7 @@ def main():
                 raise ValueError('output evidence journal network mismatch')
             source_id = config['id']
         resolver = ImportResolver(args.cache, args.archive.rstrip('/'), args.archive.rstrip('/'), args.network,
-                                  history_cache=args.history_cache)
+                                  history_cache=args.history_cache, shared_rate_root=args.shared_rate_root)
         # Same bound cache and rate buckets as Chats/history; distinct phase
         # lock permits both consumers while preventing duplicate proof workers.
         with (args.cache / 'output-evidence.lock').open('a') as lock:
