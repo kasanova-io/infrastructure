@@ -110,8 +110,16 @@ class RateLockTests(unittest.TestCase):
         h = history.History(self.root, 'https://source', 'https://archive', 'testnet-10')
         self.addCleanup(h.db.close)
         h.request_max_wait = 0.5
-        with self.held('source-rate.txt'), patch.object(collect, 'request', return_value=({'ok': True}, {})):
+        class Response:
+            headers = {}
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+            def read(self,*_):return b'{"ok":true}'
+        with self.held('source-rate.txt'), patch.object(collect.urllib.request,'urlopen',return_value=Response()) as opening:
+            started=time.monotonic()
             self.assertEqual(h.request('https://source/transactions/test'), {'ok': True})
+            self.assertGreaterEqual(time.monotonic()-started,0.05)
+            self.assertEqual(opening.call_count,1)
 
     def test_zero_budget_and_future_cooldown_never_make_an_http_request(self):
         (self.root / 'rate-details.txt').write_text(str(time.time() + 60))
@@ -120,7 +128,7 @@ class RateLockTests(unittest.TestCase):
 
     def test_invalid_budget_cannot_create_an_unbounded_wait(self):
         for invalid in (-1, float('inf'), float('nan')):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+            with self.subTest(invalid=invalid), self.assertRaises(collect.PacingError):
                 collect.rate_slot('https://api.kaspa.org/transactions/test', max_wait=invalid)
 
     def test_pacing_oversleep_never_updates_bucket_or_makes_http_request(self):
@@ -136,13 +144,13 @@ class RateLockTests(unittest.TestCase):
 
     def test_history_pacing_oversleep_never_updates_bucket_or_calls_downstream(self):
         h = history.History(self.root, 'https://source', 'https://archive', 'testnet-10')
-        self.addCleanup(h.db.close); h.request_max_wait = 0.5
+        self.addCleanup(h.db.close); h.request_max_wait = 0.5; h.request_options={'attempts':1}
         path = self.root / 'source-rate.txt'; path.write_text('0')
         clock = [0]
         with patch.object(collect.time, 'monotonic', side_effect=lambda: clock[0]), \
              patch.object(collect.time, 'sleep', side_effect=lambda _: clock.__setitem__(0, 1)), \
-             patch.object(collect, 'request') as request:
-            with self.assertRaisesRegex(collect.RatePending, 'budget exhausted'):
+             patch.object(collect.urllib.request, 'urlopen') as request:
+            with self.assertRaisesRegex(RuntimeError, 'retries exhausted'):
                 h.request('https://source/transactions/test')
         request.assert_not_called()
         self.assertEqual(path.read_text(), '0')

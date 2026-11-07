@@ -31,13 +31,13 @@ spec.loader.exec_module(history)
 class Resolver(history.History):
     scope = "shared-chat-delivery-evidence-v1"
 
-    def __init__(self, root, source, archive, network, *, history_cache=None):
+    def __init__(self, root, source, archive, network, *, history_cache=None, shared_rate_root=None):
         self.history_cache = Path(history_cache) if history_cache else None
         if self.history_cache is not None:
             # Check the optional source before opening or changing our own cache.
             with closing(self.checked_history_db(self.history_cache, archive.rstrip('/'), network)):
                 pass
-        super().__init__(root, source, archive, network)
+        super().__init__(root, source, archive, network, shared_rate_root=shared_rate_root)
 
     @staticmethod
     def checked_history_db(folder, archive, network):
@@ -309,6 +309,8 @@ def main():
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--history-cache", type=Path,
                         default=os.environ.get('PROTOCOL_HISTORY_CACHE_DIRECTORY') or None)
+    parser.add_argument("--shared-rate-root", type=Path,
+                        default=os.environ.get('PROTOCOL_SHARED_RATE_DIRECTORY') or None)
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--metrics-url", default=os.environ.get("SIMPLY_METRICS_URL", "http://indexer:8501/api/metrics"))
     parser.add_argument("--source-binding", default=os.environ.get("PROTOCOL_SOURCE_BINDING_FILE", "/run/protocol-indexer/source-binding.json"))
@@ -322,7 +324,7 @@ def main():
         parser.error("PROTOCOL_DATABASE_URL required")
     os.umask(0o077)
     resolver = Resolver(args.cache, args.archive.rstrip("/"), args.archive.rstrip("/"), args.network,
-                        history_cache=args.history_cache)
+                        history_cache=args.history_cache, shared_rate_root=args.shared_rate_root)
     transport = NativeTransport(args.endpoint, secret)
     running = True
 

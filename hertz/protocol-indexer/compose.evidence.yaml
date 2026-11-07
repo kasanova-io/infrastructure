@@ -10,6 +10,7 @@ services:
     environment:
       PROTOCOL_DATABASE_URL: postgres://protocol:${PROTOCOL_DB_PASSWORD:?required}@database:5432/protocol
       PROTOCOL_HISTORY_CACHE_DIRECTORY: ${PROTOCOL_HISTORY_CACHE_DIRECTORY:-}
+      PROTOCOL_SHARED_RATE_DIRECTORY: ${PROTOCOL_SHARED_RATE_DIRECTORY:-}
     command: [--network, '${PROTOCOL_NETWORK:?required}', --archive, '${PROTOCOL_ARCHIVE_URL:?configured HTTPS archive required}', --cache, /evidence]
     volumes:
       - chats_evidence:/evidence

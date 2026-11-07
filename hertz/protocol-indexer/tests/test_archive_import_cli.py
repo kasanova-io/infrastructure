@@ -43,12 +43,12 @@ class CurrentObservationTests(unittest.TestCase):
                 with self.assertRaises(EvidencePending): resolver.request('https://archive/transactions/' + TX)
             self.assertEqual(request.call_count, 1)
             self.assertEqual(request.call_args.kwargs['timeout'], 10)
-        self.assertGreater(float((resolver.root / 'rate-details.txt').read_text()), time.time() + 50)
+        self.assertGreater(float((resolver.root / 'archive-rate.txt').read_text()), time.time() + 50)
 
     def test_wrapper_cooldown_defers_without_waiting_or_making_http_call(self):
         resolver = self.resolver()
         helper = module.Resolver.__mro__[1].request.__globals__['_chats']
-        (resolver.root / 'source-rate.txt').write_text(str(time.time() + 60))
+        (resolver.root / 'archive-rate.txt').write_text(str(time.time() + 60))
         value = verify_archive(TX, 'testnet-10', INFO, *evidence())
         with patch.object(helper.urllib.request, 'urlopen', side_effect=AssertionError('cooldown must defer')):
             with self.assertRaises(EvidencePending): module.current_observation(resolver, value)

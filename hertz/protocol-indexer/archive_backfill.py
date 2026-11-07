@@ -289,6 +289,8 @@ def main():
     parser.add_argument("--source", required=True, help="existing public Social discovery API")
     parser.add_argument("--archive", required=True)
     parser.add_argument("--network", required=True)
+    parser.add_argument("--shared-rate-root", type=Path,
+                        default=os.environ.get('PROTOCOL_SHARED_RATE_DIRECTORY') or None)
     parser.add_argument("--txid", action="append", default=[], help="candidate ID from existing Chats/Social inventories; repeatable")
     parser.add_argument("--address", action="append", default=[], help="public participant address for action-history discovery; repeatable")
     parser.add_argument("--blue-from", type=int, help="inclusive accepting blue score for archive range discovery")
@@ -311,7 +313,7 @@ def main():
     if args.limit < 0 or len(args.txid) > 4096 or any(not HEX64.fullmatch(t) for t in args.txid):
         parser.error("nonnegative limit and at most4096 full transaction IDs required")
     os.umask(0o077)
-    h = ArchiveHistory(args.directory, args.source, args.archive, args.network)
+    h = ArchiveHistory(args.directory, args.source, args.archive, args.network, shared_rate_root=args.shared_rate_root)
     try:
         lock_mode = "discover" if args.mode in ("discover-actions", "discover-range") else args.mode
         with (h.root / (lock_mode + ".lock")).open("a") as lock:
