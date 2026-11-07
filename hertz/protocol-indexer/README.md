@@ -466,6 +466,15 @@ evidence; this is not independent consensus or Social signature verification.
 Full signature/payment consumer coverage and six-family live/backfill acceptance
 remain required before replacing any public scanner.
 
+`--workers 1` preserves individual GET lookups. With `--workers 2..8`, the
+configured archive must support the read-only `POST /transactions/search` API.
+The main thread coalesces queued lookups by exact transaction ID; each worker
+keeps its own unchanged import transaction and block lock. A post-lock recheck
+always queues a new lookup and can never reuse an earlier response. Each
+callback's 12s budget includes queueing, pacing and HTTP; missing IDs defer,
+without being interpreted as rejections. Every SQL connection passes the same
+source binding check. Network/source refreshes occur between completed waves.
+
 ## Private native Chats connector
 
 When the same evidence volume already holds a six-protocol archive inventory,

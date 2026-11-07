@@ -92,10 +92,12 @@ class History:
         for directory in ("pages", "archive", "blocks", "verified", "quarantine"):
             (self.root / directory).mkdir(exist_ok=True)
 
-    def request(self, url):
-        return self.request_with_headers(url)[0]
+    def request(self, url, *, data=None):
+        if data is None:
+            return self.request_with_headers(url)[0]
+        return self.request_with_headers(url, data=data)[0]
 
-    def request_with_headers(self, url):
+    def request_with_headers(self, url, *, data=None):
         # Share pacing across content/relationship collectors. The conservative
         # archive default supplements Chats' 0.4s bucket and shared 429 cooldown.
         source_request = url.startswith(self.source + "/")
@@ -119,7 +121,10 @@ class History:
             stream.truncate()
             stream.write(str(time.time() + interval))
             stream.flush()
-        return _chats.request(url, **getattr(self, 'request_options', {}))
+        options = getattr(self, 'request_options', {})
+        if data is None:
+            return _chats.request(url, **options)
+        return _chats.request(url, data=data, **options)
 
     def guard_capacity(self):
         if shutil.disk_usage(self.root).free < 2 * 1024**3:
