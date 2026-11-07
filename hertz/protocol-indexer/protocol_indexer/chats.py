@@ -8,6 +8,7 @@ import urllib.request
 
 from .archive import integer, raw_hex, require
 from .routing import native_chat, route
+from .jobs import claim_ready
 
 CONSUMER = "native-chats-v1"
 NOTIFICATIONS = "native-chat-push-v1"
@@ -128,9 +129,7 @@ class ChatsConsumer:
             config = conn.execute("SELECT network, journal_id::text AS source_id FROM protocol_indexer.config").fetchone()
             if not config or config["network"] != self.network:
                 raise ValueError("Chats consumer journal network mismatch")
-            job = conn.execute("""SELECT * FROM protocol_indexer.consumer_jobs
-                WHERE consumer=%s AND available_at<=clock_timestamp()
-                ORDER BY available_at,transaction_id LIMIT 1 FOR UPDATE SKIP LOCKED""", (CONSUMER,)).fetchone()
+            job = claim_ready(conn, CONSUMER)
             if job is None:
                 return None
             row = conn.execute("SELECT * FROM protocol_indexer.canonical WHERE transaction_id=%s",
