@@ -468,6 +468,17 @@ remain required before replacing any public scanner.
 
 ## Private native Chats connector
 
+When the same evidence volume already holds a six-protocol archive inventory,
+set `PROTOCOL_HISTORY_CACHE_DIRECTORY` (or `--history-cache`) to that directory.
+Chats and output-evidence reuse its existing headers and verified immutable
+transaction bodies on local cache misses. The inventory must match the configured
+archive and network; its discovery source may differ. It is opened read-only and
+its files are never copied, overwritten or quarantined by the consumers. Missing,
+unverified or malformed files use the existing archive acquisition path. A native
+body refresh bypasses both body caches. Current source/acceptance fences and the
+native SDK still decide admission; cached history never grants notification or
+payment authority. Leaving this optional path unset preserves ordinary operation.
+
 The canonical journal now queues one durable `native-chats-v1` wakeup per
 transaction. The live writer and inventory backfill enqueue identically. This
 projection covers established Kasia/KaChat private actions, KaChat tips and
