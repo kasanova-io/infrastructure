@@ -379,6 +379,33 @@ payment counts or notifications. Their opaque cursors have durable cycle checks.
 Address checkpoints replay accumulated IDs after an interrupted SQLite commit.
 Both discovery modes take the same lock and preserve existing content cursors.
 
+`discover-range` finds all six routed families in explicit accepting-blue-score
+ranges, including authors absent from the public Social/address frontier:
+
+```sh
+python3 archive_backfill.py discover-range "$ARCHIVE_INVENTORY" \
+  --source "$DISCOVERY_SOURCE" --archive "$ARCHIVE_SOURCE" \
+  --network "$PROTOCOL_NETWORK" --blue-from "$FIRST_BLUE_SCORE" \
+  --blue-to "$EXCLUSIVE_LAST_BLUE_SCORE" --blue-step 100 --limit 100
+```
+
+The existing archive's read-only `POST /transactions/search` accepts intervals
+of at most 100 blue scores. Start above zero; the archive treats zero as a
+different lookup. Each bounded response must contain unique transaction IDs,
+explicit acceptance, payloads and scores inside that interval. Network/archive/
+range/filter bindings protect cached pages; empty intervals still advance.
+Only that range job runs, under the same discovery lock and shared HTTP pacing.
+Existing source jobs, candidates and proof states are preserved on resume or an
+interrupted SQLite commit. This supplies candidate IDs only. Every candidate
+still requires the existing archive proofs, current source fences and native
+signature/payment checks before projection; a completed range is not a claim
+about history outside its bounds or the archive's consensus correctness.
+An older discovery wrapper does not understand this new internal job route. Use
+an isolated range work area while an older collector owns the shared inventory,
+or upgrade that discovery owner before adding range jobs there. Exported IDs
+and receipts still use the existing verification/import pipeline; no parallel
+live indexer or alternate admission store is created.
+
 Alternate `discover-actions` and `verify` passes until the known address frontier
 and pending proof queue drain: newly verified transactions can reveal additional
 participants. A drained known-address inventory still does not prove exhaustive
