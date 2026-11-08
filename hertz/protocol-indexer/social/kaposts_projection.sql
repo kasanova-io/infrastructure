@@ -111,7 +111,10 @@ SELECT e.sender,e.target AS post_id,e.transaction_id,e.original_time,c.revision
 FROM social_shared.extensions e
 JOIN protocol_indexer.canonical c USING(transaction_id)
 JOIN social_shared.actions a USING(transaction_id)
-JOIN social_shared.source_facts f USING(transaction_id)
+-- Bind source eligibility to this indexed withdrawal before expanding the
+-- canonical/retained branches; a vote lookup must not scan all history.
+JOIN LATERAL (SELECT f.* FROM social_shared.source_facts f
+ WHERE f.transaction_id=e.transaction_id OFFSET 0) f ON true
 WHERE e.kind='unvote' AND e.shape_valid AND e.revision=c.revision
 AND a.status='verified' AND a.revision=c.revision AND f.eligible AND f.revision=c.revision
 AND c.accepting_block IS NOT NULL
