@@ -2287,6 +2287,68 @@ mod shared_consumer {
     }
 
     #[tokio::test]
+    async fn postgres_shared_feed_bounds_edit_authorization_among_unrelated_history() {
+        use base64::Engine as _;
+        use sqlx::Row;
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
+            .await
+            .unwrap();
+        let mut posts = Vec::new();
+        for id in 10..66u8 {
+            let body = base64::engine::general_purpose::STANDARD.encode(format!("page {id}"));
+            let tail = format!("{body}:[]");
+            let root = if id % 2 == 0 { "k" } else { "kchat" };
+            let post = at(signed(root, "post", &tail, &tail, id), 1000 + i64::from(id));
+            capture(&pool, &post, 1, true, false).await;
+            consume(&consumer).await;
+            posts.push(post);
+        }
+        let target = posts.last().unwrap();
+        for (id, message, recipient) in [(200, "b25l", "44"), (201, "dHdv", "55")] {
+            let mention = format!("02{}", recipient.repeat(32));
+            let tail = format!("{}:{message}:[\"{mention}\"]", target.transaction_id);
+            let edit = at(signed("kchat", "edit", &tail, &format!("edit:{tail}"), id), 1300 + i64::from(id));
+            capture(&pool, &edit, 1, true, false).await;
+            consume(&consumer).await;
+        }
+        // Plan-only unrelated history, never submitted as signed chain evidence.
+        // Exercise both branches of source_facts at production ledger cardinality.
+        sqlx::query("INSERT INTO social_shared.retained_imports(import_id,network,source_id,protocol_hint,source_backup_sha256,inventory,native_records) VALUES(repeat('a',64),'testnet-10',$1,'k',repeat('b',64),'{}',9409)")
+            .bind(SOURCE).execute(&pool).await.unwrap();
+        sqlx::query("WITH ids AS MATERIALIZED (SELECT n,decode(md5('feed-a-'||n)||md5('feed-b-'||n),'hex') AS id FROM generate_series(1,18818) n), canonical AS (INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,accepting_block) SELECT i.id,1,c.source_transaction,c.accepting_block FROM ids i CROSS JOIN protocol_indexer.canonical c WHERE i.n%2=0 AND c.transaction_id=$1 RETURNING transaction_id), actions AS (INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,state_action,source_payload,original_time,status,notification_consumed,provenance,retained_import_id) SELECT i.id,1,'plan-only-'||i.n,'kaposts','signed','',1100,'verified',true,CASE WHEN i.n%2=0 THEN 'canonical' ELSE 'retained_native' END,CASE WHEN i.n%2=1 THEN repeat('a',64) ELSE NULL END FROM ids i LEFT JOIN canonical c ON c.transaction_id=i.id RETURNING transaction_id), template AS (SELECT * FROM social_shared.extensions WHERE kind='edit' LIMIT 1) INSERT INTO social_shared.extensions SELECT i.id,1,1500,e.kind,e.sender,e.signature,e.target,e.message,e.mentions,e.options,e.closes_at,e.option_index,true,i.id,e.target_author,e.target_kind,e.target_time FROM ids i JOIN actions a ON a.transaction_id=i.id CROSS JOIN template e WHERE i.n%2=0")
+            .bind(hex::decode(&target.transaction_id).unwrap()).execute(&pool).await.unwrap();
+        sqlx::raw_sql("ANALYZE k_contents; ANALYZE social_shared.actions; ANALYZE social_shared.extensions; ANALYZE protocol_indexer.canonical; ANALYZE social_shared.retained_imports")
+            .execute(&pool).await.unwrap();
+        assert_eq!(count(&pool, "social_shared.actions").await, 18876);
+        let mut read = pool.begin().await.unwrap();
+        sqlx::raw_sql("SET LOCAL statement_timeout=5000; SET LOCAL jit=off")
+            .execute(&mut *read).await.unwrap();
+        for limit in [6, 51] {
+            let query = format!("SELECT transaction_id FROM social_shared_api.k_contents WHERE content_type IN ('post','quote','poll') ORDER BY block_time DESC,id DESC LIMIT {limit}");
+            let actual: Vec<Vec<u8>> = sqlx::query_scalar(&query).fetch_all(&mut *read).await.unwrap();
+            let expected: Vec<Vec<u8>> = posts.iter().rev().take(limit).map(|p| hex::decode(&p.transaction_id).unwrap()).collect();
+            assert_eq!(actual, expected, "both protocol roots and unedited rows remain visible");
+            let rows = sqlx::query(&format!("EXPLAIN (ANALYZE,BUFFERS) {query}"))
+                .fetch_all(&mut *read).await.unwrap();
+            let plan = rows.iter().map(|r| r.get::<String, _>(0)).collect::<Vec<_>>().join("\n");
+            assert!(plan.contains("Index Scan") || plan.contains("Index Only Scan"), "{plan}");
+            assert!(!plan.contains("Seq Scan on actions"), "authorization must not expand unrelated action history per post: {plan}");
+            println!("Bounded mixed feed LIMIT {limit}:\n{plan}");
+        }
+        let edits: i64 = sqlx::query_scalar("SELECT count(*) FROM social_shared_api.current_edits WHERE target=$1")
+            .bind(hex::decode(&target.transaction_id).unwrap()).fetch_one(&mut *read).await.unwrap();
+        assert_eq!(edits, 9411, "all authorized suppliers retained; view has no latest-edit LIMIT");
+        let body: (String, Option<i64>) = sqlx::query_as("SELECT base64_encoded_message,edited_at FROM social_shared_api.k_contents WHERE transaction_id=$1")
+            .bind(hex::decode(&target.transaction_id).unwrap()).fetch_one(&mut *read).await.unwrap();
+        assert_eq!(body, ("dHdv".into(), Some(1501)));
+        let mentions: i64 = sqlx::query_scalar("SELECT count(*) FROM social_shared_api.k_mentions WHERE content_id=$1")
+            .bind(hex::decode(&target.transaction_id).unwrap()).fetch_one(&mut *read).await.unwrap();
+        assert_eq!(mentions, 2, "mentions from both current edit suppliers remain cumulative");
+        read.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn postgres_kaposts_long_edit_history_does_not_rewrite_prior_native_or_ledger_rows() {
         use base64::Engine as _;
         use sqlx::Row;
