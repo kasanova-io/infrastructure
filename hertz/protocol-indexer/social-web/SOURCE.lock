@@ -778,5 +778,41 @@
     "source_reviewed": false,
     "postgres_contracts_accepted": false,
     "runtime_accepted": false
+  },
+  "bounded_vote_reads_candidate": {
+    "source_manifest": "bae433889b082dae0b05290bb58988bda8850f852c2993a5f03eaba322aca86c",
+    "files_sha256": {
+      "Dockerfile": "6cad24366a65a24109dc4446c0628473eeb9bf82b038d656d6224814772d1fc1",
+      "prepare_web.py": "3012e75b042759a17e525bb9e0aeb34d29e125b293d624ac814e450e5baf0710",
+      "shared-api.patch": "fcb4d605ee1896b99e560cb6398c694fff1a5d31620992d33ad43081f2eb9814",
+      "shared_rooms.rs": "e380a88f46ce39890867ddec1f15190da30491439df97727221fedad69cf47ef",
+      "shared_room_tests.rs": "cc9f09366663e2bbc67fecdc1feeff7ea23d7234422bc1655958630925a65c52",
+      "shared_reads.rs": "53f2a946220c6fb9ab99efdef8857155ee3cda4f921ec21172d9a90e5ff734e2",
+      "shared_read_tests.rs": "047c3026ab873e5d1f30f7a68d885cc838b872eed62bfd03beee565e50e92909",
+      "shared-read-api.patch": "2dff5310a44038777cebd3883cabc492c1803def9b749a21244b23db9d5b7b37",
+      "Cargo.lock": "0e62efc0e201eeacd8acc9cfc4df671a23c26a03e6254344723c8531a45959a7",
+      "tip_counts.rs": "ee99a74364414e24acdc6672e79e374f8be9c0949cdf127d6ae534f6137a300e",
+      "tip-counts.patch": "f5578664db2e7b60a39a5177a22040c54bdf503335d587720bf65ba7f99a98e0",
+      "protocol-metadata.patch": "4663785b70909eaa66e5dfc1c78237480d66f362335214495f41d11546d94f58",
+      "unified-feed.patch": "205f3d57c736352b7b70497ba9223ea860d668f5c5db2c74fe07df9fe3aedb77",
+      "edited-metadata.patch": "dc863f4e40c65dc8c984ba11d82a05814a9e1bcb55c09397b1835ac950bebe91",
+      "shared_room_schema.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
+      "shared_read_schema.sql": "45e2f787297fd4b1b25b93adeda4be9d4f2eb01bb65d5701a297904d11d1da03",
+      "shared_edit_authorization.sql": "d42afbeecd7c96f716b0b38cc77b4255dd6445694f069d23147f8b64eb1edd89",
+      "shared_unquote_order.sql": "e972503ba710a99a9114f0f6dc9c71c110b67139c1ae4484d1d7404a9afa7235",
+      "shared_social_schema.sql": "5990ca135aa61c66ce20c4aceaf4460be8e3e08f739db8d744dbad33e809c1f8",
+      "shared_kaposts_schema.sql": "e6b10705f47ecb58eb1f61f5946d5897c65d6a2ee7f2a8611f2e452db3b7e4f7",
+      "historical-author-keys.patch": "ef2eed4659c5a52c9674843f9123c57fb60a88dec3acbb31fe5d2a7716c1e020",
+      "exact-vote-details.patch": "7e80616ccdf6148f45e6a5fe8d9a9d800c22fc5d4a26ba1ada323764560e4c48",
+      "content-search.patch": "6eca1c9ec4584566c40404bc02009108d060e86e994d0311dbec33bcba96794d",
+      "poll-results.patch": "472edefc17f71274a511e6db506d95fb8415c7fd54e26f8ca83e2730761a5cb6",
+      "alias-links.patch": "57516db31a16961f2ed2aaa26f55c968b816341b73b3f1f4e53794dcef8aab2c"
+    },
+    "based_on": "bounded_edit_reads_candidate",
+    "scope": "Bind current_vote_withdrawals source_facts lookup to exact withdrawal ID before canonical/retained expansion; preserve eligibility/revision/pending/vote ordering. Large unrelated-ledger native/read vote selection regression.",
+    "activated": false,
+    "source_reviewed": false,
+    "postgres_contracts_accepted": false,
+    "runtime_accepted": false
   }
 }
