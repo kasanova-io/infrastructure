@@ -87,7 +87,12 @@ fn canonical_bytes(value: &Value) -> Result<Vec<u8>> {
     )?)
 }
 
-pub(crate) fn sender(network: &str, id: &[u8], body: &Value, receipt: &Value) -> Result<Verdict> {
+fn checked_current_input<'a>(
+    network: &str,
+    id: &[u8],
+    body: &'a Value,
+    receipt: &Value,
+) -> Result<(TipOutputEvidence, &'a Value)> {
     // Includes SDK current-ID binding, all output amounts/scripts/indexes and
     // payload/network/ID consistency. This same proof protects native tips.
     let current = TipOutputEvidence::checked(network, id, body, receipt)?;
@@ -120,6 +125,12 @@ pub(crate) fn sender(network: &str, id: &[u8], body: &Value, receipt: &Value) ->
             );
         }
     }
+    Ok((current, ordered[0].1))
+}
+
+pub(crate) fn sender(network: &str, id: &[u8], body: &Value, receipt: &Value) -> Result<Verdict> {
+    let (current, source) = checked_current_input(network, id, body, receipt)?;
+    let tx = current.transaction();
     let input = &tx.inputs[0];
     let previous = &receipt["input0"]["previous_transaction"];
     let previous_id = input.previous_outpoint.transaction_id.to_string();
@@ -142,7 +153,6 @@ pub(crate) fn sender(network: &str, id: &[u8], body: &Value, receipt: &Value) ->
             && unsigned(&proof["amount"])? == previous_output.value,
         "room previous output proof mismatch"
     );
-    let source = ordered[0].1;
     if !source["previous_outpoint_script"].is_null() {
         ensure!(
             canonical_bytes(&source["previous_outpoint_script"])?
@@ -178,6 +188,24 @@ pub(crate) fn sender(network: &str, id: &[u8], body: &Value, receipt: &Value) ->
     Ok(judge(input_address.as_deref(), output_address.as_deref()))
 }
 
+pub(crate) fn sender_if_complete(
+    network: &str,
+    id: &[u8],
+    body: &Value,
+    receipt: &Value,
+) -> Result<Option<Verdict>> {
+    if receipt.get("input0").is_none() {
+        // Ordinary archive admission stores the current transaction first.
+        // Request funding enrichment only after checking that current proof;
+        // malformed current/input bindings must retain fingerprinted rejection.
+        checked_current_input(network, id, body, receipt)?;
+        return Ok(None);
+    }
+    // A present but malformed/rejected funding proof still requires a fresh
+    // receipt, including explicit null; never downgrade it to missing evidence.
+    sender(network, id, body, receipt).map(Some)
+}
+
 pub(crate) async fn reconcile(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     network: &str,
@@ -210,8 +238,9 @@ pub(crate) async fn reconcile(
         Ok(v) => v,
         Err(_) => return Ok(TipReconcile::InvalidSenderProofPending(fingerprint)),
     };
-    let verdict = match sender(network, id, body, &receipt) {
-        Ok(v) => v,
+    let verdict = match sender_if_complete(network, id, body, &receipt) {
+        Ok(Some(v)) => v,
+        Ok(None) => return Ok(TipReconcile::SenderProofPending),
         Err(_) => return Ok(TipReconcile::InvalidSenderProofPending(fingerprint)),
     };
     let Verdict::Verified(sender) = verdict else {
