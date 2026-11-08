@@ -23,7 +23,7 @@ def prepare(output):
     if output.exists():
         raise ValueError('fresh build directory required; preserve existing work')
     history = json.loads((HERE / 'SOURCE.lock').read_text())
-    lock = history.get('bounded_vote_reads_candidate') or history.get('bounded_edit_reads_candidate') or history.get('room_sender_enrichment_candidate') or history.get('unvote_candidate') or history.get('retained_root_candidate') or history.get('unified_feed_candidate') or history.get('bounded_read_candidate', history['retained_history_candidate'])
+    lock = history.get('native_candidate') or history.get('bounded_vote_reads_candidate') or history.get('bounded_edit_reads_candidate') or history.get('room_sender_enrichment_candidate') or history.get('unvote_candidate') or history.get('retained_root_candidate') or history.get('unified_feed_candidate') or history.get('bounded_read_candidate', history['retained_history_candidate'])
     inputs = {name: HERE / name for name in FILES}
     # The journal installer and native verifier compile this SAME owned asset.
     inputs['source_fence.sql'] = HERE.parent / 'protocol_indexer/source_fence.sql'
