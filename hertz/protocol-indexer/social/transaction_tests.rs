@@ -70,6 +70,52 @@ fn pure_archive_nullable_zero_scalars_still_require_exact_sdk_identity() {
 }
 
 
+#[test]
+fn pure_archive_v1_unused_sigop_null_preserves_sdk_identity_and_strict_fields() {
+    use crate::transaction_evidence::{CheckedTransaction, fixture_transaction_id};
+    use serde_json::{Value, json};
+    let (_, mut rpc) = synthetic_rpc("", json!([{
+        "amount": 1, "scriptPublicKey": {"version": 0, "scriptPublicKey": "51"}
+    }]), 0);
+    rpc["version"] = json!(1);
+    rpc["inputs"][0]["sigOpCount"] = json!(0);
+    rpc["inputs"][0]["computeBudget"] = json!(42);
+    let id = fixture_transaction_id(&rpc).unwrap();
+    for missing in [false, true] {
+        let mut archive = rpc.clone();
+        if missing {
+            archive["inputs"][0].as_object_mut().unwrap().remove("sigOpCount");
+        } else {
+            archive["inputs"][0]["sigOpCount"] = Value::Null;
+        }
+        assert!(CheckedTransaction::checked(&archive, &id).is_ok());
+        archive["lockTime"] = json!(1);
+        assert!(CheckedTransaction::checked(&archive, &id).is_err());
+    }
+    for invalid in [json!(1), json!(256), json!(-1), json!(true), json!("bad")] {
+        let mut archive = rpc.clone();
+        archive["inputs"][0]["sigOpCount"] = invalid;
+        assert!(CheckedTransaction::checked(&archive, &id).is_err());
+    }
+    for field in ["computeBudget", "version"] {
+        let mut archive = rpc.clone();
+        archive["inputs"][0]["sigOpCount"] = Value::Null;
+        if field == "version" { archive[field] = Value::Null; }
+        else { archive["inputs"][0][field] = Value::Null; }
+        assert!(CheckedTransaction::checked(&archive, &id).is_err());
+    }
+    rpc["version"] = json!(0);
+    rpc["inputs"][0]["sigOpCount"] = json!(1);
+    rpc["inputs"][0]["computeBudget"] = json!(0);
+    let id = fixture_transaction_id(&rpc).unwrap();
+    for missing in [false, true] {
+        let mut archive = rpc.clone();
+        if missing { archive["inputs"][0].as_object_mut().unwrap().remove("sigOpCount"); }
+        else { archive["inputs"][0]["sigOpCount"] = Value::Null; }
+        assert!(CheckedTransaction::checked(&archive, &id).is_err());
+    }
+}
+
 // SDK-coherent isolated transaction bodies, not signatures/UTXO/chain proof.
 fn room_vector(root: &str, channel: &str, content: &str, nonce: u8, forged: bool) -> serde_json::Value {
     use serde_json::json;

@@ -60,6 +60,13 @@ fn normalized_rpc(raw: &Value) -> Result<Value> {
             ensure!(legacy_v0, "nonlegacy RPC compute budget missing");
             input["computeBudget"] = 0u64.into();
         }
+        // Version >= 1 uses computeBudget instead of sigOpCount. Archive
+        // bodies represent the unused field as null, whereas RpcTransaction
+        // requires its zero sentinel. Keep v0 sigOpCount mandatory and let
+        // the SDK reject nonzero/conflicting fields and mismatched IDs.
+        if !legacy_v0 && input["sigOpCount"].is_null() {
+            input["sigOpCount"] = 0u8.into();
+        }
         for key in ["sequence", "sigOpCount", "computeBudget"] {
             if !input[key].is_null() {
                 input[key] = unsigned(&input[key])?.into();
