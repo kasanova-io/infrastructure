@@ -33,6 +33,18 @@ class ArchiveHistory(history.History):
     range_discovery = False
     blue_fields = "transaction_id,payload,is_accepted,accepting_block_blue_score"
 
+    def queue_transactions(self, txids):
+        if (not isinstance(txids, (list, tuple)) or not 1 <= len(txids) <= 4096
+                or any(not isinstance(t, str) or not HEX64.fullmatch(t) for t in txids)):
+            raise ValueError("At most4096 full transaction IDs required")
+        # Existing native inventories supply candidates, never proof. Keep any
+        # verified/quarantined disposition and let the normal verifier own it.
+        with self.db:
+            before = self.db.total_changes
+            self.db.executemany("INSERT OR IGNORE INTO records(txid) VALUES (?)",
+                                [(t,) for t in dict.fromkeys(txids)])
+            return self.db.total_changes - before
+
     @staticmethod
     def blue_bounds(start, stop, step):
         # The documented archive search bounds one request to 100 blue scores.
@@ -284,7 +296,7 @@ class ArchiveHistory(history.History):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("discover", "discover-actions", "discover-range", "verify", "status", "export"))
+    parser.add_argument("mode", choices=("discover", "discover-actions", "discover-range", "discover-txids", "verify", "status", "export"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--source", required=True, help="existing public Social discovery API")
     parser.add_argument("--archive", required=True)
@@ -303,6 +315,13 @@ def main():
     args = parser.parse_args()
     if args.address and args.mode != "discover-actions":
         parser.error("--address requires discover-actions")
+    if args.txid and args.mode not in ("discover-txids", "verify"):
+        parser.error("--txid requires discover-txids or verify")
+    if args.mode == "discover-txids":
+        if not args.txid:
+            parser.error("discover-txids requires --txid")
+        if args.limit or args.workers != 1 or args.retry_quarantine or args.output:
+            parser.error("discover-txids only queues the supplied IDs")
     if args.mode == "discover-range":
         try:
             ArchiveHistory.blue_bounds(args.blue_from, args.blue_to, args.blue_step if args.blue_step is not None else 100)
@@ -315,12 +334,16 @@ def main():
     os.umask(0o077)
     h = ArchiveHistory(args.directory, args.source, args.archive, args.network, shared_rate_root=args.shared_rate_root)
     try:
-        lock_mode = "discover" if args.mode in ("discover-actions", "discover-range") else args.mode
+        lock_mode = "discover" if args.mode in ("discover-actions", "discover-range", "discover-txids") else args.mode
         with (h.root / (lock_mode + ".lock")).open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if args.mode in ("discover", "discover-actions", "discover-range", "verify"):
+            if args.mode in ("discover", "discover-actions", "discover-range", "discover-txids", "verify"):
                 h.bind_network()
-            if args.mode == "discover-range":
+            if args.mode == "discover-txids":
+                queued = h.queue_transactions(args.txid)
+                print(json.dumps({"queued": queued, "candidates": len(set(args.txid)),
+                                  "verification_performed": False, "canonical_imported": 0}))
+            elif args.mode == "discover-range":
                 h.range_discovery = True
                 with h.db:
                     jid = h.queue_blue_range(args.blue_from, args.blue_to, args.blue_step if args.blue_step is not None else 100)
@@ -334,8 +357,8 @@ def main():
             elif args.mode == "discover":
                 h.discover(args.limit)
             elif args.mode == "verify":
-                with h.db:
-                    h.db.executemany("INSERT OR IGNORE INTO records(txid) VALUES (?)", [(t,) for t in args.txid])
+                if args.txid:
+                    h.queue_transactions(args.txid)
                 # Resuming selected verified IDs is a no-op; explicit quarantine
                 # retry remains required, preserving adverse evidence.
                 if args.txid:
