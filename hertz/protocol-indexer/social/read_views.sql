@@ -49,8 +49,12 @@ SELECT e.* FROM social_shared.extensions e
 JOIN protocol_indexer.canonical c USING(transaction_id)
 JOIN LATERAL (SELECT t.* FROM social_shared.source_facts t
  WHERE t.transaction_id=e.target OFFSET 0) t ON true
-JOIN social_shared_api.current_actions a ON a.transaction_id=e.transaction_id
-JOIN social_shared_api.current_actions target_action ON target_action.transaction_id=e.target
+-- Keep both authorization lookups bound to the indexed edit candidate. Without
+-- these barriers the planner can expand the entire target ledger for each post.
+JOIN LATERAL (SELECT a.* FROM social_shared_api.current_actions a
+ WHERE a.transaction_id=e.transaction_id OFFSET 0) a ON true
+JOIN LATERAL (SELECT target_action.* FROM social_shared_api.current_actions target_action
+ WHERE target_action.transaction_id=e.target OFFSET 0) target_action ON true
 WHERE e.revision=c.revision AND __AUTHORIZED_EDIT__;
 
 CREATE OR REPLACE VIEW social_shared_api.k_contents AS
