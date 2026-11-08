@@ -86,6 +86,46 @@ async fn pure_unvote_uses_vote_signing_fields_and_requires_kachat_envelope() {
 }
 
 #[tokio::test]
+async fn postgres_unvote_selection_bounds_source_lookup_among_unrelated_history() {
+    use sqlx::Row;
+    let pool = setup().await;
+    let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE).await.unwrap();
+    let post = "ab".repeat(32);
+    let vote = vote_at("kchat", &post, "upvote", 33, 2000);
+    let prior = vote_at("kchat", &post, "unvote", 34, 1500);
+    let other = vote_at("kchat", &"cd".repeat(32), "unvote", 35, 1600);
+    for action in [&vote, &prior, &other] {
+        capture(&pool, action, 1, true, false).await;
+        consume(&consumer).await;
+    }
+    // Unrelated cardinality is a query-plan fixture, not chain/signature proof.
+    sqlx::query("INSERT INTO social_shared.retained_imports(import_id,network,source_id,protocol_hint,source_backup_sha256,inventory,native_records) VALUES(repeat('a',64),'testnet-10',$1,'k',repeat('b',64),'{}',9409)")
+        .bind(SOURCE).execute(&pool).await.unwrap();
+    sqlx::query("WITH ids AS MATERIALIZED (SELECT n,decode(md5('vote-plan-a-'||n)||md5('vote-plan-b-'||n),'hex') AS id FROM generate_series(1,18818) n), canonical AS (INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,accepting_block) SELECT i.id,1,c.source_transaction,c.accepting_block FROM ids i CROSS JOIN protocol_indexer.canonical c WHERE i.n%2=0 AND c.transaction_id=$1 RETURNING transaction_id) INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,state_action,source_payload,original_time,status,notification_consumed,provenance,retained_import_id) SELECT i.id,1,'plan-only-'||i.n,'kaposts','signed','',1100,'verified',true,CASE WHEN i.n%2=0 THEN 'canonical' ELSE 'retained_native' END,CASE WHEN i.n%2=1 THEN repeat('a',64) ELSE NULL END FROM ids i LEFT JOIN canonical c ON c.transaction_id=i.id")
+        .bind(hex::decode(&vote.transaction_id).unwrap()).execute(&pool).await.unwrap();
+    sqlx::raw_sql("ANALYZE social_shared.actions; ANALYZE social_shared.extensions; ANALYZE protocol_indexer.canonical; ANALYZE social_shared.retained_imports; ANALYZE social_shared.ordinary_vote_targets")
+        .execute(&pool).await.unwrap();
+    let subject: String = sqlx::query_scalar("SELECT subject FROM social_shared.actions WHERE transaction_id=$1")
+        .bind(hex::decode(&vote.transaction_id).unwrap()).fetch_one(&pool).await.unwrap();
+    let mut read = pool.begin().await.unwrap();
+    sqlx::raw_sql("SET LOCAL statement_timeout=5000; SET LOCAL jit=off; SET LOCAL search_path=pg_catalog,public,pg_temp")
+        .execute(&mut *read).await.unwrap();
+    let query = crate::shared_social::selection_sql("k_votes");
+    let selected: Vec<u8> = sqlx::query_scalar(&query).bind(&subject).fetch_one(&mut *read).await.unwrap();
+    assert_eq!(selected, hex::decode(&vote.transaction_id).unwrap(), "later re-vote survives earlier own withdrawal and another target's withdrawal");
+    let rows = sqlx::query(&format!("EXPLAIN (ANALYZE,BUFFERS) {query}"))
+        .bind(&subject).fetch_all(&mut *read).await.unwrap();
+    let plan = rows.iter().map(|r| r.get::<String, _>(0)).collect::<Vec<_>>().join("\n");
+    assert!(!plan.contains("Seq Scan on actions"), "withdrawal source eligibility must not expand unrelated actions: {plan}");
+    assert!(!plan.contains("Seq Scan on canonical"), "withdrawal source eligibility must stay transaction-bound: {plan}");
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM social_shared.current_vote_withdrawals").fetch_one(&mut *read).await.unwrap(), 2);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM social_shared_api.k_votes").fetch_one(&mut *read).await.unwrap(), 1);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM notification_probe").fetch_one(&mut *read).await.unwrap(), 0);
+    println!("Bounded native/read vote selection:\n{plan}");
+    read.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn postgres_unvote_withdraws_only_own_sender_post_votes_and_mentions() {
     let pool = setup().await;
     let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE)
