@@ -143,6 +143,41 @@ async fn pure_room_sender_requires_sdk_current_prior_id_and_exact_canonical_outp
     assert!(sender("mainnet",&id,&forged["body"],&forged["receipt"]).is_err());
 }
 
+#[test]
+fn pure_room_missing_funding_requires_valid_current_proof_and_preserves_rejections() {
+    use crate::rooms::{sender_if_complete, Verdict};
+    use serde_json::{json, Value};
+    for root in ["kchat", "ciph_msg"] {
+        let v = room_vector(root, "all", "base archive receipt", 102, false);
+        let id = hex::decode(v["transaction"]["transaction_id"].as_str().unwrap()).unwrap();
+        assert!(matches!(sender_if_complete("testnet-10", &id, &v["body"], &v["receipt"]).unwrap(), Some(Verdict::Verified(_))));
+        let mut base = v.clone();
+        base["receipt"].as_object_mut().unwrap().remove("input0");
+        assert_eq!(sender_if_complete("testnet-10", &id, &base["body"], &base["receipt"]).unwrap(), None);
+        assert!(sender_if_complete("mainnet", &id, &base["body"], &base["receipt"]).is_err());
+        for field in ["id", "current-version", "payload", "output", "outpoint", "signature", "index", "inputs", "funding-null", "funding-empty", "funding-invalid"] {
+            let mut changed = base.clone();
+            match field {
+                "id" => changed["receipt"]["transaction_id"] = json!("ab".repeat(32)),
+                "current-version" => changed["receipt"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"] = json!(1),
+                "payload" => changed["body"]["payload"] = json!("\\x00"),
+                "output" => changed["body"]["outputs"][0]["amount"] = json!(1),
+                "outpoint" => changed["body"]["inputs"][0]["previous_outpoint_index"] = json!(1),
+                "signature" => changed["body"]["inputs"][0]["signature_script"] = json!("\\x00"),
+                "index" => changed["body"]["inputs"][0]["index"] = json!(1),
+                "inputs" => changed["body"]["inputs"] = json!([]),
+                "funding-null" => changed["receipt"]["input0"] = Value::Null,
+                "funding-empty" => changed["receipt"]["input0"] = json!({}),
+                _ => {
+                    changed["receipt"]["input0"] = v["receipt"]["input0"].clone();
+                    changed["receipt"]["input0"]["amount"] = json!(1);
+                }
+            }
+            assert!(sender_if_complete("testnet-10", &id, &changed["body"], &changed["receipt"]).is_err(), "{root}:{field}");
+        }
+    }
+}
+
 fn public_key() -> String {
     let pair = Keypair::from_seckey_slice(&Secp256k1::new(), &[3; 32]).unwrap();
     pair.x_only_public_key().0.to_string()
@@ -3355,6 +3390,45 @@ mod shared_consumer {
         v["receipt"]["rpc_transaction"]["outputs"][0]["scriptPublicKey"]["version"]=serde_json::json!(0);
         capture_vector(&pool,&v,3,true,false,true).await;ready_all(&pool).await;consume(&consumer).await;
         assert_eq!(count(&pool,"social_shared.current_broadcasts").await,2);
+    }
+
+    #[tokio::test]
+    async fn postgres_rooms_base_receipt_enriches_same_revision_without_rejected_cache_refresh() {
+        let pool = setup().await;
+        let consumer = SharedSocial::bind(pool.clone(), "testnet-10", SOURCE).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER probe_room AFTER INSERT ON kachat_broadcasts FOR EACH ROW EXECUTE FUNCTION notification_probe_capture()").execute(&pool).await.unwrap();
+        for (index, root) in ["kchat", "ciph_msg"].into_iter().enumerate() {
+            let full = room_vector(root, "all", "enriched:verbatim", 103 + index as u8, false);
+            let mut base = full.clone();
+            base["receipt"].as_object_mut().unwrap().remove("input0");
+            let value = capture_vector(&pool, &base, 1, true, true, true).await;
+            let id = hex::decode(&value.transaction_id).unwrap();
+            consume(&consumer).await;
+            let pending: (String, bool) = sqlx::query_as("SELECT j.last_error,e.receipt=$2::jsonb FROM protocol_indexer.consumer_jobs j JOIN protocol_indexer.evidence e USING(transaction_id) WHERE j.consumer='native-social-v1' AND j.transaction_id=$1")
+                .bind(&id).bind(base["receipt"].to_string()).fetch_one(&pool).await.unwrap();
+            assert_eq!(pending, ("parsed_room_sender_pending:1".into(), true));
+            assert_eq!(count(&pool, "social_shared.actions").await, index as i64, "pending native ledger rolls back");
+            assert_eq!(count(&pool, "social_shared.current_broadcasts").await, index as i64);
+            // A malformed present proof keeps the fingerprinted refresh path.
+            base["receipt"]["input0"] = serde_json::Value::Null;
+            sqlx::query("UPDATE protocol_indexer.evidence SET receipt=$2::jsonb WHERE transaction_id=$1").bind(&id).bind(base["receipt"].to_string()).execute(&pool).await.unwrap();
+            ready_all(&pool).await;
+            consume(&consumer).await;
+            let rejected: (String, String) = sqlx::query_as("SELECT j.last_error,encode(sha256(convert_to(e.receipt::text,'UTF8')),'hex') FROM protocol_indexer.consumer_jobs j JOIN protocol_indexer.evidence e USING(transaction_id) WHERE j.consumer='native-social-v1' AND j.transaction_id=$1")
+                .bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(rejected.0, format!("parsed_room_sender_pending:1:{}", rejected.1));
+            // Normal evidence enrichment does not need a new canonical revision.
+            sqlx::query("UPDATE protocol_indexer.evidence SET receipt=$2::jsonb WHERE transaction_id=$1").bind(&id).bind(full["receipt"].to_string()).execute(&pool).await.unwrap();
+            ready_all(&pool).await;
+            consume(&consumer).await;
+            let current: (String, String, i64) = sqlx::query_as("SELECT b.channel,b.content,c.revision FROM social_shared.current_broadcasts b JOIN protocol_indexer.canonical c USING(transaction_id) WHERE b.transaction_id=$1")
+                .bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(current, ("all".into(), "enriched:verbatim".into(), 1));
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='native-social-v1'").fetch_one(&pool).await.unwrap(), 0);
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM protocol_indexer.consumer_jobs WHERE consumer='output-evidence-v1'").fetch_one(&pool).await.unwrap(), index as i64 + 1, "native projection preserves the evidence worker's independently owned ACK");
+        }
+        assert_eq!(count(&pool, "social_shared.current_broadcasts").await, 2);
+        assert_eq!(count(&pool, "notification_probe").await, 0);
     }
 
     #[tokio::test]
