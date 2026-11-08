@@ -360,6 +360,22 @@ verification, never posts or newly dispatched notifications. Referenced content
 IDs are collected too; private Chats history still requires the existing
 address/indexer inventories to supply IDs.
 This does not claim exhaustive discovery of messages or deleted Social actions.
+
+Use `discover-txids` to add IDs from an existing native inventory while the
+shared verifier continues running:
+
+```sh
+python3 archive_backfill.py discover-txids "$ARCHIVE_INVENTORY" \
+  --source "$DISCOVERY_SOURCE" --archive "$ARCHIVE_SOURCE" \
+  --network "$PROTOCOL_NETWORK" --txid "$TRANSACTION_ID"
+```
+
+Repeat `--txid` for at most 4,096 IDs per invocation. This command takes the
+existing discovery lock and checks the current archive network. It only adds
+missing candidates as `discovered`; it preserves verified and quarantined rows,
+performs no verification or canonical import, and does not take or release the
+verifier's lock. The existing verifier supplies the normal proofs afterward.
+
 `discover-actions` extends that same inventory with the source client's per-post
 engagement and tippers routes and the existing Chats address-history scanner:
 
