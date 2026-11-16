@@ -4,17 +4,70 @@ The self-hosted PostHog stack is retired. Current analytics storage and replay
 run in PostHog Cloud, with separate PROD and DEV projects. New 0.9.0 clients send
 events directly to the configured Cloud ingestion host.
 
-Hertz retains only `compose.cloud.yaml`: the `kasanova_analytics` compatibility
-relay and gateway for already installed clients. They forward to Cloud and keep
-unacknowledged legacy events in the existing durable journal. They do not run
-PostHog databases, Kafka, object storage, or an Amplitude SDK/service connection.
-Keep the journal backup timer and sealed historical archives. Do not delete the
-journal or original native volumes, replay old source events, or restart the
-retired `kasanova_posthog` project as part of routine deployment.
+Ren's 0.9.0 release is a **forced update with no older-client support**.
+The remaining `kasanova_analytics` relay/gateway and `posthog.kasanova.io`
+route/DNS record are retired at that cutover. They are not dependencies of the
+0.9.0 app or miniapps. Retain historical archives and the final accepted-event
+journal; one-time local upgrade import does not require a compatibility server.
 
-The native installation and restore procedures below are retained solely for
-archive recovery. Current compatibility deployment is documented under
-[Cloud retirement](#retire-the-native-stack-after-cloud-reconciliation).
+## Forced 0.9.0 cutover
+
+Source integration into release/0.9.0 does not activate this procedure. Production
+continues to deploy from main under the existing release owner and store timing.
+
+1. Distribute the 0.9.0 native build, publish the reviewed Cloud-only miniapp static
+   artifact using its existing `scripts/static_release.py` publisher, and activate
+   Public's reviewed `config/environments.json`. The iOS and Android minimum and
+   recommended versions are 0.9.0 in both DEV and PROD. Verify the served app-update
+   configuration, native availability, and real event/replay delivery in Cloud.
+2. Detach only the managed `# BEGIN KASANOVA POSTHOG` through
+   `# END KASANOVA POSTHOG` block from `/opt/caddy/config/Caddyfile`, under the
+   existing `/opt/caddy/config/.posthog-install.lock`. Preserve all other bytes.
+   Reuse `install_ingress.py`'s full-Caddy staged validation, inode-preserving
+   write, compare-before-write, hot reload, and rollback procedure in reverse.
+   This closes public intake while the owned relay can finish accepted deliveries.
+3. Disable `kasanova-analytics-cloud-journal-backup.timer` and wait for an
+   already active matching backup service to finish. Enumerate only containers
+   labelled `com.docker.compose.project=kasanova_analytics` and verify the exact
+   services are `relay` and `gateway`. Stop the gateway gracefully to close intake,
+   let the relay deliver accepted work, then stop the relay gracefully and verify
+   both stopped. Do not seal a final snapshot while HTTP writers can still commit.
+4. Run `verify_cloud_drain.py --journal <authoritative journal> --config
+   <preserved route config>` against the **stopped** journal. It requires every
+   row to match its configured `host:project_id` destination, and rejects NULL,
+   wrong-destination and unmapped-project records. If residual accepted rows remain,
+   keep the public gateway detached and stopped; start only the original single
+   relay worker to finish delivery, stop it gracefully, and repeat the stopped
+   check. Never mark undelivered records as delivered or run two delivery workers.
+   Set both owned containers' restart policy to `no` once stopped and drained.
+5. Seal the final stopped journal with the existing `backup_cloud_journal.py`:
+
+   ```sh
+   sudo python3 backup_cloud_journal.py \
+     --journal /var/lib/docker/volumes/kasanova_posthog_analytics-journal/_data/ingress.sqlite \
+     --config /home/ren/Kasanova/secrets/analytics/cloud-ingress.json \
+     --runtime /home/ren/Kasanova/deployments/kasanova-analytics-cloud-5bd7e1c-20261027 \
+     --output /home/ren/kasanova-archives/analytics-cloud/FINAL-090-CUTOVER
+   ```
+
+   Bind the actual deployed runtime/config paths before executing; the paths
+   above describe the preserved October deployment. Verify the sealed manifest
+   and independently restored journal, including the same destination-bound drain
+   check on the restored copy. Copy the checkpoint off-server and verify its
+   hashes. Preserve the stopped containers, images, authoritative journal volume,
+   runtime/config and historical native volumes. Do not run `down --volumes` or
+   any prune operation. A failed drain/archive check leaves retirement incomplete
+   with the original data retained.
+6. Remove only the DNS record for `posthog.kasanova.io` using the existing DNS
+   provider. Verify no active route, timer or restart-enabled compatibility
+   container remains, other Caddy sites are healthy, and new native/miniapp
+   events still arrive directly in the correct Cloud projects. Save the DNS,
+   Caddy, final checkpoint and exact container receipts in the release record.
+
+The native installation and compatibility procedures below are archive/recovery
+references. They do not authorize restarting an old server after the forced
+cutover. Recovery preserves accepted post-cutover data and uses the release
+owner's current routing decision.
 
 Upstream source is pinned in `prepare.py`; pristine upstream deployment inputs
 are in `upstream/`. `prepare.py` generates private, durable secrets only on a fresh
