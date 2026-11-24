@@ -2,7 +2,7 @@
 """Run the private journal-to-Chats connector using existing history HTTP tools."""
 
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 import gzip
 import importlib.util
 import json
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import signal
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -26,6 +27,34 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("connector_history", HERE.parent / "social-indexer-history/history.py")
 history = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(history)
+
+
+@contextmanager
+def defer_busy_inventory():
+    try:
+        yield
+    except (history.PacingProfileError, sqlite3.OperationalError) as exc:
+        cause = exc.__cause__ if isinstance(exc, history.PacingProfileError) else exc
+        if isinstance(cause, sqlite3.OperationalError):
+            code = getattr(cause, "sqlite_errorcode", 0)
+            if (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise EvidencePending("archive_inventory_busy") from exc
+        raise
+
+
+def open_worker_resolver(resolver_type, args, stopped):
+    archive = args.archive.rstrip("/")
+    while True:
+        try:
+            with defer_busy_inventory():
+                return resolver_type(args.cache, archive, archive, args.network,
+                                     history_cache=args.history_cache, shared_rate_root=args.shared_rate_root)
+        except EvidencePending:
+            print(json.dumps({"status": "archive_inventory_pending"}), flush=True)
+            if args.once:
+                raise SystemExit(2)
+            if stopped.wait(5):
+                return None
 
 
 class Resolver(history.History):
@@ -59,6 +88,7 @@ class Resolver(history.History):
             db.close()
             raise
 
+    @defer_busy_inventory()
     def history_value(self, directory, key):
         folder = getattr(self, 'history_cache', None)
         if folder is None:
@@ -83,6 +113,7 @@ class Resolver(history.History):
         except (FileNotFoundError, EOFError, gzip.BadGzipFile, zlib.error, ValueError, RecursionError):
             return None
 
+    @defer_busy_inventory()
     def request(self, url, *, data=None):
         try:
             if data is None:
@@ -323,17 +354,17 @@ def main():
     if not dsn:
         parser.error("PROTOCOL_DATABASE_URL required")
     os.umask(0o077)
-    resolver = Resolver(args.cache, args.archive.rstrip("/"), args.archive.rstrip("/"), args.network,
-                        history_cache=args.history_cache, shared_rate_root=args.shared_rate_root)
     transport = NativeTransport(args.endpoint, secret)
-    running = True
+    stopped = threading.Event()
 
     def stop(*_):
-        nonlocal running
-        running = False
+        stopped.set()
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    resolver = open_worker_resolver(Resolver, args, stopped)
+    if resolver is None:
+        return
     try:
         # Reuse the collector's exclusive phase lock, immutable source binding,
         # cross-process rate buckets and capacity guard, rather than another scanner.
@@ -341,22 +372,29 @@ def main():
         with (args.cache / "connector.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with connect(dsn) as conn:
-                check_source(conn, args.metrics_url, args.network, args.source_binding)
-                resolver.refresh_network()
                 consumer = ChatsConsumer(args.network, resolver.resolve, transport)
-                checked = time.monotonic()
-                while running:
-                    if time.monotonic() - checked >= 60:
+                checked = None
+                while not stopped.is_set():
+                    if checked is None or time.monotonic() - checked >= 60:
                         check_source(conn, args.metrics_url, args.network, args.source_binding)
-                        resolver.refresh_network()
+                        try:
+                            resolver.refresh_network()
+                        except EvidencePending:
+                            print(json.dumps({"consumer": "native-chats-v1", "status": "archive_network_pending"}), flush=True)
+                            if args.once:
+                                raise SystemExit(2)
+                            stopped.wait(5)
+                            continue
                         checked = time.monotonic()
+                    if stopped.is_set():
+                        break
                     result = consumer.run_one(conn)
                     if result:
                         print(json.dumps({"consumer": "native-chats-v1", "status": result}), flush=True)
                     if args.once:
                         break
                     if result is None:
-                        time.sleep(0.25)
+                        stopped.wait(0.25)
     finally:
         resolver.db.close()
 
