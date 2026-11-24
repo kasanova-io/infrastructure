@@ -4,11 +4,14 @@ import io
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import chats_worker
 import evidence_worker as worker
 import import_archive
 from protocol_indexer.chats import EvidencePending
@@ -82,6 +85,113 @@ class EvidenceWorkerTests(unittest.TestCase):
 
 
 class BoundedRefreshTests(unittest.TestCase):
+    def test_busy_history_cache_at_startup_and_during_lookup(self):
+        with tempfile.TemporaryDirectory() as root:
+            shared = Path(root) / 'history'
+            shared.mkdir()
+            with contextlib.closing(sqlite3.connect(shared / 'inventory.sqlite')) as db:
+                db.execute('CREATE TABLE config (id INTEGER PRIMARY KEY, value TEXT)')
+                db.executemany('INSERT INTO config VALUES (?, ?)', [
+                    (1, '{"archive":"https://archive","network":"testnet-10"}'),
+                    (3, 'six-protocol-archive-evidence-v1')])
+                db.commit()
+                db.execute('BEGIN EXCLUSIVE')
+                args = SimpleNamespace(cache=Path(root) / 'own', archive='https://archive', network='testnet-10',
+                                       history_cache=shared, shared_rate_root=shared, once=False)
+                stopped = Mock()
+                stopped.wait.side_effect = lambda seconds: db.rollback()
+                connect = sqlite3.connect
+                def immediate(*args, **kwargs):
+                    kwargs['timeout'] = 0
+                    return connect(*args, **kwargs)
+                with patch.object(sqlite3, 'connect', side_effect=immediate):
+                    resolver = chats_worker.open_worker_resolver(chats_worker.Resolver, args, stopped)
+                    with contextlib.closing(resolver.db):
+                        stopped.wait.assert_called_once_with(5)
+                        db.execute('BEGIN EXCLUSIVE')
+                        with self.assertRaisesRegex(EvidencePending, 'archive_inventory_busy'):
+                            resolver.history_value('blocks', 'ab' * 32)
+                        db.rollback()
+                        self.assertIsNone(resolver.history_value('blocks', 'ab' * 32))
+
+    def test_evidence_startup_retries_wrapped_rate_inventory_lock(self):
+        with tempfile.TemporaryDirectory() as root:
+            shared = Path(root) / 'rate'
+            shared.mkdir()
+            with contextlib.closing(sqlite3.connect(shared / 'inventory.sqlite')) as db:
+                db.execute('CREATE TABLE config (id INTEGER PRIMARY KEY, value TEXT)')
+                db.execute('INSERT INTO config VALUES (1, ?)', ('{"archive":"https://archive","network":"testnet-10"}',))
+                db.commit()
+                db.execute('BEGIN EXCLUSIVE')
+                args = SimpleNamespace(cache=Path(root) / 'own', archive='https://archive', network='testnet-10',
+                                       history_cache=None, shared_rate_root=shared, once=False)
+                stopped = Mock()
+                stopped.wait.side_effect = lambda seconds: db.rollback()
+                connect = sqlite3.connect
+                def immediate(*args, **kwargs):
+                    kwargs['timeout'] = 0
+                    return connect(*args, **kwargs)
+                with patch.object(sqlite3, 'connect', side_effect=immediate):
+                    resolver = worker.chats_worker.open_worker_resolver(worker.ImportResolver, args, stopped)
+                    with contextlib.closing(resolver.db):
+                        stopped.wait.assert_called_once_with(5)
+
+    def test_chats_rechecks_network_after_contention_and_honors_shutdown(self):
+        with tempfile.TemporaryDirectory() as root:
+            args = ['chats_worker.py', '--network', 'testnet-10', '--archive', 'https://archive',
+                    '--endpoint', 'http://chats/history-import', '--cache', root]
+            handlers = {}
+            resolver = Mock()
+            consumer = Mock()
+            def stop():
+                handlers[signal.SIGTERM](None, None)
+            def refresh():
+                if resolver.refresh_network.call_count == 1:
+                    raise EvidencePending('busy')
+                if resolver.refresh_network.call_count == 3:
+                    stop()
+            resolver.refresh_network.side_effect = refresh
+            ticks = iter([0, 61, 62])
+            with patch.object(sys, 'argv', args), patch.dict(os.environ, {'PROTOCOL_DATABASE_URL':'unused'}), \
+                 patch.object(chats_worker, 'open_worker_resolver', return_value=resolver), \
+                 patch.object(chats_worker, 'NativeTransport'), patch.object(chats_worker, 'check_source') as source, \
+                 patch.object(chats_worker, 'connect', return_value=contextlib.nullcontext(Mock())), \
+                 patch.object(chats_worker, 'ChatsConsumer', return_value=consumer), \
+                 patch.object(signal, 'signal', side_effect=lambda sig, fn: handlers.update({sig:fn})), \
+                 patch.object(chats_worker.threading.Event, 'wait', return_value=False), \
+                 patch.object(chats_worker.time, 'monotonic', side_effect=lambda:next(ticks)):
+                consumer.run_one.return_value = None
+                chats_worker.main()
+            self.assertEqual(source.call_count, 3)
+            self.assertEqual(consumer.run_one.call_count, 1)
+
+    def test_locked_shared_inventory_defers_then_revalidates_before_http(self):
+        for resolver_type in (import_archive.Resolver, import_archive.ImportResolver):
+            with self.subTest(worker=resolver_type.__name__), tempfile.TemporaryDirectory() as root:
+                shared = Path(root) / 'shared'
+                shared.mkdir()
+                with contextlib.closing(sqlite3.connect(shared / 'inventory.sqlite')) as db:
+                    db.execute('CREATE TABLE config (id INTEGER PRIMARY KEY, value TEXT)')
+                    db.execute('INSERT INTO config VALUES (1, ?)', ('{"archive":"https://archive","network":"testnet-10"}',))
+                    db.commit()
+                    resolver = resolver_type(Path(root) / 'own', 'https://archive', 'https://archive',
+                                             'testnet-10', shared_rate_root=shared)
+                    with contextlib.closing(resolver.db), patch.object(import_archive.worker.history._chats.urllib.request, 'urlopen') as http:
+                        db.execute('BEGIN EXCLUSIVE')
+                        with self.assertRaisesRegex(EvidencePending, 'archive_inventory_busy'):
+                            resolver.request('https://archive/info/network')
+                        http.assert_not_called()
+                        db.execute('UPDATE config SET value=? WHERE id=1', ('{"archive":"https://archive","network":"mainnet"}',))
+                        db.commit()
+                        with self.assertRaisesRegex(RuntimeError, 'archive/network mismatch'):
+                            resolver.request('https://archive/info/network')
+                        http.assert_not_called()
+                        db.execute('UPDATE config SET value=? WHERE id=1', ('{"archive":"https://archive","network":"testnet-10"}',))
+                        db.commit()
+                        http.return_value.__enter__.return_value.read.return_value = b'{}'
+                        self.assertEqual(resolver.request('https://archive/info/network'), {})
+                        http.assert_called_once()
+
     def test_shared_cooldown_defers_without_http_or_network_cache_fallback(self):
         import time
         with tempfile.TemporaryDirectory() as root:
