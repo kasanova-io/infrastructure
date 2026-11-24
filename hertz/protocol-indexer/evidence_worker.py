@@ -11,7 +11,7 @@ import threading
 import time
 import urllib.parse
 
-from import_archive import ImportResolver
+from import_archive import ImportResolver, worker as chats_worker
 from protocol_indexer.cli import check_source
 from protocol_indexer.chats import EvidencePending
 from protocol_indexer.evidence import CONSUMER, EvidenceConsumer
@@ -54,8 +54,9 @@ def main():
             if not config or config['network'] != args.network:
                 raise ValueError('output evidence journal network mismatch')
             source_id = config['id']
-        resolver = ImportResolver(args.cache, args.archive.rstrip('/'), args.archive.rstrip('/'), args.network,
-                                  history_cache=args.history_cache, shared_rate_root=args.shared_rate_root)
+        resolver = chats_worker.open_worker_resolver(ImportResolver, args, stopped)
+        if resolver is None:
+            return
         # Same bound cache and rate buckets as Chats/history; distinct phase
         # lock permits both consumers while preventing duplicate proof workers.
         with (args.cache / 'output-evidence.lock').open('a') as lock:
