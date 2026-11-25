@@ -3,6 +3,18 @@ indexer.kasanova.io {
     @maintenance path /history-import /history-import/* /contextual-messages/import /contextual-messages/import/* /internal /internal/* /export /export/* /import-file /import-file/* /personal/* /self-stash-gc-orphans /self-stash-gc-orphans/*
     respond @maintenance 404
 
+    # The wallet's Kasia client reads these public endpoints using simple GETs.
+    # A fixed origin also keeps cached responses independent of request headers.
+    @walletChatReads {
+        method GET
+        path /handshakes/by-receiver /handshakes/by-sender /contextual-messages/by-sender /self-stash/by-owner
+    }
+    header @walletChatReads {
+        defer
+        Access-Control-Allow-Origin https://kasanova.app
+        Access-Control-Expose-Headers "X-Kasia-Has-More, X-Kasia-Next-Cursor"
+    }
+
     handle_path /social-api/v2/* {
         respond @maintenance 404
         reverse_proxy protocol_social_unified_prod:8080 {
