@@ -140,11 +140,15 @@ ON social_shared.tip_payments(post_signature,transaction_id);
 CREATE OR REPLACE VIEW social_shared.current_tips AS
 SELECT tip.*,post.transaction_id AS content_transaction_id FROM public.k_tips tip
 JOIN protocol_indexer.canonical payment ON payment.transaction_id=tip.transaction_id
-JOIN social_shared.source_facts target ON target.transaction_id=tip.post_id
+-- Keep source eligibility bound to each indexed tip/representative. Flattening
+-- these joins can scan the complete canonical/retained ledger for every card.
+JOIN LATERAL (SELECT target.* FROM social_shared.source_facts target
+ WHERE target.transaction_id=tip.post_id OFFSET 0) target ON true
 JOIN social_shared.tip_payments fact ON fact.transaction_id=tip.transaction_id AND fact.revision=payment.revision
 JOIN social_shared.tip_targets dependency ON dependency.transaction_id=tip.transaction_id
 JOIN public.k_contents post ON post.sender_signature=fact.post_signature
-JOIN social_shared.source_facts representative ON representative.transaction_id=post.transaction_id
+JOIN LATERAL (SELECT representative.* FROM social_shared.source_facts representative
+ WHERE representative.transaction_id=post.transaction_id OFFSET 0) representative ON true
 WHERE payment.accepting_block IS NOT NULL AND target.eligible
 AND representative.eligible AND tip.amount=fact.amount
 AND NOT EXISTS(SELECT 1 FROM protocol_indexer.pending p
