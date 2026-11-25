@@ -17,10 +17,19 @@
     }
 }
 
+(wallet-static-files) {
+    file_server {
+        precompressed br gzip
+        etag_file_extensions .etag
+    }
+}
+
 :8080 {
     root * /srv
     encode gzip zstd
     header Cache-Control "no-cache"
+    @apiResponse path /backend /backend/*
+    header @apiResponse >Cache-Control "no-store"
 
     # Public certificate metadata has no authenticated API privileges. Keep its
     # path fixed and discard credentials/queries before reaching Public.
@@ -123,12 +132,17 @@
         respond "Not found" 404
     }
 
+    @sidecars path *.etag *.br *.gz
+    handle @sidecars {
+        respond "Not found" 404
+    }
+
     @asset path_regexp asset \.(js|wasm|json|png|jpg|jpeg|gif|webp|ico|svg|ttf|otf|woff|woff2|css|map)$
     handle @asset {
-        file_server
+        import wallet-static-files
     }
     handle {
         try_files {path} /index.html
-        file_server
+        import wallet-static-files
     }
 }
