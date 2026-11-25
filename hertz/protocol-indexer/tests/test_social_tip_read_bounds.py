@@ -31,9 +31,9 @@ def signature(number):
 class TipReadBounds(unittest.TestCase):
     def setUp(self):
         self.db = connect(DSN)
-        if not self.db.info.dbname.startswith("protocol_test_tip_reads_"):
+        if not self.db.info.dbname.startswith("protocol_test_"):
             self.db.close()
-            raise ValueError("tip tests require an owning protocol_test_tip_reads_* database")
+            raise ValueError("tip tests require an owning protocol_test_* database")
         self.db.execute("DROP SCHEMA IF EXISTS social_shared CASCADE")
         self.db.execute("DROP SCHEMA IF EXISTS protocol_indexer CASCADE")
         self.db.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
