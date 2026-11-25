@@ -11,7 +11,11 @@ dev-indexer.kasanova.io {
         method GET
         path /handshakes/by-receiver /handshakes/by-sender /contextual-messages/by-sender /self-stash/by-owner
     }
-    header @walletChatReads >Access-Control-Allow-Origin https://dev.kasanova.app
+    header @walletChatReads {
+        defer
+        Access-Control-Allow-Origin https://dev.kasanova.app
+        Access-Control-Expose-Headers "X-Kasia-Has-More, X-Kasia-Next-Cursor"
+    }
 
     handle_path /social-api/v2/* {
         respond @maintenance 404
