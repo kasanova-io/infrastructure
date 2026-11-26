@@ -1,0 +1,169 @@
+--- a/K-webserver/src/models.rs
++++ b/K-webserver/src/models.rs
+@@ -69,6 +69,8 @@
+     pub quotes_count: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub tips_count: Option<u64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub protocol: Option<String>,
+     pub is_upvoted: Option<bool>,
+     pub is_downvoted: Option<bool>,
+     pub user_nickname: Option<String>,
+@@ -109,6 +111,8 @@
+     pub quotes_count: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub tips_count: Option<u64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub protocol: Option<String>,
+     pub is_upvoted: Option<bool>,
+     pub is_downvoted: Option<bool>,
+     pub user_nickname: Option<String>,
+@@ -194,6 +198,8 @@
+     pub quotes_count: u64,
+     #[serde(rename = "tipsCount", default, skip_serializing_if = "Option::is_none")]
+     pub tips_count: Option<u64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub protocol: Option<String>,
+     #[serde(rename = "repostsCount")]
+     pub reposts_count: u64,
+     #[serde(rename = "parentPostId")]
+@@ -436,6 +442,7 @@
+             down_votes_count: record.down_votes_count.unwrap_or(0),
+             quotes_count: record.quotes_count.unwrap_or(0),
+             tips_count: record.tips_count,
++            protocol: record.protocol.clone(),
+             reposts_count: 0,
+             parent_post_id: None,
+             mentioned_pubkeys: record.mentioned_pubkeys.clone(),
+@@ -587,6 +594,7 @@
+             down_votes_count: record.down_votes_count.unwrap_or(0),
+             quotes_count: record.quotes_count.unwrap_or(0),
+             tips_count: record.tips_count,
++            protocol: record.protocol.clone(),
+             reposts_count: 0,
+             parent_post_id: Some(record.post_id.clone()),
+             mentioned_pubkeys: record.mentioned_pubkeys.clone(),
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -1461,6 +1461,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                protocol: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -1686,6 +1687,7 @@
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                protocol: None,
+                 is_upvoted: Some(row.get("is_upvoted")),
+                 is_downvoted: Some(row.get("is_downvoted")),
+                 user_nickname: Some(row.get("user_nickname")),
+@@ -1976,6 +1978,7 @@
+                         replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                         quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                         tips_count: None,
++                        protocol: None,
+                         up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                         down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                         is_upvoted: Some(row.get("is_upvoted")),
+@@ -2014,6 +2017,7 @@
+                         replies_count: Some(0), // Replies don't have replies
+                         quotes_count: None,
+                         tips_count: None,
++                        protocol: None,
+                         up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                         down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                         is_upvoted: Some(row.get("is_upvoted")),
+@@ -2214,6 +2218,7 @@
+                     replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                     tips_count: None,
++                    protocol: None,
+                     up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                     down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                     is_upvoted: Some(row.get("is_upvoted")),
+@@ -2259,6 +2264,7 @@
+                     replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                     tips_count: None,
++                    protocol: None,
+                     up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                     down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                     is_upvoted: Some(row.get("is_upvoted")),
+@@ -2494,6 +2500,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                protocol: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2728,6 +2735,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                protocol: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2980,6 +2988,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                protocol: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -3260,6 +3269,7 @@
+                     replies_count: None,
+                     quotes_count: None,
+                     tips_count: None,
++                    protocol: None,
+                     user_nickname: Some(row.get("user_nickname")),
+                     user_profile_image: row.get("user_profile_image"),
+                     referenced_content_id: None,
+@@ -3295,6 +3305,7 @@
+                     replies_count: None,
+                     quotes_count: None,
+                     tips_count: None,
++                    protocol: None,
+                     user_nickname: Some(row.get("user_nickname")),
+                     user_profile_image: row.get("user_profile_image"),
+                     referenced_content_id: quoted_content_id,
+@@ -3323,6 +3334,7 @@
+                     replies_count: None,
+                     quotes_count: None,
+                     tips_count: None,
++                    protocol: None,
+                     up_votes_count: None,
+                     down_votes_count: None,
+                     is_upvoted: None,
+@@ -3647,6 +3659,7 @@
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                protocol: None,
+                 is_upvoted: Some(row.get("is_upvoted")),
+                 is_downvoted: Some(row.get("is_downvoted")),
+                 user_nickname: Some(row.get("user_nickname")),
+--- a/K-webserver/src/api_handlers.rs
++++ b/K-webserver/src/api_handlers.rs
+@@ -834,6 +834,7 @@
+                         replies_count: 0,
+                         quotes_count: 0,
+                         tips_count: None,
++                        protocol: self.db.shared_rooms_enabled().then(|| "unknown".into()),
+                         up_votes_count: 0,
+                         down_votes_count: 0,
+                         reposts_count: 0,
+@@ -1088,6 +1089,7 @@
+                             replies_count: 0,
+                             quotes_count: 0,
+                             tips_count: None,
++                            protocol: self.db.shared_rooms_enabled().then(|| "unknown".into()),
+                             up_votes_count: 0,
+                             down_votes_count: 0,
+                             reposts_count: 0,

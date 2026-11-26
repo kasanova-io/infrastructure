@@ -3,7 +3,7 @@
 use super::export::ExportApi;
 use anyhow::{Context, Result, bail, ensure};
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use fjall::{PartitionCreateOptions, TxKeyspace};
+use fjall::{PartitionCreateOptions, TxKeyspace, WriteTransaction};
 use indexer_db::{
     AddressPayload,
     messages::{
@@ -12,11 +12,15 @@ use indexer_db::{
     },
     processing::tx_id_to_acceptance::*,
 };
+use kaspa_addresses::Prefix;
 use kaspa_rpc_core::RpcAddress;
-use protocol::operation::{SealedOperation, deserializer::parse_sealed_operation};
+use protocol::operation::{
+    SealedOperation,
+    deserializer::{parse_sealed_operation, parse_shared_operation},
+};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HistoryTx {
     pub tx_id: String,
     pub payload: String,
@@ -47,27 +51,79 @@ fn fixed<const N: usize>(s: &str) -> Result<[u8; N]> {
         .map_err(|_| anyhow::anyhow!("invalid fixed hex length"))
 }
 fn address(s: &str) -> Result<AddressPayload> {
+    address_on_network(s, Prefix::Mainnet)
+}
+
+pub(super) fn address_on_network(s: &str, prefix: Prefix) -> Result<AddressPayload> {
+    let parsed = RpcAddress::try_from(s.to_owned())?;
     ensure!(
-        s.starts_with("kaspa:"),
-        "history import requires a mainnet address"
+        parsed.prefix == prefix,
+        "import address does not match configured network"
     );
-    AddressPayload::try_from(&RpcAddress::try_from(s.to_owned())?)
+    AddressPayload::try_from(&parsed)
+}
+
+pub(super) fn configured_prefix(value: &str) -> Result<Prefix> {
+    match value {
+        "mainnet" => Ok(Prefix::Mainnet),
+        "testnet" => Ok(Prefix::Testnet),
+        "devnet" => Ok(Prefix::Devnet),
+        "simnet" => Ok(Prefix::Simnet),
+        value
+            if value
+                .strip_prefix("testnet-")
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            Ok(Prefix::Testnet)
+        }
+        _ => bail!("unknown configured network"),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum ImportRequest {
+    Legacy(Vec<HistoryTx>),
+    Journal(super::shared_ingestion::JournalBatch),
 }
 
 pub async fn import_history(
     State(state): State<ExportApi>,
-    Json(txs): Json<Vec<HistoryTx>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ImportRequest>,
 ) -> impl IntoResponse {
-    if std::env::var("KASANOVA_HISTORY_IMPORT_ENABLED").as_deref() != Ok("true")
-        || std::env::var("NETWORK_TYPE").as_deref() != Ok("mainnet")
-    {
+    if let ImportRequest::Journal(batch) = request {
+        return super::shared_ingestion::import_journal(state, headers, batch).await;
+    }
+    let ImportRequest::Legacy(txs) = request else {
+        unreachable!()
+    };
+    let prefix = std::env::var("NETWORK_TYPE")
+        .ok()
+        .and_then(|value| configured_prefix(&value).ok());
+    let enabled = std::env::var("KASANOVA_HISTORY_IMPORT_ENABLED").as_deref() == Ok("true");
+    let shared = std::env::var("KASANOVA_SHARED_INGESTION_ENABLED").as_deref() == Ok("true");
+    import_legacy(state, txs, prefix, enabled, shared).await
+}
+
+async fn import_legacy(
+    state: ExportApi,
+    txs: Vec<HistoryTx>,
+    prefix: Option<Prefix>,
+    enabled: bool,
+    shared: bool,
+) -> axum::response::Response {
+    if !enabled || shared || prefix.is_none() {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "history import is disabled"})),
         )
             .into_response();
     }
-    let result = tokio::task::spawn_blocking(move || import_batch(&state.tx_keyspace, &txs)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        import_batch_for_network(&state.tx_keyspace, &txs, prefix.unwrap())
+    })
+    .await;
     match result {
         Ok(Ok(result)) => {
             (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response()
@@ -86,9 +142,32 @@ pub async fn import_history(
 }
 
 pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> {
+    import_batch_for_network(db, txs, Prefix::Mainnet)
+}
+
+pub(super) fn import_batch_for_network(
+    db: &TxKeyspace,
+    txs: &[HistoryTx],
+    prefix: Prefix,
+) -> Result<ImportResult> {
+    let mut wtx = db.write_tx()?;
+    let result = import_batch_wtx(db, txs, prefix, false, &mut wtx)?;
+    ensure!(
+        wtx.commit()?.is_ok(),
+        "history transaction conflicted; retry the batch"
+    );
+    Ok(result)
+}
+
+pub(super) fn import_batch_wtx(
+    db: &TxKeyspace,
+    txs: &[HistoryTx],
+    prefix: Prefix,
+    reconcile: bool,
+    wtx: &mut WriteTransaction,
+) -> Result<ImportResult> {
     ensure!(txs.len() <= 200, "maximum batch size is 200");
     let ledger = db.open_partition("kasanova_history_import", PartitionCreateOptions::default())?;
-    let mut wtx = db.write_tx()?;
     let mut result = ImportResult {
         imported: 0,
         duplicates: 0,
@@ -96,21 +175,34 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
     for t in txs {
         let tx_id = fixed::<32>(&t.tx_id).context("invalid transaction ID")?;
         let payload = hex(&t.payload).context("invalid transaction payload")?;
+        let sender = address_on_network(&t.sender, prefix)?;
+        let receiver = address_on_network(&t.receiver, prefix)?;
+        let block_hash = fixed::<32>(&t.block_hash)?;
+        ensure!(t.block_time > 0, "missing block time");
         let provenance = serde_json::to_vec(t)?;
         if let Some(previous) = wtx.get(&ledger, tx_id)? {
-            ensure!(
-                previous.as_ref() == provenance.as_slice(),
-                "conflicting history record for {}",
-                t.tx_id
-            );
+            let same = if reconcile {
+                let mut old: HistoryTx = serde_json::from_slice(previous.as_ref())?;
+                old.accepting_block = None;
+                old.accepting_daa_score = None;
+                // Inclusion metadata can change when the identical transaction
+                // appears in another block. Preserve its existing native keys.
+                old.block_hash = t.block_hash.clone();
+                old.block_time = t.block_time;
+                old == *t
+            } else {
+                previous.as_ref() == provenance.as_slice()
+            };
+            ensure!(same, "conflicting history record for {}", t.tx_id);
             result.duplicates += 1;
             continue;
         }
-        let sender = address(&t.sender)?;
-        let receiver = address(&t.receiver)?;
-        let block_hash = fixed::<32>(&t.block_hash)?;
-        ensure!(t.block_time > 0, "missing block time");
-        let op = parse_sealed_operation(&payload).context("unsupported chat operation")?;
+        let op = if reconcile {
+            parse_shared_operation(&payload)
+        } else {
+            parse_sealed_operation(&payload)
+        }
+        .context("unsupported chat operation")?;
         // Compare any existing ciphertext before adding missing historical indexes.
         let (part_name, sealed) = match &op {
             SealedOperation::SealedMessageOrSealedHandshakeVNone(v) => {
@@ -124,6 +216,13 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
             SealedOperation::SelfStashV1(v) => ("tx-id-to-self-stash", v.sealed_hex),
             SealedOperation::GroupMessageV1(v) => ("tx-id-to-group-message", v.sealed_hex),
             SealedOperation::GroupControlV1(v) => ("tx-id-to-group-control", v.encrypted_payload),
+        };
+        let payment_bytes;
+        let sealed = if let SealedOperation::PaymentV1(payment) = &op {
+            payment_bytes = payment.storage_bytes().context("invalid sealed tip memo")?;
+            payment_bytes.as_ref()
+        } else {
+            sealed
         };
         ensure!(!sealed.is_empty(), "empty encrypted payload");
         let part = db.open_partition(part_name, PartitionCreateOptions::default())?;
@@ -147,9 +246,9 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                 } else {
                     0
                 };
-                TxIdToHandshakePartition::new(db)?.insert_wtx(&mut wtx, &tx_id, sealed);
+                TxIdToHandshakePartition::new(db)?.insert_wtx(wtx, &tx_id, sealed);
                 HandshakeByReceiverPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &HandshakeKeyByReceiver {
                         receiver,
                         block_time: t.block_time.into(),
@@ -160,7 +259,7 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                     Some(sender),
                 )?;
                 HandshakeBySenderPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &HandshakeKeyBySender {
                         sender,
                         block_time: t.block_time.into(),
@@ -177,9 +276,9 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                 let mut alias = [0; 16];
                 let length = v.alias.len().min(16);
                 alias[..length].copy_from_slice(&v.alias[..length]);
-                TxIdToContextualMessagePartition::new(db)?.insert_wtx(&mut wtx, &tx_id, sealed);
+                TxIdToContextualMessagePartition::new(db)?.insert_wtx(wtx, &tx_id, sealed);
                 ContextualMessageBySenderPartition::new(db)?.insert(
-                    &mut wtx,
+                    wtx,
                     &ContextualMessageBySenderKey {
                         sender,
                         alias,
@@ -190,11 +289,23 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                         tx_id,
                     },
                 );
+                if let Some(tag) = v.inbox_tag {
+                    let inbox_tag = fixed::<INBOX_TAG_LEN>(std::str::from_utf8(tag)?)?;
+                    ContextualMessageByInboxPartition::new(db)?.insert_wtx(
+                        wtx,
+                        &ContextualMessageByInboxKey {
+                            inbox_tag,
+                            block_time: t.block_time.into(),
+                            tx_id,
+                        },
+                        Some(sender),
+                    )?;
+                }
             }
             SealedOperation::PaymentV1(_) => {
-                TxIdToPaymentPartition::new(db)?.insert_wtx(&mut wtx, &tx_id, t.amount, sealed)?;
+                TxIdToPaymentPartition::new(db)?.insert_wtx(wtx, &tx_id, t.amount, sealed)?;
                 PaymentByReceiverPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &PaymentKeyByReceiver {
                         receiver,
                         block_time: t.block_time.into(),
@@ -205,7 +316,7 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                     Some(sender),
                 )?;
                 PaymentBySenderPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &PaymentKeyBySender {
                         sender,
                         block_time: t.block_time.into(),
@@ -221,9 +332,9 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                     v.key.unwrap_or_default().len() <= SCOPE_LEN,
                     "unsupported scope length"
                 );
-                TxIdToSelfStashPartition::new(db)?.insert_wtx(&mut wtx, &tx_id, sealed);
+                TxIdToSelfStashPartition::new(db)?.insert_wtx(wtx, &tx_id, sealed);
                 SelfStashByOwnerPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &SelfStashKeyByOwner {
                         owner: sender,
                         scope: SelfStashScope::from(v.key.unwrap_or_default()),
@@ -243,15 +354,15 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                 );
                 ensure!(
                     GroupSenderBindingPartition::new(db)?.check_or_bind_wtx(
-                        &mut wtx,
+                        wtx,
                         &blinded_group_id,
                         &sender_pubkey
                     )?,
                     "group binding conflict"
                 );
-                TxIdToGroupMessagePartition::new(db)?.insert_wtx(&mut wtx, &tx_id, sealed);
+                TxIdToGroupMessagePartition::new(db)?.insert_wtx(wtx, &tx_id, sealed);
                 GroupMessageByBlindedGroupIdPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &GroupMessageKeyByBlindedGroupId {
                         blinded_group_id,
                         block_time: t.block_time.into(),
@@ -268,9 +379,9 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                     .map(|s| fixed::<32>(std::str::from_utf8(s)?))
                     .transpose()?
                     .map(AddressPayload::from_xonly_pubkey);
-                TxIdToGroupControlPartition::new(db)?.insert_wtx(&mut wtx, &tx_id, sealed);
+                TxIdToGroupControlPartition::new(db)?.insert_wtx(wtx, &tx_id, sealed);
                 GroupControlBySenderPartition::new(db)?.insert_wtx(
-                    &mut wtx,
+                    wtx,
                     &GroupControlKeyBySender {
                         sender,
                         block_time: t.block_time.into(),
@@ -282,7 +393,7 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
                 );
                 if let Some(recipient) = recipient {
                     GroupControlByRecipientPartition::new(db)?.insert_wtx(
-                        &mut wtx,
+                        wtx,
                         &GroupControlKeyByRecipient {
                             recipient,
                             block_time: t.block_time.into(),
@@ -304,10 +415,10 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
             );
         }
         let key = AcceptanceKey { tx_id, receiver };
-        accept.insert_wtx(&mut wtx, &key, &[])?;
+        accept.insert_wtx(wtx, &key, &[])?;
         match (&t.accepting_block, t.accepting_daa_score) {
             (Some(hash), Some(daa)) => {
-                accept.update_acceptance_wtx(&mut wtx, &key, fixed::<32>(hash)?, daa)?;
+                accept.update_acceptance_wtx(wtx, &key, fixed::<32>(hash)?, daa)?;
             }
             (None, None) => {}
             _ => bail!("incomplete acceptance metadata"),
@@ -315,10 +426,6 @@ pub fn import_batch(db: &TxKeyspace, txs: &[HistoryTx]) -> Result<ImportResult> 
         wtx.insert(&ledger, tx_id, provenance);
         result.imported += 1;
     }
-    ensure!(
-        wtx.commit()?.is_ok(),
-        "history transaction conflicted; retry the batch"
-    );
     Ok(result)
 }
 
@@ -429,6 +536,41 @@ mod tests {
         let mut conflict = good;
         conflict.payload = faster_hex::hex_string(b"kchat:1:handshake:different");
         assert!(import_batch(&db, &[conflict]).is_err());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn shared_mode_rejects_legacy_even_with_migration_flag_enabled() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = fjall::Config::new(temp.path()).open_transactional()?;
+        let tx = fixture(77, b"ciph_msg:1:handshake:sealed");
+        let response = import_legacy(
+            ExportApi::new(db.clone()),
+            vec![tx.clone()],
+            Some(Prefix::Mainnet),
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            TxIdToHandshakePartition::new(&db)?
+                .get_rtx(&db.read_tx(), &[77; 32])?
+                .is_none()
+        );
+        let response = import_legacy(
+            ExportApi::new(db.clone()),
+            vec![tx],
+            Some(Prefix::Mainnet),
+            true,
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            TxIdToHandshakePartition::new(&db)?
+                .get_rtx(&db.read_tx(), &[77; 32])?
+                .is_some()
+        );
         Ok(())
     }
 }

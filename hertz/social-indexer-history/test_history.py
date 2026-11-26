@@ -256,6 +256,22 @@ class HistoryTest(unittest.TestCase):
         )
         self.assertFalse(list((Path(self.tmp.name) / "quarantine").iterdir()))
 
+    def test_selected_budget_is_independent_of_unrelated_pending_rows(self):
+        for workers in (1, 4):
+            with self.subTest(workers=workers):
+                self.h.db.execute("DELETE FROM records")
+                ids = [c * 64 for c in "012"]
+                self.h.db.executemany("INSERT INTO records(txid) VALUES (?)", [(t,) for t in ids])
+                self.h.db.commit()
+                with patch.object(self.h, "verify_one", return_value="post") as verify:
+                    self.h.verify(1, selected=[ids[2], ids[1]], workers=workers)
+                self.assertEqual([call.args[0] for call in verify.call_args_list], [ids[2]])
+                self.assertEqual(dict(self.h.db.execute("SELECT txid,status FROM records")),
+                                 {ids[0]: "discovered", ids[1]: "discovered", ids[2]: "verified"})
+                with patch.object(self.h, "verify_one", return_value="post") as verify:
+                    self.h.verify(1, selected=[ids[1]], workers=workers)
+                self.assertEqual([call.args[0] for call in verify.call_args_list], [ids[1]])
+
     def test_missing_archive_transaction_is_excluded_with_retryable_evidence(self):
         archive = self.archive()
         url = (

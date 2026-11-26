@@ -1,0 +1,287 @@
+--- a/K-webserver/src/models.rs
++++ b/K-webserver/src/models.rs
+@@ -67,6 +67,8 @@
+     pub up_votes_count: Option<u64>,
+     pub down_votes_count: Option<u64>,
+     pub quotes_count: Option<u64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub tips_count: Option<u64>,
+     pub is_upvoted: Option<bool>,
+     pub is_downvoted: Option<bool>,
+     pub user_nickname: Option<String>,
+@@ -105,6 +107,8 @@
+     pub up_votes_count: Option<u64>,
+     pub down_votes_count: Option<u64>,
+     pub quotes_count: Option<u64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub tips_count: Option<u64>,
+     pub is_upvoted: Option<bool>,
+     pub is_downvoted: Option<bool>,
+     pub user_nickname: Option<String>,
+@@ -188,6 +192,8 @@
+     pub down_votes_count: u64,
+     #[serde(rename = "quotesCount")]
+     pub quotes_count: u64,
++    #[serde(rename = "tipsCount", default, skip_serializing_if = "Option::is_none")]
++    pub tips_count: Option<u64>,
+     #[serde(rename = "repostsCount")]
+     pub reposts_count: u64,
+     #[serde(rename = "parentPostId")]
+@@ -429,6 +435,7 @@
+             up_votes_count: record.up_votes_count.unwrap_or(0),
+             down_votes_count: record.down_votes_count.unwrap_or(0),
+             quotes_count: record.quotes_count.unwrap_or(0),
++            tips_count: record.tips_count,
+             reposts_count: 0,
+             parent_post_id: None,
+             mentioned_pubkeys: record.mentioned_pubkeys.clone(),
+@@ -579,6 +586,7 @@
+             up_votes_count: record.up_votes_count.unwrap_or(0),
+             down_votes_count: record.down_votes_count.unwrap_or(0),
+             quotes_count: record.quotes_count.unwrap_or(0),
++            tips_count: record.tips_count,
+             reposts_count: 0,
+             parent_post_id: Some(record.post_id.clone()),
+             mentioned_pubkeys: record.mentioned_pubkeys.clone(),
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -201,6 +201,7 @@
+ #[allow(unused_variables)]
+ impl DatabaseInterface for PostgresDbManager {
+     fn shared_rooms_enabled(&self) -> bool { self.shared.is_some() }
++    async fn get_tip_details(&self, id: &[u8]) -> DatabaseResult<Option<crate::tip_counts::TipDetails>> { self.tip_details(id).await }
+     async fn get_room_broadcasts(&self, query:crate::shared_rooms::RoomQuery) -> DatabaseResult<crate::shared_rooms::BroadcastsResponse> { self.read_rooms(query).await }
+     async fn get_room_channels(&self, query:crate::shared_rooms::ChannelQuery) -> DatabaseResult<crate::shared_rooms::BroadcastChannelsResponse> { self.read_room_channels(query).await }
+     // Broadcast operations
+@@ -1459,6 +1460,7 @@
+                 content_type: None,
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                tips_count: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -1474,6 +1476,8 @@
+ 
+             posts.push(post_record);
+         }
++
++        self.enrich_tip_counts(&mut read, &mut posts).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&posts, limit as u32, has_more);
+ 
+@@ -1681,6 +1685,7 @@
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                tips_count: None,
+                 is_upvoted: Some(row.get("is_upvoted")),
+                 is_downvoted: Some(row.get("is_downvoted")),
+                 user_nickname: Some(row.get("user_nickname")),
+@@ -1696,6 +1701,8 @@
+         }
+ 
+         // Build pagination metadata
++        self.enrich_tip_counts(&mut read, &mut items).await?;
++
+         let pagination = if items.is_empty() {
+             PaginationMetadata {
+                 has_more: false,
+@@ -1968,6 +1975,7 @@
+                         content_type: None,
+                         replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                         quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                        tips_count: None,
+                         up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                         down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                         is_upvoted: Some(row.get("is_upvoted")),
+@@ -2005,6 +2013,7 @@
+                         content_type: None,
+                         replies_count: Some(0), // Replies don't have replies
+                         quotes_count: None,
++                        tips_count: None,
+                         up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                         down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                         is_upvoted: Some(row.get("is_upvoted")),
+@@ -2024,6 +2033,8 @@
+ 
+             content_records.push(content_record);
+         }
++
++        self.enrich_tip_counts(&mut read, &mut content_records).await?;
+ 
+         let pagination =
+             self.create_compound_pagination_metadata(&content_records, limit as u32, has_more);
+@@ -2183,7 +2194,7 @@
+         let content_type: &str = row.get("content_type");
+         let is_blocked: bool = row.get("is_blocked");
+ 
+-        let content_record = match content_type {
++        let mut content_record = match content_type {
+             "post" | "quote" => {
+                 let mentioned_pubkeys_bytes: Vec<Vec<u8>> = row.get("mentioned_pubkeys");
+                 let mentioned_pubkeys: Vec<String> = mentioned_pubkeys_bytes
+@@ -2202,6 +2213,7 @@
+                     content_type: None,
+                     replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                    tips_count: None,
+                     up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                     down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                     is_upvoted: Some(row.get("is_upvoted")),
+@@ -2246,6 +2258,7 @@
+                     content_type: None,
+                     replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                    tips_count: None,
+                     up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                     down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                     is_upvoted: Some(row.get("is_upvoted")),
+@@ -2264,6 +2277,7 @@
+             }
+         };
+ 
++        self.enrich_tip_counts(&mut read, std::slice::from_mut(&mut content_record)).await?;
+         Ok(Some((content_record, is_blocked)))
+     }
+ 
+@@ -2479,6 +2493,7 @@
+                 content_type: None,
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                tips_count: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2489,6 +2504,8 @@
+ 
+             replies.push(reply_record);
+         }
++
++        self.enrich_tip_counts(&mut read, &mut replies).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&replies, limit as u32, has_more);
+ 
+@@ -2710,6 +2727,7 @@
+                 content_type: None,
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                tips_count: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2720,6 +2738,8 @@
+ 
+             replies.push(reply_record);
+         }
++
++        self.enrich_tip_counts(&mut read, &mut replies).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&replies, limit as u32, has_more);
+ 
+@@ -2959,6 +2979,7 @@
+                 content_type: None,
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                tips_count: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 is_upvoted: Some(row.get("is_upvoted")),
+@@ -2974,6 +2995,8 @@
+ 
+             posts.push(post_record);
+         }
++
++        self.enrich_tip_counts(&mut read, &mut posts).await?;
+ 
+         let pagination = self.create_compound_pagination_metadata(&posts, limit as u32, has_more);
+ 
+@@ -3236,6 +3259,7 @@
+                     is_downvoted: None,
+                     replies_count: None,
+                     quotes_count: None,
++                    tips_count: None,
+                     user_nickname: Some(row.get("user_nickname")),
+                     user_profile_image: row.get("user_profile_image"),
+                     referenced_content_id: None,
+@@ -3270,6 +3294,7 @@
+                     is_downvoted: None,
+                     replies_count: None,
+                     quotes_count: None,
++                    tips_count: None,
+                     user_nickname: Some(row.get("user_nickname")),
+                     user_profile_image: row.get("user_profile_image"),
+                     referenced_content_id: quoted_content_id,
+@@ -3297,6 +3322,7 @@
+                     content_type: None,
+                     replies_count: None,
+                     quotes_count: None,
++                    tips_count: None,
+                     up_votes_count: None,
+                     down_votes_count: None,
+                     is_upvoted: None,
+@@ -3620,6 +3646,7 @@
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
++                tips_count: None,
+                 is_upvoted: Some(row.get("is_upvoted")),
+                 is_downvoted: Some(row.get("is_downvoted")),
+                 user_nickname: Some(row.get("user_nickname")),
+@@ -3635,6 +3662,8 @@
+         }
+ 
+         // Build pagination metadata
++        self.enrich_tip_counts(&mut read, &mut items).await?;
++
+         let pagination = if items.is_empty() {
+             PaginationMetadata {
+                 has_more: false,
+--- a/K-webserver/src/api_handlers.rs
++++ b/K-webserver/src/api_handlers.rs
+@@ -833,6 +833,7 @@
+                         timestamp: _vote_record.block_time,
+                         replies_count: 0,
+                         quotes_count: 0,
++                        tips_count: None,
+                         up_votes_count: 0,
+                         down_votes_count: 0,
+                         reposts_count: 0,
+@@ -1086,6 +1087,7 @@
+                             timestamp: k_vote_record.block_time,
+                             replies_count: 0,
+                             quotes_count: 0,
++                            tips_count: None,
+                             up_votes_count: 0,
+                             down_votes_count: 0,
+                             reposts_count: 0,
+--- a/K-webserver/src/database_trait.rs
++++ b/K-webserver/src/database_trait.rs
+@@ -63,6 +63,7 @@
+ #[allow(dead_code)]
+ pub trait DatabaseInterface: Send + Sync {
+     fn shared_rooms_enabled(&self) -> bool { false }
++    async fn get_tip_details(&self, _id: &[u8]) -> DatabaseResult<Option<crate::tip_counts::TipDetails>> { Err(DatabaseError::NotFound) }
+     async fn get_room_broadcasts(&self, _query:crate::shared_rooms::RoomQuery) -> DatabaseResult<crate::shared_rooms::BroadcastsResponse> { Err(DatabaseError::NotFound) }
+     async fn get_room_channels(&self, _query:crate::shared_rooms::ChannelQuery) -> DatabaseResult<crate::shared_rooms::BroadcastChannelsResponse> { Err(DatabaseError::NotFound) }
+     // Post operations (optimized versions with metadata)
+--- a/K-webserver/src/main.rs
++++ b/K-webserver/src/main.rs
+@@ -1,6 +1,7 @@
+ mod api_handlers;
+ mod shared_rooms;
+ mod shared_reads;
++mod tip_counts;
+ #[cfg(all(test, feature = "shared-web-contract"))]
+ mod shared_read_tests;
+ #[cfg(all(test, feature = "shared-web-contract"))]
+--- a/K-webserver/src/web_server.rs
++++ b/K-webserver/src/web_server.rs
+@@ -282,6 +282,7 @@
+         let routes = if self.app_state.db.shared_rooms_enabled() {
+             routes.route("/get-broadcasts", get(crate::shared_rooms::broadcasts))
+                 .route("/broadcast-channels", get(crate::shared_rooms::channels))
++                .route("/get-tip-details", get(crate::tip_counts::handle_tip_details))
+         } else { routes };
+         routes
+             .layer(prometheus_layer)

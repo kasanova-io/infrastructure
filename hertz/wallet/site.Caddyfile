@@ -8,6 +8,27 @@
     encode gzip zstd
     header Cache-Control "no-cache"
 
+    # Public certificate metadata has no authenticated API privileges. Keep its
+    # path fixed and discard credentials/queries before reaching Public.
+    @androidAppLinks {
+        path /.well-known/assetlinks.json
+        method GET
+    }
+    handle @androidAppLinks {
+        rewrite * /.well-known/assetlinks.json?
+        reverse_proxy {$PUBLIC_UPSTREAM} {
+            header_up Host {$PUBLIC_API_HOST}
+            header_up -Authorization
+            header_up -Cookie
+            header_up -X-API-Key
+            header_up -X-User-Id
+            header_up -X-QA-*
+        }
+    }
+    handle /.well-known/assetlinks.json {
+        respond "Not found" 404
+    }
+
     # Bootstrap uses one fixed read-only public-config route. No client key is
     # built into JavaScript, and no generic authenticated API proxy is exposed.
     @environment {

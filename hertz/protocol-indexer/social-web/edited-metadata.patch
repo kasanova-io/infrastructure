@@ -1,0 +1,202 @@
+--- a/K-webserver/src/models.rs
++++ b/K-webserver/src/models.rs
+@@ -69,6 +69,8 @@
+     pub quotes_count: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub tips_count: Option<u64>,
++    #[serde(rename = "editedAt", default, skip_serializing_if = "Option::is_none")]
++    pub edited_at: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub protocol: Option<String>,
+     #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
+@@ -119,6 +121,8 @@
+     pub quotes_count: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub tips_count: Option<u64>,
++    #[serde(rename = "editedAt", default, skip_serializing_if = "Option::is_none")]
++    pub edited_at: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub protocol: Option<String>,
+     #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
+@@ -223,6 +227,8 @@
+     pub quotes_count: u64,
+     #[serde(rename = "tipsCount", default, skip_serializing_if = "Option::is_none")]
+     pub tips_count: Option<u64>,
++    #[serde(rename = "editedAt", default, skip_serializing_if = "Option::is_none")]
++    pub edited_at: Option<u64>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub protocol: Option<String>,
+     #[serde(rename = "legacyKCompatible", default, skip_serializing_if = "Option::is_none")]
+@@ -473,6 +479,7 @@
+             down_votes_count: record.down_votes_count.unwrap_or(0),
+             quotes_count: record.quotes_count.unwrap_or(0),
+             tips_count: record.tips_count,
++            edited_at: if is_blocked { None } else { record.edited_at },
+             protocol: record.protocol.clone(),
+             legacy_k_compatible: record.legacy_k_compatible,
+             poll: if is_blocked { None } else { record.poll.clone() },
+@@ -500,6 +507,8 @@
+     pub user_public_key: String,
+     pub post_content: String,
+     pub timestamp: u64,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub edited_at: Option<u64>,
+     pub user_nickname: Option<String>,
+     pub user_profile_image: Option<String>,
+     pub content_type: String, // "post", "reply", or "vote" from k_mentions table
+@@ -539,6 +548,7 @@
+             user_public_key: record.sender_pubkey.clone(),
+             post_content: record.base64_encoded_message.clone(),
+             timestamp: mention_block_time,
++            edited_at: record.edited_at,
+             user_nickname: record.user_nickname.clone(),
+             user_profile_image: record.user_profile_image.clone(),
+             content_type,
+@@ -564,6 +574,7 @@
+             user_public_key: record.sender_pubkey.clone(),
+             post_content: record.base64_encoded_message.clone(),
+             timestamp: mention_block_time,
++            edited_at: record.edited_at,
+             user_nickname: record.user_nickname.clone(),
+             user_profile_image: record.user_profile_image.clone(),
+             content_type: "reply".to_string(),
+@@ -592,6 +603,7 @@
+             user_public_key: vote_record.sender_pubkey.clone(),
+             post_content: String::new(), // Votes don't have content
+             timestamp: mention_block_time,
++            edited_at: None,
+             user_nickname,
+             user_profile_image,
+             content_type: "vote".to_string(),
+@@ -644,6 +656,7 @@
+             down_votes_count: record.down_votes_count.unwrap_or(0),
+             quotes_count: record.quotes_count.unwrap_or(0),
+             tips_count: record.tips_count,
++            edited_at: if is_blocked { None } else { record.edited_at },
+             protocol: record.protocol.clone(),
+             legacy_k_compatible: record.legacy_k_compatible,
+             poll: None,
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -1464,6 +1464,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                edited_at: None,
+                 protocol: None,
+                 legacy_k_compatible: None,
+                     poll: None,
+@@ -1694,6 +1695,7 @@
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                edited_at: None,
+                 protocol: None,
+                 legacy_k_compatible: None,
+                     poll: None,
+@@ -1989,6 +1991,7 @@
+                         replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                         quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                         tips_count: None,
++                        edited_at: None,
+                         protocol: None,
+                         legacy_k_compatible: None,
+                     poll: None,
+@@ -2030,6 +2033,7 @@
+                         replies_count: Some(0), // Replies don't have replies
+                         quotes_count: None,
+                         tips_count: None,
++                        edited_at: None,
+                         protocol: None,
+                         legacy_k_compatible: None,
+                         up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+@@ -2238,6 +2242,7 @@
+                     replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                     tips_count: None,
++                    edited_at: None,
+                     protocol: None,
+                     legacy_k_compatible: None,
+                     poll: None,
+@@ -2286,6 +2291,7 @@
+                     replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                     quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                     tips_count: None,
++                    edited_at: None,
+                     protocol: None,
+                     legacy_k_compatible: None,
+                     up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+@@ -2523,6 +2529,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                edited_at: None,
+                 protocol: None,
+                 legacy_k_compatible: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+@@ -2759,6 +2766,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                edited_at: None,
+                 protocol: None,
+                 legacy_k_compatible: None,
+                 up_votes_count: Some(row.get::<i64, _>("up_votes_count") as u64),
+@@ -3015,6 +3023,7 @@
+                 replies_count: Some(row.get::<i64, _>("replies_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                edited_at: None,
+                 protocol: None,
+                 legacy_k_compatible: None,
+                     poll: None,
+@@ -3302,6 +3311,7 @@
+                     replies_count: None,
+                     quotes_count: None,
+                     tips_count: None,
++                    edited_at: None,
+                     protocol: None,
+                     legacy_k_compatible: None,
+                     poll: None,
+@@ -3342,6 +3352,7 @@
+                     replies_count: None,
+                     quotes_count: None,
+                     tips_count: None,
++                    edited_at: None,
+                     protocol: None,
+                     legacy_k_compatible: None,
+                     poll: None,
+@@ -3373,6 +3384,7 @@
+                     replies_count: None,
+                     quotes_count: None,
+                     tips_count: None,
++                    edited_at: None,
+                     protocol: None,
+                     legacy_k_compatible: None,
+                     up_votes_count: None,
+@@ -3705,6 +3717,7 @@
+                 down_votes_count: Some(row.get::<i64, _>("down_votes_count") as u64),
+                 quotes_count: Some(row.get::<i64, _>("quotes_count") as u64),
+                 tips_count: None,
++                edited_at: None,
+                 protocol: None,
+                 legacy_k_compatible: None,
+                     poll: None,
+--- a/K-webserver/src/api_handlers.rs
++++ b/K-webserver/src/api_handlers.rs
+@@ -834,6 +834,7 @@
+                         replies_count: 0,
+                         quotes_count: 0,
+                         tips_count: None,
++                        edited_at: None,
+                         protocol: _vote_record.protocol.clone().or_else(|| self.db.shared_protocols_enabled().then(|| "unknown".into())),
+                         legacy_k_compatible: _vote_record.legacy_k_compatible,
+                         poll: None,
+@@ -1104,6 +1105,7 @@
+                             replies_count: 0,
+                             quotes_count: 0,
+                             tips_count: None,
++                            edited_at: None,
+                             protocol: k_vote_record.protocol.clone().or_else(|| self.db.shared_protocols_enabled().then(|| "unknown".into())),
+                             legacy_k_compatible: k_vote_record.legacy_k_compatible,
+                         poll: None,
