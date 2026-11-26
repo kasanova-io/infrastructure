@@ -3574,7 +3574,60 @@ mod shared_consumer {
         sqlx::query("INSERT INTO kachat_broadcasts(transaction_id,block_time,channel,sender_address,content) VALUES($1,1,'en','foreign','retained')").bind(vec![123u8;32]).execute(&pool).await.unwrap();
         assert!(SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.is_err());
         assert_eq!(count(&pool,"kachat_broadcasts").await,1);
-        assert_eq!(count(&pool,"social_shared.decoder_epochs").await,2,"failed bind does not install room epoch");
+        assert_eq!(count(&pool,"social_shared.decoder_epochs").await,3,"failed bind does not install room epoch");
+    }
+
+    async fn live_room_capture(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(include_str!("notification_capture.sql")).execute(pool).await.unwrap();
+        sqlx::raw_sql(include_str!("channel_notification_capture.sql")).execute(pool).await.unwrap();
+        // These signed fixtures predate activation; explicitly admit this
+        // isolated contract epoch, never a runtime history/backfill source.
+        sqlx::query("UPDATE social_notifications.public_channel_activation SET since_ms=0").execute(pool).await.unwrap();
+        sqlx::query("UPDATE social_shared.decoder_epochs SET since_ms=0 WHERE kind='kchat:1:room-notifications'").execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_live_room_capture_requires_verified_proof_and_stays_once_after_reorg() {
+        let pool=setup().await;
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        live_room_capture(&pool).await;
+        let value=room_vector("kchat","kaspa","live:public",111,false);
+        let tx=capture_vector(&pool,&value,1,true,true,false).await;
+        consume(&consumer).await;
+        assert_eq!(count(&pool,"social_notifications.public_rooms").await,0);
+        let id=hex::decode(&tx.transaction_id).unwrap();
+        sqlx::query("INSERT INTO protocol_indexer.evidence VALUES($1,$2::jsonb)").bind(&id).bind(value["receipt"].to_string()).execute(&pool).await.unwrap();
+        ready_all(&pool).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,1);
+        assert_eq!(count(&pool,"social_notifications.public_rooms").await,1);
+        capture_vector(&pool,&value,2,false,false,false).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,0);
+        capture_vector(&pool,&value,3,true,true,true).await;consume(&consumer).await;
+        assert_eq!(count(&pool,"social_shared.current_broadcasts").await,1);
+        assert_eq!(count(&pool,"social_notifications.public_rooms").await,1);
+        let epoch:i64=sqlx::query_scalar("SELECT since_ms FROM social_shared.decoder_epochs WHERE kind='kchat:1:room-notifications'").fetch_one(&pool).await.unwrap();
+        SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT since_ms FROM social_shared.decoder_epochs WHERE kind='kchat:1:room-notifications'").fetch_one(&pool).await.unwrap(),epoch);
+    }
+
+    #[tokio::test]
+    async fn postgres_room_capture_keeps_replay_forged_other_room_quiet_and_fences_bad_capture() {
+        let pool=setup().await;
+        let consumer=SharedSocial::bind(pool.clone(),"testnet-10",SOURCE).await.unwrap();
+        live_room_capture(&pool).await;
+        for (nonce,channel,notify,forged) in [(112,"kaspa",false,false),(113,"other",true,false),(114,"kasanova",true,true)] {
+            let value=room_vector("kchat",channel,"quiet",nonce,forged);
+            capture_vector(&pool,&value,1,true,notify,true).await;consume(&consumer).await;
+        }
+        assert_eq!(count(&pool,"social_notifications.public_rooms").await,0);
+        sqlx::raw_sql("CREATE OR REPLACE FUNCTION social_notifications.capture_public_room() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$").execute(&pool).await.unwrap();
+        let value=room_vector("kchat","kasanova","capture guard",115,false);
+        let tx=capture_vector(&pool,&value,1,true,true,true).await;
+        assert!(consumer.run_one().await.is_err());
+        let id=hex::decode(tx.transaction_id).unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM kachat_broadcasts WHERE transaction_id=$1").bind(&id).fetch_one(&pool).await.unwrap(),0);
+        assert_eq!(count(&pool,"social_notifications.public_rooms").await,0);
+        assert_eq!(count(&pool,"protocol_indexer.consumer_jobs").await,1);
     }
 
     async fn retained_root_vectors(pool: &sqlx::PgPool) -> (Vec<Transaction>,serde_json::Value) {
