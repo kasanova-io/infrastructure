@@ -256,6 +256,25 @@ pub(crate) async fn reconcile(
             .await?;
         return Ok(TipReconcile::Applied);
     };
+    // The installer holds the same table lease before replacing this capture.
+    // No network I/O runs here; checked sender proof and canonical acceptance
+    // above remain prerequisites for every room insertion.
+    sqlx::query("LOCK TABLE public.kachat_broadcasts IN ROW EXCLUSIVE MODE")
+        .execute(&mut **tx).await?;
+    let capture_hash:Option<String>=sqlx::query_scalar("SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc WHERE oid=to_regprocedure('social_notifications.capture_public_room()')")
+        .fetch_optional(&mut **tx).await?;
+    if let Some(hash)=&capture_hash {
+        ensure!(hash==include_str!("channel_notification_capture.sha256").trim(),
+            "Public room notification capture must preserve live-only admission");
+    }
+    let capture_ready:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='public.kachat_broadcasts'::regclass AND tgname='kasanova_notification_room' AND NOT tgisinternal AND tgenabled='O' AND tgfoid=to_regprocedure('social_notifications.capture_public_room()'))")
+        .fetch_one(&mut **tx).await?;
+    let notify:bool=if capture_ready {
+        sqlx::query_scalar("SELECT NOT a.notification_consumed AND a.original_time >= (SELECT since_ms FROM social_shared.decoder_epochs WHERE kind='kchat:1:room-notifications') AND EXISTS(SELECT 1 FROM protocol_indexer.events e WHERE e.transaction_id=a.transaction_id AND e.revision<=$2 AND e.notify_allowed) FROM social_shared.actions a WHERE a.transaction_id=$1 AND a.revision=$2")
+            .bind(id).bind(revision).fetch_one(&mut **tx).await?
+    } else {false};
+    sqlx::query("SELECT set_config('kasanova.social_notify_allowed',$1,true)")
+        .bind(if notify {"true"} else {"false"}).execute(&mut **tx).await?;
     let action=sqlx::query("SELECT original_time,snapshot::text AS snapshot FROM social_shared.actions WHERE transaction_id=$1").bind(id).fetch_one(&mut **tx).await?;
     let inserted=sqlx::query("INSERT INTO kachat_broadcasts(transaction_id,block_time,channel,sender_address,content) VALUES($1,$2,$3,$4,$5) ON CONFLICT(transaction_id) DO NOTHING")
         .bind(id).bind(action.get::<i64,_>("original_time")).bind(&room.channel).bind(&sender).bind(&room.content).execute(&mut **tx).await?.rows_affected();

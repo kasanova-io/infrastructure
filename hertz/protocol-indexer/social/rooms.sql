@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS social_shared.room_facts (
   revision bigint NOT NULL,sender_address text NOT NULL
 );
 INSERT INTO social_shared.decoder_epochs(kind) VALUES('kchat:1:bcast') ON CONFLICT DO NOTHING;
+-- Activating live public-room notifications never replays earlier decoded data.
+INSERT INTO social_shared.decoder_epochs(kind) VALUES('kchat:1:room-notifications') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE VIEW social_shared.current_broadcasts AS
 SELECT b.* FROM kachat_broadcasts b
 JOIN protocol_indexer.canonical c USING(transaction_id)
