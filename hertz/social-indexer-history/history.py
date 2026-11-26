@@ -2,6 +2,7 @@
 """Resumable public Social discovery and archive verification; never writes a service."""
 import argparse
 import collections
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import fcntl
 import hashlib
@@ -30,6 +31,10 @@ SIGNER_KEY = re.compile(r"^(?:0[23])?[0-9a-f]{64}$", re.IGNORECASE)
 KINDS = {"post", "quote", "reply", "broadcast"}
 
 
+class PacingProfileError(_chats.PacingError):
+    """A pacing configuration failure must leave candidates pending."""
+
+
 class CapacityPause(RuntimeError):
     """Pause without labelling valid history as invalid."""
 
@@ -51,10 +56,12 @@ class History:
     scope = "retained-content-and-current-profiles"
     kinds = KINDS
 
-    def __init__(self, root, source, archive, network):
+    def __init__(self, root, source, archive, network, *, shared_rate_root=None):
+        self.shared_rate_root = shared_rate_root
+        self.rate_root = self.checked_rate_root(shared_rate_root, archive.rstrip("/"), network) if shared_rate_root is not None else Path(root)
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        os.environ["CHATS_RATE_DIR"] = str(self.root)
+        os.environ["CHATS_RATE_DIR"] = str(self.rate_root)
         self.source, self.archive, self.network = (
             source.rstrip("/"),
             archive.rstrip("/"),
@@ -68,6 +75,7 @@ class History:
           CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, route TEXT, params TEXT, envelope TEXT, cursor TEXT, pages INTEGER DEFAULT 0, done INTEGER DEFAULT 0);
           CREATE TABLE IF NOT EXISTS observations (txid TEXT, job TEXT, data TEXT, PRIMARY KEY(txid,job));
           CREATE TABLE IF NOT EXISTS records (txid TEXT PRIMARY KEY, status TEXT DEFAULT 'discovered', kind TEXT, error TEXT);
+          CREATE TABLE IF NOT EXISTS job_cursors (job TEXT, cursor TEXT, PRIMARY KEY(job,cursor));
           CREATE INDEX IF NOT EXISTS records_status ON records(status,txid);
         """
         )
@@ -91,36 +99,65 @@ class History:
         for directory in ("pages", "archive", "blocks", "verified", "quarantine"):
             (self.root / directory).mkdir(exist_ok=True)
 
-    def request(self, url):
-        # Share pacing across content/relationship collectors. The conservative
-        # archive default supplements Chats' 0.4s bucket and shared 429 cooldown.
-        source_request = url.startswith(self.source + "/")
+    @staticmethod
+    def checked_rate_root(folder, archive, network, *, timeout=10):
+        try:
+            root = Path(folder)
+            file = root / "inventory.sqlite"
+            if not root.is_dir() or root.is_symlink() or not file.is_file() or file.is_symlink():
+                raise PacingProfileError("Shared rate directory requires an existing ordinary inventory")
+            with closing(sqlite3.connect(file.absolute().as_uri() + "?mode=ro", uri=True, timeout=timeout)) as db:
+                row = db.execute("SELECT value FROM config WHERE id=1").fetchone()
+                profile = json.loads(row[0]) if row else None
+            # Sharing pacing grants no trust in this inventory's receipts or filters.
+            if not isinstance(profile, dict) or profile.get("archive") != archive or profile.get("network") != network:
+                raise PacingProfileError("Shared rate directory archive/network mismatch")
+            return root
+        except (OSError, sqlite3.Error, ValueError, TypeError) as error:
+            raise PacingProfileError("Shared rate inventory unavailable or invalid") from error
+
+    def request(self, url, *, data=None):
+        if data is None:
+            return self.request_with_headers(url)[0]
+        return self.request_with_headers(url, data=data)[0]
+
+    def request_with_headers(self, url, *, data=None):
+        # Use one bound bucket for cadence and Retry-After across callers;
+        # the existing helper also retains the endpoint's minimum interval.
+        archive_request = url.startswith(self.archive + "/")
+        source_request = url.startswith(self.source + "/") and not archive_request
         rate_root = getattr(self, "rate_root", self.root)
+        if getattr(self, "shared_rate_root", None) is not None:
+            self.checked_rate_root(rate_root, self.archive, self.network, timeout=0)
         interval_file = rate_root / "archive-interval.txt"
-        archive_interval = (
-            float(interval_file.read_text()) if interval_file.exists() else 0.6
-        )
-        if not 0.4 <= archive_interval <= 60:
-            raise ValueError("Archive pacing must be between 0.4 and 60 seconds")
+        try:
+            archive_interval = float(interval_file.read_text()) if interval_file.exists() else 0.6
+            if not 0.4 <= archive_interval <= 60:
+                raise ValueError('out of range')
+        except (OSError, ValueError) as error:
+            raise PacingProfileError("Archive pacing must be readable and between 0.4 and 60 seconds") from error
         interval = 1.0 if source_request else archive_interval
-        bucket = "source-rate.txt" if source_request else "archive-rate.txt"
-        with (rate_root / bucket).open("a+") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
-            stream.seek(0)
-            next_at = float(stream.read() or 0)
-            time.sleep(max(0, next_at - time.time()))
-            stream.seek(0)
-            stream.truncate()
-            stream.write(str(time.time() + interval))
-            stream.flush()
-        return _chats.request(url)[0]
+        options = {**getattr(self, 'request_options', {}), 'rate_root': rate_root,
+                   'rate_bucket': 'source' if source_request else 'archive',
+                   'rate_interval': interval}
+        max_wait = getattr(self, 'request_max_wait', None)
+        if max_wait is not None:
+            options['max_wait'] = min(max_wait, options['max_wait']) if options.get('max_wait') is not None else max_wait
+        if getattr(self, 'shared_rate_root', None) is not None:
+            options['rate_guard'] = lambda: self.checked_rate_root(rate_root, self.archive, self.network, timeout=0)
+        if data is None:
+            return _chats.request(url, **options)
+        return _chats.request(url, data=data, **options)
+
+    def guard_capacity(self):
+        if shutil.disk_usage(self.root).free < 2 * 1024**3:
+            raise CapacityPause("History collection paused: less than 2 GiB free")
 
     def cache(self, directory, key, url):
         path = self.root / directory / (key + ".json.gz")
         if path.exists():
             return load(path)
-        if shutil.disk_usage(self.root).free < 2 * 1024**3:
-            raise CapacityPause("History collection paused: less than 2 GiB free")
+        self.guard_capacity()
         value = self.request(url)
         atomic_json(path, value)
         return value
@@ -146,9 +183,14 @@ class History:
         self.add_job("/get-users", {"requesterPubkey": ANON}, "posts")
         self.db.commit()
 
-    def discover(self, budget, parents=None):
+    def discover(self, budget, parents=None, *, job_ids=None):
+        if job_ids is not None and (
+            parents or not isinstance(job_ids, (list, tuple)) or not 1 <= len(job_ids) <= 4096
+            or any(not isinstance(jid, str) or not HEX64.fullmatch(jid) for jid in job_ids)
+        ):
+            raise ValueError("Explicit discovery jobs require bounded full IDs and no parent filter")
         self.seed()
-        selected_jobs = []
+        selected_jobs = list(job_ids or [])
         for parent in parents or []:
             if not HEX64.fullmatch(parent):
                 raise ValueError("Invalid parent transaction ID")
@@ -162,17 +204,13 @@ class History:
 
         for _ in range(budget or 10**9):
             job = self.db.execute(
-                f"""SELECT id,route,params,envelope,cursor,pages FROM jobs WHERE {condition} ORDER BY CASE route WHEN "/get-posts-watching" THEN 0 WHEN "/get-users" THEN 1 ELSE CASE WHEN json_extract(params,'$.user') IS NOT NULL THEN 2 ELSE 3 END END,id LIMIT 1""",
+                f"""SELECT id,route,params,envelope,cursor,pages FROM jobs WHERE {condition} ORDER BY {self.job_order()} LIMIT 1""",
                 selected_jobs,
             ).fetchone()
             if not job:
                 break
             jid, route, params, envelope, cursor, pages = job
-            query = {**json.loads(params), "limit": 100}
-            if cursor:
-                query["before"] = cursor
-            url = self.source + route + "?" + urllib.parse.urlencode(query)
-            page = self.cache("pages", jid + "-" + str(pages), url)
+            page, url = self.discovery_page(jid, route, json.loads(params), cursor, pages)
             rows, pagination = page.get(envelope), page.get("pagination")
             if (
                 not isinstance(rows, list)
@@ -182,17 +220,14 @@ class History:
                 raise ValueError("Invalid page contract " + url)
             next_cursor = pagination.get("nextCursor")
             if pagination["hasMore"] and (
-                not rows or not next_cursor or next_cursor == cursor
+                (not rows and not self.empty_page_advances(route))
+                or not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor
             ):
                 raise ValueError("Pagination failed to advance " + url)
             if pagination["hasMore"]:
-                parts = next_cursor.split("_")
-                if len(parts) != 2 or not all(p.isdigit() for p in parts):
-                    raise ValueError("Invalid source cursor")
-                if cursor and tuple(map(int, parts)) >= tuple(
-                    map(int, cursor.split("_"))
-                ):
-                    raise ValueError("Source cursor moved forward")
+                self.validate_cursor(route, cursor, next_cursor)
+                if self.db.execute("SELECT 1 FROM job_cursors WHERE job=? AND cursor=?", (jid, next_cursor)).fetchone():
+                    raise ValueError("Source cursor cycle")
             with self.db:
                 for row in rows:
                     txid = row.get("id", "")
@@ -223,33 +258,54 @@ class History:
                         "INSERT OR IGNORE INTO observations VALUES (?,?,?)",
                         (txid, jid, json.dumps(row)),
                     )
-                    author = row.get("userPublicKey", "")
-                    if KEY.fullmatch(author):
-                        self.add_job(
-                            "/get-replies",
-                            {"user": author, "requesterPubkey": ANON},
-                            "replies",
-                        )
-                    # Traverse every discovered parent, including orphan roots
-                    # referred to by replies; no assumption repliesCount is complete.
-                    if route != "/get-users":
-                        self.add_job(
-                            "/get-replies",
-                            {"post": txid, "requesterPubkey": ANON},
-                            "replies",
-                        )
-                    parent = row.get("parentPostId")
-                    if parent and HEX64.fullmatch(parent):
-                        self.add_job(
-                            "/get-replies",
-                            {"post": parent, "requesterPubkey": ANON},
-                            "replies",
-                        )
+                    self.queue_related(row, route)
+                if pagination["hasMore"]:
+                    self.db.execute("INSERT INTO job_cursors VALUES (?,?)", (jid, next_cursor))
                 self.db.execute(
                     "UPDATE jobs SET cursor=?,pages=pages+1,done=? WHERE id=?",
                     (next_cursor, int(not pagination["hasMore"]), jid),
                 )
             self.status()
+
+    def job_order(self):
+        return 'CASE route WHEN "/get-posts-watching" THEN 0 WHEN "/get-users" THEN 1 ELSE CASE WHEN json_extract(params,\'$.user\') IS NOT NULL THEN 2 ELSE 3 END END,id'
+
+    def empty_page_advances(self, route):
+        return False
+
+    def discovery_page(self, jid, route, params, cursor, pages):
+        query = {**params, "limit": 100}
+        if cursor:
+            query["before"] = cursor
+        url = self.source + route + "?" + urllib.parse.urlencode(query)
+        return self.cache("pages", jid + "-" + str(pages), url), url
+
+    def validate_cursor(self, route, cursor, next_cursor):
+        parts = next_cursor.split("_")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            raise ValueError("Invalid source cursor")
+        if cursor and tuple(map(int, parts)) >= tuple(map(int, cursor.split("_"))):
+            raise ValueError("Source cursor moved forward")
+
+    def is_content(self, row, route):
+        return route != "/get-users"
+
+    def queue_related(self, row, route):
+        author = row.get("userPublicKey", "")
+        if KEY.fullmatch(author):
+            self.add_job(
+                "/get-replies", {"user": author, "requesterPubkey": ANON}, "replies"
+            )
+        # Traverse every discovered content, including orphan reply roots.
+        if self.is_content(row, route):
+            self.add_job(
+                "/get-replies", {"post": row["id"], "requesterPubkey": ANON}, "replies"
+            )
+        parent = row.get("parentPostId")
+        if parent and HEX64.fullmatch(parent):
+            self.add_job(
+                "/get-replies", {"post": parent, "requesterPubkey": ANON}, "replies"
+            )
 
     def verify_one(self, txid, observations=None):
         url = (
@@ -366,28 +422,36 @@ class History:
         if not 1 <= workers <= 4:
             raise ValueError("Archive workers must be between 1 and 4")
         condition = "status!='verified'" if retry else "status='discovered'"
-        txids = [
-            r[0]
-            for r in self.db.execute(
-                "SELECT txid FROM records WHERE "
-                + condition
-                + " ORDER BY txid LIMIT ?",
-                (budget or 10**9,),
-            )
-        ]
         if selected:
             if any(not HEX64.fullmatch(txid) for txid in selected):
                 raise ValueError("Invalid selected transaction ID")
-            missing = set(selected) - set(txids)
+            # Selection is independent of the global pending queue. Apply its
+            # budget after selecting, so an unrelated older ID cannot prevent
+            # a bounded retry of the requested transaction.
+            selected = list(dict.fromkeys(selected))
+            missing = {
+                txid for txid in selected
+                if self.db.execute(
+                    "SELECT 1 FROM records WHERE txid=? AND " + condition,
+                    (txid,),
+                ).fetchone() is None
+            }
             if missing:
                 raise ValueError(
                     "Selected transaction absent or already verified: "
                     + ",".join(sorted(missing))
                 )
-            txids = selected
+            txids = selected[:budget] if budget else selected
         elif not retry:
             # Include records discovered while archive verification is running.
             txids = self.pending_ids(budget)
+        else:
+            txids = [
+                r[0] for r in self.db.execute(
+                    "SELECT txid FROM records WHERE " + condition + " ORDER BY txid LIMIT ?",
+                    (budget or 10**9,),
+                )
+            ]
         if workers == 1:
             for txid in txids:
                 self.finish_verification(txid, lambda: self.verify_one(txid))

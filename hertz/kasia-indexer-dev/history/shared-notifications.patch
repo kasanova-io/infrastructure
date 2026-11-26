@@ -1,0 +1,54 @@
+--- a/indexer/src/api/v1.rs
++++ b/indexer/src/api/v1.rs
+@@ -37,6 +37,7 @@
+ pub mod export;
+ pub mod history;
+ pub mod shared_ingestion;
++pub mod shared_notifications;
+ pub mod group_control;
+ pub mod group_messages;
+ pub mod handshakes;
+@@ -92,6 +93,11 @@
+ const PUSH_REQUEST_BODY_MAX_BYTES: usize = 64 * 1024;
+ 
+ impl Api {
++    pub fn with_shared_push(mut self, sender: flume::Sender<indexer_actors::push::PushEvent>) -> Self {
++        self.export_api.shared_push_tx = Some(sender);
++        self
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     pub fn new(
+         tx_keyspace: fjall::TxKeyspace,
+--- a/indexer/src/api/v1/export.rs
++++ b/indexer/src/api/v1/export.rs
+@@ -37,11 +37,17 @@
+ #[derive(Clone)]
+ pub struct ExportApi {
+     pub(super) tx_keyspace: TxKeyspace,
++    pub(super) shared_push_tx: Option<flume::Sender<indexer_actors::push::PushEvent>>,
++    pub(super) shared_ingestion_lock: std::sync::Arc<std::sync::Mutex<()>>,
+ }
+ 
+ impl ExportApi {
+     pub fn new(tx_keyspace: TxKeyspace) -> Self {
+-        Self { tx_keyspace }
++        Self {
++            tx_keyspace,
++            shared_push_tx: None,
++            shared_ingestion_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
++        }
+     }
+ }
+ 
+--- a/indexer/src/main.rs
++++ b/indexer/src/main.rs
+@@ -444,7 +444,7 @@
+             ext_push_tx.clone(),
+         ),
+         context.clone(),
+-    );
++    ).with_shared_push(push_tx.clone());
+     let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::mpsc::channel(2);
+     // API bind is configurable (KaChat Indexer fork) so it can share a host without colliding
+     // on :8080. Defaults to the upstream 0.0.0.0:8080. Leaked to &'static for the spawned task.

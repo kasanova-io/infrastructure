@@ -1,0 +1,23 @@
+# Public Chats handoff overlay. Reuse the existing deployment's provider identity
+# and secret files; never apply this overlay with fixture or replacement keys.
+services:
+  chats:
+    environment:
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:?existing wallet Firebase project required}
+      FCM_SERVICE_ACCOUNT_PATH: /run/secrets/firebase-service-account.json
+      APNS_TEAM_ID: ${APNS_TEAM_ID:?existing APNs team required}
+      APNS_KEY_ID: ${APNS_KEY_ID:?existing APNs key ID required}
+      APNS_TOPIC: ${APNS_TOPIC:?existing wallet bundle topic required}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:?existing environment required}
+      APNS_KEY_PATH: /run/secrets/apns-key.p8
+    volumes:
+      - type: bind
+        source: ${FCM_SERVICE_ACCOUNT_HOST_PATH:?existing provider secret required}
+        target: /run/secrets/firebase-service-account.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${APNS_KEY_HOST_PATH:?existing provider secret required}
+        target: /run/secrets/apns-key.p8
+        read_only: true
+        bind: {create_host_path: false}

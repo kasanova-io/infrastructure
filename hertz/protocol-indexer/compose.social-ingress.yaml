@@ -1,0 +1,17 @@
+# Include only after this network's retained history, readers and grants pass.
+# The two stateless read contracts alone join the existing reverse-proxy network.
+services:
+  social-api:
+    networks:
+      protocol: {}
+      social-ingress:
+        aliases: ['${PROTOCOL_SOCIAL_LEGACY_ALIAS:?configured Caddy legacy upstream alias required}']
+  social-api-unified:
+    networks:
+      protocol: {}
+      social-ingress:
+        aliases: ['${PROTOCOL_SOCIAL_UNIFIED_ALIAS:?configured Caddy unified upstream alias required}']
+networks:
+  social-ingress:
+    external: true
+    name: ${PROTOCOL_INGRESS_NETWORK:?existing reverse-proxy network required}
