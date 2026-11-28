@@ -945,13 +945,21 @@
     "source_reviewed": true,
     "native_rust_compilation": true,
     "postgres_contracts_accepted": true,
-    "runtime_accepted": false,
-    "activated": false,
+    "runtime_accepted": true,
+    "activated": true,
     "native_unit_tests_passed": 68,
     "postgres_contracts_passed": 69,
     "python_tests_passed": 265,
     "runtime_python_tests_passed": 5,
     "runtime_image": "sha256:6e02fe77bebf807d1484ec24e887126bce226baa872a834bf9130f0a9a0c5d85",
-    "contract_image": "sha256:3390542783de3f442c7007616674062fa166a966406574df40c37ba3b2c6b942"
+    "contract_image": "sha256:3390542783de3f442c7007616674062fa166a966406574df40c37ba3b2c6b942",
+    "activation_scope": "DEV/TN10 existing delivery workers only; original accepted message recovered once and one native-swipe reply accepted; production unchanged",
+    "dev_source_revision": "d0f4c17387692395ff281740c1c9d544fbb62b71",
+    "live_worker_resolver_image": "sha256:4f89c93385a96723f1da0b4a55e4c50ed203f4f3fbf6cba0e0288ddf2ff6e5b7",
+    "accepted_public_transactions": [
+      "bc5813d42920e142693877c19a9b50cfc1f217d2bf01131d3d49cd0e151b89ca",
+      "de987831964e3805bfe5b7dbdc3b1074f9d5ed9c6fa6cbfe69219ad568024586"
+    ],
+    "physical_acceptance": "ZTE QA336: both delivered, reply plaintext/quote and empty composer; keyboard action used for publication; touch action opens at1200ms,750ms delay remains separate"
   }
 }
