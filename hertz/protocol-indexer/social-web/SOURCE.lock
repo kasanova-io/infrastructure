@@ -848,7 +848,7 @@
     "scope": "Only the shared native tip-view schema input changes. Existing reader Rust, compatibility patches, native schemas and historical build proofs are preserved. This is future build-context binding, not reader activation."
   },
   "translations_candidate": {
-    "source_manifest": "170e52cd5b25b8e9ef8d9e78741693eb81d4f202c927af464eb0874e22db3a99",
+    "source_manifest": "9181df54743c4d9d5df284d60b920c54d2298cc01a9719f97d2841edaaa52924",
     "files_sha256": {
       "Dockerfile": "932f65d7a940a606db4f57e52908ce1c78ba06525703de6dcfe9b70eed13a0c3",
       "prepare_web.py": "6f9790ecc84525684fd211af42cbc2f55eb22a1bcf1b6ee120803fb0157f037d",
@@ -864,7 +864,7 @@
       "protocol-metadata.patch": "4663785b70909eaa66e5dfc1c78237480d66f362335214495f41d11546d94f58",
       "unified-feed.patch": "205f3d57c736352b7b70497ba9223ea860d668f5c5db2c74fe07df9fe3aedb77",
       "edited-metadata.patch": "dc863f4e40c65dc8c984ba11d82a05814a9e1bcb55c09397b1835ac950bebe91",
-      "shared_room_schema.sql": "8f33828bbec280aca6412e5c577ea3a53d63bd667a8ef1411cdf2f860f76f382",
+      "shared_room_schema.sql": "aa74452207f95b221493ec16b81056e86044bcdcc1cc38750724cb35b973e38d",
       "shared_read_schema.sql": "45e2f787297fd4b1b25b93adeda4be9d4f2eb01bb65d5701a297904d11d1da03",
       "shared_edit_authorization.sql": "d42afbeecd7c96f716b0b38cc77b4255dd6445694f069d23147f8b64eb1edd89",
       "shared_unquote_order.sql": "e972503ba710a99a9114f0f6dc9c71c110b67139c1ae4484d1d7404a9afa7235",
