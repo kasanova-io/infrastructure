@@ -1,4 +1,21 @@
 (kasanova-wallet-path) {
+    @androidAppLinks path /.well-known/assetlinks.json
+    handle @androidAppLinks {
+        rewrite * /.well-known/assetlinks.json?
+        header {
+            # Apply after the upstream response so its cache policy cannot
+            # override this endpoint's revalidation requirement.
+            >Cache-Control "no-cache"
+            X-Content-Type-Options "nosniff"
+        }
+        reverse_proxy {args[0]}:8080 {
+            header_up -Authorization
+            header_up -Cookie
+            header_up -X-API-Key
+            header_up -X-User-Id
+            header_up -X-QA-*
+        }
+    }
     @walletWithoutSlash path /wallet
     redir @walletWithoutSlash /wallet/ 308
     handle_path /wallet/* {
@@ -6,7 +23,7 @@
             Alt-Svc clear
             Cache-Control "no-cache"
             Permissions-Policy "camera=(self), microphone=(self), geolocation=(), payment=(), publickey-credentials-get=(self), publickey-credentials-create=(self)"
-            Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-eval' https://browser.sentry-cdn.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-src https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-eval' https://browser.sentry-cdn.com https://accounts.google.com/gsi/client https://cdn.apple-cloudkit.com/ck/2/cloudkit.js; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-src https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         }
         reverse_proxy {args[0]}:8080
     }

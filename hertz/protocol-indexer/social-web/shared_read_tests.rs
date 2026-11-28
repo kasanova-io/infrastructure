@@ -39,7 +39,7 @@ fn schema() -> String {
             include_str!("shared_unquote_order.sql"),
         )
 }
-async fn setup() -> PostgresDbManager {
+pub(crate) async fn setup() -> PostgresDbManager {
     let dsn =
         std::env::var("SOCIAL_SHARED_WEB_TEST_DATABASE_URL").expect("explicit disposable DSN");
     let pool = PgPoolOptions::new()
@@ -113,7 +113,7 @@ async fn action(pool: &PgPool, n: u8, table: &str, subject: String, operation: &
     sqlx::query("INSERT INTO social_shared.actions(transaction_id,revision,subject,native_table,source_payload,original_time,status,state_action,snapshot) VALUES($1,1,$2,$3,encode(convert_to('k:1:fixture','UTF8'),'hex'),$4,'verified',$5,'{\"k_mentions\":[]}'::jsonb)")
         .bind(id(n)).bind(subject).bind(table).bind(time).bind(operation).execute(pool).await.unwrap();
 }
-async fn post(pool: &PgPool, n: u8, time: i64) {
+pub(crate) async fn post(pool: &PgPool, n: u8, time: i64) {
     action(
         pool,
         n,
@@ -142,7 +142,7 @@ async fn mention(pool: &PgPool, n: u8, kind: &str, to: Vec<u8>, original: bool) 
             .bind(id(n)).bind(format!("\\x{}",hex::encode(to))).execute(pool).await.unwrap();
     }
 }
-async fn extension(pool: &PgPool, n: u8, target: u8, kind: &str, time: i64, message: &str) {
+pub(crate) async fn extension(pool: &PgPool, n: u8, target: u8, kind: &str, time: i64, message: &str) {
     action(
         pool,
         n,
@@ -155,7 +155,7 @@ async fn extension(pool: &PgPool, n: u8, target: u8, kind: &str, time: i64, mess
     sqlx::query("INSERT INTO social_shared.extensions(transaction_id,revision,original_time,kind,sender,signature,target,message,mentions,shape_valid,target_signature,target_author,target_kind,target_time) VALUES($1,1,$2,$3,$4,$5,$6,$7,'[]',true,$8,$4,'post',1000)")
         .bind(id(n)).bind(time).bind(kind).bind(author()).bind(sig(n)).bind(id(target)).bind(message).bind(sig(target)).execute(pool).await.unwrap();
 }
-async fn show(pool: &PgPool, target: u8, time: Option<i64>, body: &str) {
+pub(crate) async fn show(pool: &PgPool, target: u8, time: Option<i64>, body: &str) {
     sqlx::query("UPDATE public.k_contents SET edited_at=$2,base64_encoded_message=$3 WHERE transaction_id=$1").bind(id(target)).bind(time).bind(body).execute(pool).await.unwrap();
 }
 async fn feed(db: &PostgresDbManager) -> Vec<crate::models::KPostRecord> {
