@@ -1,0 +1,103 @@
+--- a/K-webserver/Cargo.toml
++++ b/K-webserver/Cargo.toml
+@@ -5,7 +5,7 @@
+ 
+ [dependencies]
+ tokio = { version = "1.0", features = ["full"] }
+-sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres"] }
++sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "sqlite"] }
+ serde = { version = "1.0.227", features = ["derive"] }
+ serde_json = "1.0.145"
+ anyhow = "1.0"
+@@ -18,7 +18,12 @@
+ hex = "0.4"
+ clap = { version = "4.5.48", features = ["derive"] }
+ axum-prometheus = "0.9"
+-base64ct = "1.8.0"
++base64ct = { version = "1.8.0", features = ["alloc"] }
++reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
++regex = "1"
++sha2 = "0.10"
++html-escape = "0.2"
++
+ 
+ [features]
+ search-contract = []
+--- a/K-webserver/src/main.rs
++++ b/K-webserver/src/main.rs
+@@ -1,4 +1,5 @@
+ mod api_handlers;
++mod translations;
+ mod shared_rooms;
+ mod shared_reads;
+ mod tip_counts;
+@@ -163,7 +164,8 @@
+ 
+     // Create web server
+     let db_interface: Arc<dyn database_trait::DatabaseInterface> = Arc::new(db_manager);
+-    let web_server = WebServer::new(db_interface, config.server.clone()).await;
++    let translator = translations::Translator::from_env().await?;
++    let web_server = WebServer::new(db_interface, config.server.clone()).await.with_translator(translator);
+ 
+     info!("Starting web server on {}", config.server.bind_address);
+ 
+--- a/K-webserver/src/database_trait.rs
++++ b/K-webserver/src/database_trait.rs
+@@ -62,6 +62,7 @@
+ #[async_trait]
+ #[allow(dead_code)]
+ pub trait DatabaseInterface: Send + Sync {
++    async fn get_translation_text(&self, _id: &str, _kind: crate::translations::Kind) -> DatabaseResult<Option<crate::translations::PublicText>> { Err(DatabaseError::NotFound) }
+     fn shared_rooms_enabled(&self) -> bool { false }
+     fn shared_protocols_enabled(&self) -> bool { false }
+     async fn get_tip_details(&self, _id: &[u8]) -> DatabaseResult<Option<crate::tip_counts::TipDetails>> { Err(DatabaseError::NotFound) }
+--- a/K-webserver/src/database_postgres_impl.rs
++++ b/K-webserver/src/database_postgres_impl.rs
+@@ -200,6 +200,7 @@
+ #[async_trait]
+ #[allow(unused_variables)]
+ impl DatabaseInterface for PostgresDbManager {
++    async fn get_translation_text(&self, id: &str, kind: crate::translations::Kind) -> DatabaseResult<Option<crate::translations::PublicText>> { self.read_translation_text(id,kind).await }
+     fn shared_rooms_enabled(&self) -> bool { self.shared.is_some() }
+     fn shared_protocols_enabled(&self) -> bool { self.shared.as_ref().is_some_and(|b| b.read_contract == crate::shared_rooms::ReadContract::Unified) }
+     async fn get_tip_details(&self, id: &[u8]) -> DatabaseResult<Option<crate::tip_counts::TipDetails>> { self.tip_details(id).await }
+--- a/K-webserver/src/web_server.rs
++++ b/K-webserver/src/web_server.rs
+@@ -33,6 +33,7 @@
+ type RateLimitMap = Arc<RwLock<HashMap<SocketAddr, RateLimitEntry>>>;
+ 
+ pub struct AppState {
++    pub(crate) translator: Option<Arc<crate::translations::Translator>>,
+     pub api_handlers: ApiHandlers,
+     pub rate_limit_map: RateLimitMap,
+     pub server_config: ServerConfig,
+@@ -231,6 +232,7 @@
+         let rate_limit_map = Arc::new(RwLock::new(HashMap::new()));
+ 
+         let app_state = Arc::new(AppState {
++            translator: None,
+             api_handlers,
+             rate_limit_map,
+             server_config,
+@@ -238,6 +240,11 @@
+         });
+ 
+         Self { app_state }
++    }
++
++    pub(crate) fn with_translator(mut self, translator: Option<Arc<crate::translations::Translator>>) -> Self {
++        Arc::get_mut(&mut self.app_state).expect("unshared startup state").translator = translator;
++        self
+     }
+ 
+     pub fn create_router(&self) -> Router {
+@@ -283,6 +290,9 @@
+             routes.route("/get-broadcasts", get(crate::shared_rooms::broadcasts))
+                 .route("/broadcast-channels", get(crate::shared_rooms::channels))
+                 .route("/get-tip-details", get(crate::tip_counts::handle_tip_details))
++        } else { routes };
++        let routes = if self.app_state.db.shared_protocols_enabled() {
++            routes.route("/get-translation", get(crate::translations::translate))
+         } else { routes };
+         routes
+             .layer(prometheus_layer)

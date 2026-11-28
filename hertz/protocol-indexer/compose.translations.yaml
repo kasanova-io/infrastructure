@@ -1,0 +1,20 @@
+# Opt-in translation on the existing unified Social indexer API. No scanner,
+# canonical writer, public port, route switch or native-wallet change.
+services:
+  social-api-unified:
+    environment:
+      SOCIAL_TRANSLATION_API_KEY_FILE: /run/secrets/social_translation_api_key
+      SOCIAL_TRANSLATION_CACHE_PATH: /var/cache/social-translations/cache.sqlite
+    secrets: [social_translation_api_key]
+    volumes: [social_translations:/var/cache/social-translations]
+    networks:
+      protocol: {}
+      translation-egress: {}
+secrets:
+  social_translation_api_key:
+    file: ${PROTOCOL_TRANSLATION_API_KEY_PATH:?existing private Google Cloud Translation API key file required}
+volumes:
+  social_translations: {}
+networks:
+  # Dedicated outbound bridge; do not join another deployment's DB aliases.
+  translation-egress: {}
