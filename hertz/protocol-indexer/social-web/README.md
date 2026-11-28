@@ -1,5 +1,61 @@
 # Private shared Social API overlay
 
+## English and Spanish translation
+
+The unified indexer supports on-demand translation of current public posts,
+replies, quotes, poll questions and channel messages through Google Cloud
+Translation Basic (NMT). The provider detects the source language; the only
+accepted targets are `en` and `es`. Clients request indexed IDs, never arbitrary
+text:
+
+```text
+GET /social-api/v2/get-translation?id=<transaction-id>&target=en
+GET /social-api/v2/get-translation?id=<transaction-id>&target=es
+GET /social-api/v2/get-translation?id=<transaction-id>&kind=broadcast&target=en
+GET /social-api/v2/get-translation?id=<transaction-id>&kind=broadcast&target=es
+```
+
+`kind` defaults to `post`. Responses contain `id`, `kind`, `originalText`,
+`translatedText`, `sourceLanguage`, `targetLanguage`, `contentHash`, `provider`,
+`translated` and `cached`. Both text fields are plain text and must be rendered
+as text. `translated=false` means the result equals the original. Source language
+can be `null` for content containing only protected tokens, or `mul` when a large
+message contains multiple detected languages. Poll options remain unchanged.
+
+The reader uses the existing source-bound canonical views. Post edits use the
+native effective body; channel replies expose their text, and same-author channel
+edits follow the existing `(blockTime, transactionId)` timeline order. Raw files,
+reactions, payments, private messages and control envelopes are not translated.
+Readable text replacing an attachment through a valid author edit is supported.
+The reader checks eligibility and current text again after the cache/provider
+operation, so a cached result cannot bypass a revocation, removal or edit.
+
+An independent persistent SQLite cache is keyed by provider version, source,
+network, current text and target. It survives reader restarts and coalesces
+concurrent misses without writing to the native projection. Translation uses
+complete sentences with escaped HTML and protected placeholders; URLs, addresses,
+amounts, mentions, hashtags, known tickers and code are restored byte for byte.
+Missing, repeated or changed placeholders reject the result. Large messages use
+bounded batches. Provider generation has a five-second total deadline; the
+endpoint uses the existing rate limiter and a seven-second cache/provider budget.
+
+Include `compose.translations.yaml` with the existing candidate, Social and
+ingress overlays to enable translation. Set `PROTOCOL_TRANSLATION_API_KEY_PATH`
+to an existing Google Translation API key file. The file must be readable by
+container UID/GID `10001:10001` while remaining private; file-backed Compose
+secrets preserve host permissions, so do not assume UID remapping. The overlay
+adds outbound access and an owned cache volume to the unified reader only. The
+read-only PostgreSQL role and canonical data remain unchanged. Without this
+overlay/configuration the endpoint returns `503 TRANSLATION_UNAVAILABLE`, and
+ordinary Social reads continue. Invalid targets/IDs return `400`, absent public
+text `404`, changed text during translation `409`, and provider/cache failures
+`503`. Responses use `Cache-Control: no-store`; the server owns translation reuse.
+
+This is source implementation, not a DEV/PROD activation receipt. Real Google
+quality/credential acceptance and client Translate/Show original controls require
+separate verification. API reference:
+https://cloud.google.com/translate/docs/reference/rest/v2/translate
+
 This reuses pinned K-webserver917863 and the existing historical-author-key,
 exact-vote and literal-content-search patches. It adds the upstream KaChat room
 reader to the same Axum server, rate limits, pool and middleware. It does not
