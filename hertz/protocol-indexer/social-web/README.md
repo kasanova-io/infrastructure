@@ -3,8 +3,8 @@
 ## English and Spanish translation
 
 The unified indexer supports on-demand translation of current public posts,
-replies, quotes, poll questions and channel messages through Google Cloud
-Translation Basic (NMT). The provider detects the source language; the only
+replies, quotes, poll questions and channel messages through Gemini 3.5 Flash-Lite
+on an unbilled Free tier Google project. The provider detects the source language; the only
 accepted targets are `en` and `es`. Clients request indexed IDs, never arbitrary
 text:
 
@@ -17,7 +17,7 @@ GET /social-api/v2/get-translation?id=<transaction-id>&kind=broadcast&target=es
 
 `kind` defaults to `post`. Responses contain `id`, `kind`, `originalText`,
 `translatedText`, `sourceLanguage`, `targetLanguage`, `contentHash`, `provider`,
-`translated` and `cached`. Both text fields are plain text and must be rendered
+`translated` and `cached`; `provider` is `gemini`. Both text fields are plain text and must be rendered
 as text. `translated=false` means the result equals the original. Source language
 can be `null` for content containing only protected tokens, or `mul` when a large
 message contains multiple detected languages. Poll options remain unchanged.
@@ -36,12 +36,17 @@ concurrent misses without writing to the native projection. Translation uses
 complete sentences with escaped HTML and protected placeholders; URLs, addresses,
 amounts, mentions, hashtags, known tickers and code are restored byte for byte.
 Missing, repeated or changed placeholders reject the result. Large messages use
-bounded batches. Provider generation has a five-second total deadline; the
+bounded batches. Input instructions are treated as text to translate, and the
+provider must return the exact structured translation schema and a completed
+generation. Blocked, truncated or malformed generations are not cached.
+Provider generation has a five-second total deadline; the
 endpoint uses the existing rate limiter and a seven-second cache/provider budget.
 
 Include `compose.translations.yaml` with the existing candidate, Social and
 ingress overlays to enable translation. Set `PROTOCOL_TRANSLATION_API_KEY_PATH`
-to an existing Google Translation API key file. The file must be readable by
+to a dedicated Gemini key from an unbilled Free tier project. The overlay sets
+`SOCIAL_TRANSLATION_PROVIDER=gemini-free`; without that explicit opt-in the
+provider stays disabled. The file must be readable by
 container UID/GID `10001:10001` while remaining private; file-backed Compose
 secrets preserve host permissions, so do not assume UID remapping. The overlay
 adds outbound access and an owned cache volume to the unified reader only. The
@@ -51,10 +56,20 @@ ordinary Social reads continue. Invalid targets/IDs return `400`, absent public
 text `404`, changed text during translation `409`, and provider/cache failures
 `503`. Responses use `Cache-Control: no-store`; the server owns translation reuse.
 
-This is source implementation, not a DEV/PROD activation receipt. Real Google
+Keep that project unbilled: Free tier quotas stop requests when exhausted;
+the implementation has no fallback to Cloud Translation, a different model,
+grounding, tools or other paid APIs. Cached translations remain available when
+the provider quota is exhausted, while uncached requests return `503`.
+Linking a billing account changes Google's tier and is outside this configuration.
+Google may use Free tier inputs/outputs to improve its products; only the public
+content selected above is submitted. Pricing and Free tier eligibility:
+https://aistudio.google.com/docs/models/gemini-3.5-flash-lite#pricing
+https://aistudio.google.com/docs/billing
+
+This is source implementation, not a DEV/PROD activation receipt. Real provider
 quality/credential acceptance and client Translate/Show original controls require
 separate verification. API reference:
-https://cloud.google.com/translate/docs/reference/rest/v2/translate
+https://ai.google.dev/api/generate-content
 
 This reuses pinned K-webserver917863 and the existing historical-author-key,
 exact-vote and literal-content-search patches. It adds the upstream KaChat room
