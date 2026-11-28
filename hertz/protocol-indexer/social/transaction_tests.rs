@@ -140,6 +140,126 @@ fn room_vector(root: &str, channel: &str, content: &str, nonce: u8, forged: bool
           "previous_transaction":{"schema_version":1,"network":"testnet-10","transaction_id":previous_id,"rpc_transaction":previous_rpc}}}})
 }
 
+fn actual_pruned_room() -> serde_json::Value {
+    // Accepted TN10 broadcast, including the actual canonical signature and
+    // spent-output metadata. No mnemonic, private key or parent body included.
+    serde_json::from_str(include_str!("pruned_room.json")).unwrap()
+}
+
+#[test]
+fn pure_room_pruned_parent_uses_real_signature_for_author_only() {
+    use crate::rooms::{Verdict, sender_if_complete};
+    let mut value = actual_pruned_room();
+    let id = hex::decode(value["transaction"]["transaction_id"].as_str().unwrap()).unwrap();
+    assert!(value["receipt"].get("input0").is_none());
+    for (network, prefix) in [("testnet-10", "kaspatest:"), ("mainnet", "kaspa:")] {
+        value["receipt"]["network"] = network.into();
+        let expected =
+            format!("{prefix}qqsr00khp0y084c626txzmz0rfwd7s3eafwxu9m55z6g5wntguu5xnphpkeqe");
+        // Network prefixes have different checksums: compare the decoded key's
+        // address produced by the existing SDK rather than changing a prefix.
+        let verdict = sender_if_complete(network, &id, &value["body"], &value["receipt"]).unwrap();
+        let Some(Verdict::Verified(author)) = verdict else {
+            panic!("actual author not verified");
+        };
+        assert!(author.starts_with(prefix));
+        if network == "testnet-10" {
+            assert_eq!(author, expected);
+        }
+    }
+}
+
+#[test]
+fn pure_room_pruned_author_never_trusts_changed_signature_or_metadata() {
+    use crate::rooms::{Verdict, sender_if_complete};
+    use serde_json::{Value, json};
+    let original = actual_pruned_room();
+    let id = hex::decode(original["transaction"]["transaction_id"].as_str().unwrap()).unwrap();
+    let unauthorized = |value: &Value| {
+        assert!(!matches!(
+            sender_if_complete("testnet-10", &id, &value["body"], &value["receipt"]),
+            Ok(Some(Verdict::Verified(_)))
+        ));
+    };
+    for field in [
+        "signature_script",
+        "previous_outpoint_script",
+        "previous_outpoint_amount",
+        "sig_op_count",
+    ] {
+        let mut value = original.clone();
+        value["body"]["inputs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            sender_if_complete("testnet-10", &id, &value["body"], &value["receipt"])
+                .unwrap()
+                .is_none()
+        );
+    }
+    for proof in [Value::Null, json!({}), json!({"previous_transaction": {}})] {
+        let mut value = original.clone();
+        value["receipt"]["input0"] = proof;
+        assert!(sender_if_complete("testnet-10", &id, &value["body"], &value["receipt"]).is_err());
+    }
+    // The child ID excludes signatureScript. Matching claimed IDs cannot
+    // authorize either an archive-only substitution or changed canonical bytes.
+    for change_canonical in [false, true] {
+        let mut value = original.clone();
+        let mut sig = hex::decode(
+            value["receipt"]["rpc_transaction"]["inputs"][0]["signatureScript"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        sig[1] ^= 1;
+        let signature = hex::encode(sig);
+        value["receipt"]["rpc_transaction"]["inputs"][0]["signatureScript"] = json!(signature);
+        assert_eq!(
+            crate::transaction_evidence::fixture_transaction_id(
+                &value["receipt"]["rpc_transaction"]
+            )
+            .unwrap(),
+            hex::encode(&id)
+        );
+        if change_canonical {
+            value["body"]["inputs"][0]["signature_script"] = json!(format!("\\x{signature}"));
+        }
+        unauthorized(&value);
+    }
+    for field in ["previous_outpoint_amount", "sig_op_count", "covenant_id"] {
+        let mut value = original.clone();
+        value["body"]["inputs"][0][field] = if field == "previous_outpoint_amount" {
+            json!(790334050828u64)
+        } else {
+            json!(9)
+        };
+        unauthorized(&value);
+    }
+    let mut value = original.clone();
+    value["body"]["inputs"][0]["previous_outpoint_script"] =
+        json!(format!("\\x20{}ac", "09".repeat(32)));
+    unauthorized(&value);
+    let mut value = original.clone();
+    value["body"]["inputs"][0]["previous_outpoint_script"] = json!("\\x51");
+    unauthorized(&value);
+    for signature in ["00".to_string(), format!("41{}02", "00".repeat(64))] {
+        let mut value = original.clone();
+        value["body"]["inputs"][0]["signature_script"] = json!(format!("\\x{signature}"));
+        value["receipt"]["rpc_transaction"]["inputs"][0]["signatureScript"] = json!(signature);
+        unauthorized(&value);
+    }
+    for field in ["payload", "transaction_id"] {
+        let mut value = original.clone();
+        value["body"][field] = json!(format!("\\x{}", "00".repeat(32)));
+        unauthorized(&value);
+    }
+    let mut value = original;
+    value["body"]["inputs"][0]["previous_outpoint_index"] = json!(0);
+    unauthorized(&value);
+}
+
 #[tokio::test]
 async fn pure_rooms_keep_original_wire_content_and_normalize_only_channel() {
     use crate::rooms::{RoomEnvelope, Verdict, judge};

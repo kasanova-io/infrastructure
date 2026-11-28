@@ -16,6 +16,7 @@ FILES = [
     "real_kpost.json",
     "real_tip.json",
     "release_tip.json",
+    "pruned_room.json",
     "transaction_tests.rs",
     "unvote_tests.rs",
     "transactional-protocol.patch",
@@ -48,7 +49,8 @@ def prepare(output):
         raise ValueError("fresh build directory required; preserve existing work")
     history = json.loads((HERE / "SOURCE.lock").read_text())
     lock = (
-        history.get("public_channel_notifications_candidate")
+        history.get("public_room_signature_candidate")
+        or history.get("public_channel_notifications_candidate")
         or history.get("bounded_tip_reads_candidate")
         or history.get("native_candidate")
         or history.get("bounded_vote_reads_candidate")

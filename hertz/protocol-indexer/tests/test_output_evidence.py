@@ -233,6 +233,35 @@ class EvidenceTests(PostgresHarness):
         self.assertEqual(consumer.run_one(self.db), 'stored')
         self.assertEqual(seen, [(txid, fingerprint)])
 
+    def test_pruned_room_parent_retains_current_proof_without_fabricated_input0(self):
+        from chats_worker import Resolver
+        row, good = sender_fixture()
+        current = copy.deepcopy(good)
+        current.pop('input0')
+        txid = row['transaction_id']
+        self.db.execute('INSERT INTO protocol_indexer.canonical(transaction_id,revision,source_transaction,ever_accepted) VALUES(%s,1,%s,true)', (txid, Jsonb(row['source_transaction'])))
+        with tempfile.TemporaryDirectory() as root:
+            resolver = Resolver(root, 'https://archive', 'https://archive', 'testnet-10')
+            self.addCleanup(resolver.db.close)
+            def collect(identifier, *, use_cache=True):
+                if identifier == txid.hex():
+                    return copy.deepcopy(current)
+                raise OSError('parent transaction has been pruned')
+            # EvidenceConsumer catches this defer inside its owning transaction.
+            # The checked child survives that commit; no partial parent is made.
+            with self.db.transaction(), patch.object(resolver, 'collect_body', side_effect=collect):
+                with self.assertRaises(EvidencePending):
+                    resolver.resolve_sender(self.db, row)
+            saved = self.db.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s', (txid,)).fetchone()['receipt']
+            self.assertEqual(saved['rpc_transaction'], current['rpc_transaction'])
+            self.assertNotIn('input0', saved)
+            # A later retry reuses the current proof and still cannot claim that
+            # the full historical funding proof was obtained.
+            with self.db.transaction(), patch.object(resolver, 'collect_body', side_effect=collect):
+                with self.assertRaises(EvidencePending):
+                    resolver.resolve_sender(self.db, row)
+            self.assertNotIn('input0', self.db.execute('SELECT receipt FROM protocol_indexer.evidence WHERE transaction_id=%s', (txid,)).fetchone()['receipt'])
+
     def test_forced_tip_and_room_refresh_bypass_bad_cache_then_reuse_repaired_sql(self):
         from chats_worker import Resolver
         for with_input in (False, True):
