@@ -848,7 +848,7 @@
     "scope": "Only the shared native tip-view schema input changes. Existing reader Rust, compatibility patches, native schemas and historical build proofs are preserved. This is future build-context binding, not reader activation."
   },
   "translations_candidate": {
-    "source_manifest": "9181df54743c4d9d5df284d60b920c54d2298cc01a9719f97d2841edaaa52924",
+    "source_manifest": "f2ba9e121010160d93fdf15b69ea277ac7d0a3dc2b1f04c9bba9a3b1f557bb40",
     "files_sha256": {
       "Dockerfile": "932f65d7a940a606db4f57e52908ce1c78ba06525703de6dcfe9b70eed13a0c3",
       "prepare_web.py": "6f9790ecc84525684fd211af42cbc2f55eb22a1bcf1b6ee120803fb0157f037d",
@@ -875,12 +875,12 @@
       "content-search.patch": "6eca1c9ec4584566c40404bc02009108d060e86e994d0311dbec33bcba96794d",
       "poll-results.patch": "472edefc17f71274a511e6db506d95fb8415c7fd54e26f8ca83e2730761a5cb6",
       "alias-links.patch": "57516db31a16961f2ed2aaa26f55c968b816341b73b3f1f4e53794dcef8aab2c",
-      "translations.rs": "e18c9b9d76194e6685624c350dabe90c4eb2dcf9165db36b8660765d2559e38e",
-      "translations_tests.rs": "7005d305b088a629935b9275c6b68580e265d0a5c4b90bede8e7e66210ddfa23",
+      "translations.rs": "e5a10dbb994c1f66c9c4ac954a345b8968ec851e7a9da5689382907dfaf53a1e",
+      "translations_tests.rs": "8a5591971616c3e3993c79fa83216d3be54cbeca96e92083b617d73b0a6a2ece",
       "translations.patch": "55e3f5390d7355b89f4a7fd58ce705d24bc3741af198ea48eea74f5a74fa3ebf"
     },
-    "based_on": "75008a20157a13ea69f8999f4f9218a227f27df049870cdae42b0a9e3a60a2e8",
-    "scope": "On-demand current-public-text Google NMT translation to en/es, independent persistent SQLite cache; no native projection writes or activation",
+    "based_on": "9181df54743c4d9d5df284d60b920c54d2298cc01a9719f97d2841edaaa52924",
+    "scope": "On-demand current-public-text Gemini 3.5 Flash-Lite translation to en/es on unbilled Free tier; explicit provider opt-in, typed completed generations, persistent SQLite cache; no native projection writes or activation",
     "activated": false,
     "live_provider_verified": false
   }

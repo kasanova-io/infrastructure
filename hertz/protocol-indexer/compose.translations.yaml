@@ -3,6 +3,7 @@
 services:
   social-api-unified:
     environment:
+      SOCIAL_TRANSLATION_PROVIDER: gemini-free
       SOCIAL_TRANSLATION_API_KEY_FILE: /run/secrets/social_translation_api_key
       SOCIAL_TRANSLATION_CACHE_PATH: /var/cache/social-translations/cache.sqlite
     secrets: [social_translation_api_key]
@@ -12,7 +13,7 @@ services:
       translation-egress: {}
 secrets:
   social_translation_api_key:
-    file: ${PROTOCOL_TRANSLATION_API_KEY_PATH:?existing private Google Cloud Translation API key file required}
+    file: ${PROTOCOL_TRANSLATION_API_KEY_PATH:?existing private Gemini key from an unbilled Free tier project required}
 volumes:
   social_translations: {}
 networks:
