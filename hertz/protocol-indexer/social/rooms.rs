@@ -7,8 +7,14 @@ use crate::{
     transaction_evidence::{CheckedTransaction, unsigned},
 };
 use anyhow::{Context, Result, ensure};
-use kaspa_consensus_core::network::{NetworkId, NetworkType};
-use kaspa_txscript::extract_script_pub_key_address;
+use kaspa_consensus_core::{
+    hashing::sighash::SigHashReusedValuesUnsync,
+    network::{NetworkId, NetworkType},
+    tx::{PopulatedTransaction, ScriptPublicKey, UtxoEntry},
+};
+use kaspa_txscript::{
+    EngineCtx, EngineFlags, TxScriptEngine, caches::Cache, extract_script_pub_key_address,
+};
 use kaspa_wallet_core::prelude::AddressPrefix;
 use serde_json::Value;
 use sqlx::{Postgres, Row};
@@ -198,12 +204,87 @@ pub(crate) fn sender_if_complete(
         // Ordinary archive admission stores the current transaction first.
         // Request funding enrichment only after checking that current proof;
         // malformed current/input bindings must retain fingerprinted rejection.
-        checked_current_input(network, id, body, receipt)?;
-        return Ok(None);
+        return signed_author_if_complete(network, id, body, receipt);
     }
     // A present but malformed/rejected funding proof still requires a fresh
     // receipt, including explicit null; never downgrade it to missing evidence.
     sender(network, id, body, receipt).map(Some)
+}
+
+fn signed_author_if_complete(
+    network: &str,
+    id: &[u8],
+    body: &Value,
+    receipt: &Value,
+) -> Result<Option<Verdict>> {
+    let (current, source) = checked_current_input(network, id, body, receipt)?;
+    let tx = current.transaction();
+    // An independently verified author signature can outlive the funding
+    // transaction's archive retention. Keep other transaction/script shapes on
+    // the existing full-parent path. This is public-room author authorization,
+    // never a replacement parent receipt or payment/UTXO ownership proof.
+    if tx.version != 0 || tx.inputs.len() != 1 || !source["covenant_id"].is_null() {
+        return Ok(None);
+    }
+    let input = &tx.inputs[0];
+    if source["signature_script"].is_null()
+        || source["previous_outpoint_script"].is_null()
+        || source["previous_outpoint_amount"].is_null()
+        || source["sig_op_count"].is_null()
+    {
+        return Ok(None);
+    }
+    ensure!(
+        canonical_bytes(&source["signature_script"])? == input.signature_script,
+        "public room author signature differs from canonical input"
+    );
+    let script = canonical_bytes(&source["previous_outpoint_script"])?;
+    if script.len() != 34
+        || script[0] != 0x20
+        || script[33] != 0xac
+        || input.signature_script.len() != 66
+        || input.signature_script[0] != 0x41
+        || input.signature_script[65] != 0x01
+        || unsigned(&source["sig_op_count"])? != 1
+        || input.compute_commit.sig_op_count() != Some(1)
+    {
+        return Ok(None);
+    }
+    let amount = unsigned(&source["previous_outpoint_amount"])?;
+    ensure!(amount > 0, "public room author amount must be positive");
+    // Version zero is an explicit standard P2PK signing template. Simply does
+    // not retain the original prevout's script version. Executing this template
+    // proves the key holder authorized the exact current payload, outpoint,
+    // amount and outputs; it makes no claim about that historical version.
+    let template = ScriptPublicKey::from_vec(0, script);
+    let populated = PopulatedTransaction::new(
+        tx,
+        vec![UtxoEntry::new(amount, template.clone(), 0, false, None)],
+    );
+    let cache = Cache::new(0);
+    let reused = SigHashReusedValuesUnsync::new();
+    let ctx = EngineCtx::new(&cache).with_reused(&reused);
+    TxScriptEngine::from_transaction_input(
+        &populated,
+        input,
+        0,
+        &populated.entries[0],
+        ctx,
+        EngineFlags::default(),
+    )
+    .execute()
+    .context("invalid public room author signature")?;
+    let prefix = match NetworkId::from_str(network)?.network_type() {
+        NetworkType::Mainnet => AddressPrefix::Mainnet,
+        NetworkType::Testnet => AddressPrefix::Testnet,
+        _ => anyhow::bail!("unsupported configured room network"),
+    };
+    let author = extract_script_pub_key_address(&template, prefix)?.to_string();
+    let output = tx.outputs.first().context("room output0 missing")?;
+    let recipient = extract_script_pub_key_address(&output.script_public_key, prefix)
+        .ok()
+        .map(|value| value.to_string());
+    Ok(Some(judge(Some(&author), recipient.as_deref())))
 }
 
 pub(crate) async fn reconcile(

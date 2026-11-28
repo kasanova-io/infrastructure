@@ -256,6 +256,19 @@ class Resolver(history.History):
         self._resolve_public(conn, row, False, rejected_fingerprint)
 
     def resolve_sender(self, conn, row, rejected_fingerprint=None):
+        # Preserve the checked current transaction even when its old funding
+        # body has been pruned. The native public-room verifier can independently
+        # validate its canonical author signature; this never invents input0 or
+        # acknowledges an incomplete parent proof. JSONB merging preserves any
+        # existing funding proof, including malformed proofs that need repair.
+        # Existing/rejected proofs keep their original refresh fingerprint and
+        # CAS path; priming them would change that fingerprint before repair.
+        exists = conn.execute(
+            'SELECT 1 FROM protocol_indexer.evidence WHERE transaction_id=%s',
+            (row['transaction_id'],),
+        ).fetchone()
+        if exists is None:
+            self._resolve_public(conn, row, False, rejected_fingerprint)
         self._resolve_public(conn, row, True, rejected_fingerprint)
 
     def _resolve_public(self, conn, row, with_input, rejected_fingerprint):
